@@ -110,18 +110,7 @@
   /* --- Calibration screen --- */
   #calibrationScreen { flex: 1; display: none; flex-direction: column; min-height: 0; }
   #calSensorSlot, #playSensorSlot { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-  .checklist { display: flex; flex-direction: column; gap: 8px; margin: 10px 0; flex-shrink: 0; }
-  .check-item {
-    display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: 12px;
-    background: #1a2436; font-size: 14px; font-weight: 600;
-  }
-  .check-item .mark {
-    width: 22px; height: 22px; border-radius: 50%; background: #2a3650; flex-shrink: 0;
-    display: flex; align-items: center; justify-content: center; font-size: 13px; transition: background 0.2s;
-  }
-  .check-item.done .mark { background: #4ade80; color: #0b1220; }
-  .check-item.done { opacity: 0.7; }
-  #calibrationHint { text-align: center; font-size: 13px; opacity: 0.7; margin: 6px 0; min-height: 18px; }
+  #calibrationHint { text-align: center; font-size: 15px; opacity: 0.85; margin: 10px 0; min-height: 18px; }
   .calibration-actions { display: flex; gap: 10px; margin-top: 10px; flex-shrink: 0; }
   .calibration-actions .btn { flex: 1; padding: 12px 0; font-size: 15px; }
 
@@ -264,13 +253,7 @@
     <!-- sensorPanel (the actual camera-view/tilt-zone elements) is moved in here by JS -->
     <div id="calSensorSlot"></div>
 
-    <div id="calibrationHint">Try each move below — we'll check it off once we see it.</div>
-    <div class="checklist">
-      <div class="check-item" id="checkLeft"><span class="mark">1</span><span id="checkLeftLabel">Step / lean left</span></div>
-      <div class="check-item" id="checkRight"><span class="mark">2</span><span id="checkRightLabel">Step / lean right</span></div>
-      <div class="check-item" id="checkJump"><span class="mark">3</span><span>Jump</span></div>
-      <div class="check-item" id="checkPunch"><span class="mark">4</span><span>Punch</span></div>
-    </div>
+    <div id="calibrationHint">👀 Look at your TV — it'll walk you through each move one at a time.</div>
 
     <div class="calibration-actions">
       <button class="btn secondary" id="calSkipBtn">Skip setup</button>
