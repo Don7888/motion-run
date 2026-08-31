@@ -12,36 +12,54 @@
 // backup once actually playing.
 //
 // During the guided calibration screen, gestures are detected exactly the
-// same way as in real play, but routed to the on-screen checklist instead
-// of the TV — otherwise a practice jump would prematurely start the run
-// (the TV starts the game on its first real jump/punch input). See
-// `actionHandlers` below for that indirection.
+// same way as in real play, but routed to the TV's step-by-step walkthrough
+// instead of sending real game input — otherwise a practice jump would
+// prematurely start the run (the TV starts the game on its first real
+// jump/punch input). See `actionHandlers` below for that indirection, and
+// `sendCalibration()` for how progress reaches the TV.
+//
+// LANE CONTROL IS ABSOLUTE, NOT RELATIVE: both camera and hold-phone mode
+// continuously track which of 3 zones (left/center/right) the player's
+// body is currently in and tell the TV to put the character in the
+// matching lane — see `computeZone()`. Returning to a normal, centered
+// stance always puts the character back in the center lane; no deliberate
+// "step back" gesture is needed. A little hysteresis (ENTER vs EXIT
+// thresholds) stops the lane flickering right at the zone boundary.
 //
 // NOTE ON TUNING: none of the gesture-detection thresholds (camera or
 // accelerometer) were tuned against a real phone or camera feed — this
 // build environment has neither attached. They're reasoned starting
-// points; the calibration screen exists specifically so you can see
-// whether they need adjusting on your actual device before playing.
+// points, kept deliberately forgiving (biased toward triggering too
+// easily rather than not at all) since this is a fun family game, not a
+// precision instrument. The calibration screen exists specifically so you
+// can see what still needs adjusting on your actual device before playing.
 
 (() => {
   // ==== Tunable thresholds ================================================
-  const POSE_MIN_SCORE = 0.35;
-  const LANE_TRIGGER_FRAC = 0.10;
-  const LANE_RESET_FRAC = 0.045;
-  const JUMP_TRIGGER_TORSO_FRAC = 0.55;
-  const JUMP_COOLDOWN_MS = 550;
-  const PUNCH_EXTENSION_FRAC = 0.75;
-  const PUNCH_VELOCITY_TORSO_FRAC = 3.2;
-  const PUNCH_COOLDOWN_MS = 500;
+  const POSE_MIN_SCORE = 0.25;
+  // Lane zones (camera mode): fraction of frame width the hips must be
+  // offset from center to count as "in" the left/right zone (ENTER), and
+  // how far back toward center they must return to leave it (EXIT — kept
+  // smaller than ENTER so a normal stance reliably re-centers you without
+  // needing an exaggerated opposite step).
+  const LANE_ENTER_FRAC = 0.11;
+  const LANE_EXIT_FRAC = 0.05;
+  const JUMP_TRIGGER_TORSO_FRAC = 0.28;
+  const JUMP_COOLDOWN_MS = 500;
+  const PUNCH_EXTENSION_FRAC = 0.42;
+  const PUNCH_VELOCITY_TORSO_FRAC = 1.5;
+  const PUNCH_COOLDOWN_MS = 450;
   const POSE_TARGET_FPS = 20;
 
-  const TILT_TRIGGER_DEG = 18;
-  const TILT_RESET_DEG = 8;
-  const MOTION_JUMP_TRIGGER = 20;
-  const MOTION_PUNCH_TRIGGER = 13;
+  // Lane zones (hold-phone mode): same ENTER/EXIT hysteresis idea, in
+  // degrees of phone tilt from the calibrated baseline.
+  const TILT_ENTER_DEG = 16;
+  const TILT_EXIT_DEG = 6;
+  const MOTION_JUMP_TRIGGER = 14;
+  const MOTION_PUNCH_TRIGGER = 9;
   const MOTION_ROTATION_LOW = 250;
-  const MOTION_JUMP_COOLDOWN_MS = 550;
-  const MOTION_PUNCH_COOLDOWN_MS = 550;
+  const MOTION_JUMP_COOLDOWN_MS = 500;
+  const MOTION_PUNCH_COOLDOWN_MS = 450;
   const CROSS_TALK_LOCK_MS = 150;
   const GRAVITY_LOWPASS = 0.85;
 
@@ -105,8 +123,6 @@
   const calRecenterBtn = document.getElementById('calRecenterBtn');
   const calSensorSlot = document.getElementById('calSensorSlot');
   const calibrationHint = document.getElementById('calibrationHint');
-  const checkLeftLabel = document.getElementById('checkLeftLabel');
-  const checkRightLabel = document.getElementById('checkRightLabel');
   const calSkipBtn = document.getElementById('calSkipBtn');
   const calStartBtn = document.getElementById('calStartBtn');
 
@@ -262,6 +278,10 @@
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     ws.send(JSON.stringify({ type: 'character', ...character }));
   }
+  function sendCalibration(event, extra) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: 'calibration', event, ...extra }));
+  }
 
   joinBtn.addEventListener('click', () => {
     const code = codeInput.value.trim();
@@ -287,20 +307,19 @@
     moveSensorPanelTo(calSensorSlot);
     showScreen(calibrationScreen);
     await setMode(mode);
-    updateCalLabels(currentMode);
+    sendCalibration('start', { mode: currentMode });
   }
 
+  // The step-by-step walkthrough itself lives on the TV (see tv/game.js) —
+  // this screen just detects each move (same detectors as real play, routed
+  // through calHandlers below) and tells the TV which one just happened.
   const calState = { left: false, right: false, jump: false, punch: false };
-  const CAL_ITEM_IDS = { left: 'checkLeft', right: 'checkRight', jump: 'checkJump', punch: 'checkPunch' };
-  const CAL_ITEM_NUMS = { left: '1', right: '2', jump: '3', punch: '4' };
 
   function markCalDone(key) {
     if (calState[key]) return;
     calState[key] = true;
-    const el = document.getElementById(CAL_ITEM_IDS[key]);
-    el.classList.add('done');
-    el.querySelector('.mark').textContent = '✓';
     if (navigator.vibrate) navigator.vibrate(15);
+    sendCalibration('step', { step: key });
     if (Object.values(calState).every(Boolean)) {
       calStartBtn.textContent = 'Start Run ✓';
       calibrationHint.textContent = 'All set! Tap Start Run whenever you\'re ready.';
@@ -308,21 +327,12 @@
   }
   function resetCalibration() {
     Object.keys(calState).forEach((k) => (calState[k] = false));
-    Object.entries(CAL_ITEM_IDS).forEach(([key, id]) => {
-      const el = document.getElementById(id);
-      el.classList.remove('done');
-      el.querySelector('.mark').textContent = CAL_ITEM_NUMS[key];
-    });
     calStartBtn.textContent = 'Start Run →';
-    calibrationHint.textContent = "Try each move below — we'll check it off once we see it.";
-  }
-  function updateCalLabels(mode) {
-    const verb = mode === 'camera' ? 'Step' : 'Lean';
-    checkLeftLabel.textContent = `${verb} left`;
-    checkRightLabel.textContent = `${verb} right`;
+    calibrationHint.textContent = "👀 Look at your TV — it'll walk you through each move one at a time.";
   }
 
   function finishCalibration() {
+    sendCalibration('done');
     actionHandlers = realHandlers;
     moveSensorPanelTo(playSensorSlot);
     showScreen(playScreen);
@@ -334,8 +344,10 @@
     if (currentMode === 'camera') {
       poseCenterX = null;
       poseHipYBaseline = null;
+      cameraLaneZone = 0;
     } else {
       baselineGamma = null;
+      tiltLaneZone = 0;
     }
     showToast('Recentered!');
   }
@@ -371,11 +383,16 @@
 
   const realHandlers = {
     lane: (dir) => sendInput('lane', dir),
+    laneZone: (zone) => sendInput('lane_set', zone),
     jump: () => fireJump(),
     punch: () => firePunch(),
   };
   const calHandlers = {
     lane: (dir) => markCalDone(dir < 0 ? 'left' : 'right'),
+    laneZone: (zone) => {
+      if (zone === -1) markCalDone('left');
+      else if (zone === 1) markCalDone('right');
+    },
     jump: () => markCalDone('jump'),
     punch: () => markCalDone('punch'),
   };
@@ -441,8 +458,32 @@
   let poseLoopRunning = false;
   let poseCenterX = null;
   let poseHipYBaseline = null;
-  let laneArmedCam = true;
+  // Absolute lane zone the player's body is currently in: -1 left, 0
+  // center, 1 right. Recomputed every frame from raw position (with
+  // ENTER/EXIT hysteresis), not stepped/toggled — so standing back in a
+  // neutral stance always lands you back at 0 (center lane) on its own.
+  let cameraLaneZone = 0;
   let lastWrist = { left: null, right: null };
+
+  // Shared absolute-zone hysteresis: harder to leave center (ENTER) than to
+  // return to it (EXIT), so a normal centered stance reliably snaps you
+  // back to lane 0 without needing an exaggerated opposite-direction step.
+  function computeZone(p, currentZone, enter, exit) {
+    if (currentZone === 0) {
+      if (p > enter) return -1;
+      if (p < -enter) return 1;
+      return 0;
+    }
+    if (currentZone === -1) {
+      if (p < -enter) return 1;
+      if (p < exit) return 0;
+      return -1;
+    }
+    // currentZone === 1
+    if (p > enter) return -1;
+    if (p > -exit) return 0;
+    return 1;
+  }
 
   function loadScript(src) {
     return new Promise((resolve, reject) => {
@@ -553,20 +594,22 @@
     const torsoScale = Math.max(20, dist(shoulderMid, hipMid));
     if (!detectionEnabled) return;
 
-    // Lane (step left/right) — see the sign-convention note in README/comments below.
+    // Lane (absolute: which zone is the player's body in right now).
+    // NOTE the sign convention: the camera feed is mirrored for display
+    // (see `transform: scaleX(-1)` in CSS) so it feels like a selfie
+    // mirror, but pose detection runs on the RAW (unmirrored) video frame.
+    // So the player's real left is +x in raw coordinates, meaning a
+    // positive dx (hips moved toward larger raw-x) corresponds to the
+    // player's own left, hence zone -1.
     if (poseCenterX === null) poseCenterX = hipMid.x;
     const dx = hipMid.x - poseCenterX;
     const frameW = cameraVideo.videoWidth;
     updateLaneMarker(dx, frameW);
 
-    if (laneArmedCam && dx > LANE_TRIGGER_FRAC * frameW) {
-      actionHandlers.lane(-1); // stepped to your left
-      laneArmedCam = false;
-    } else if (laneArmedCam && dx < -LANE_TRIGGER_FRAC * frameW) {
-      actionHandlers.lane(1); // stepped to your right
-      laneArmedCam = false;
-    } else if (!laneArmedCam && Math.abs(dx) < LANE_RESET_FRAC * frameW) {
-      laneArmedCam = true;
+    const nextZone = computeZone(dx / frameW, cameraLaneZone, LANE_ENTER_FRAC, LANE_EXIT_FRAC);
+    if (nextZone !== cameraLaneZone) {
+      cameraLaneZone = nextZone;
+      actionHandlers.laneZone(cameraLaneZone);
     }
 
     // Jump (hips rise)
@@ -612,7 +655,7 @@
   function updateLaneMarker(dx, frameW) {
     const frac = Math.max(-1, Math.min(1, dx / (frameW * 0.35)));
     laneMarker.style.left = `${50 - frac * 50}%`;
-    laneMarker.style.background = Math.abs(dx) > LANE_TRIGGER_FRAC * frameW ? '#ffd166' : '#6ee7ff';
+    laneMarker.style.background = Math.abs(dx) > LANE_ENTER_FRAC * frameW ? '#ffd166' : '#6ee7ff';
   }
 
   function drawSkeleton(keypoints) {
@@ -643,7 +686,8 @@
   let gravity = { x: 0, y: 0, z: 0 };
   let gravityInit = false;
   let baselineGamma = null;
-  let laneArmed = true;
+  // Same absolute-zone idea as cameraLaneZone, in degrees of tilt.
+  let tiltLaneZone = 0;
   let motionListenersAttached = false;
 
   function needsIOSPermission() {
@@ -686,19 +730,17 @@
 
     const clamped = Math.max(-45, Math.min(45, diff));
     tiltMarker.style.transform = `translate(calc(-50% + ${clamped * 3}px), -50%)`;
-    tiltMarker.style.background = Math.abs(diff) > TILT_TRIGGER_DEG ? '#ffd166' : '#6ee7ff';
+    tiltMarker.style.background = Math.abs(diff) > TILT_ENTER_DEG ? '#ffd166' : '#6ee7ff';
 
     if (!detectionEnabled) return;
-    if (laneArmed && diff > TILT_TRIGGER_DEG) {
-      actionHandlers.lane(1);
-      laneArmed = false;
+    // Same sign convention as before this rewrite: leaning right (diff > 0)
+    // is zone 1, leaning left (diff < 0) is zone -1 — computeZone()'s
+    // default polarity is the other way round, so we negate diff here.
+    const nextZone = computeZone(-diff, tiltLaneZone, TILT_ENTER_DEG, TILT_EXIT_DEG);
+    if (nextZone !== tiltLaneZone) {
+      tiltLaneZone = nextZone;
+      actionHandlers.laneZone(tiltLaneZone);
       pulseAction(tiltZone);
-    } else if (laneArmed && diff < -TILT_TRIGGER_DEG) {
-      actionHandlers.lane(-1);
-      laneArmed = false;
-      pulseAction(tiltZone);
-    } else if (!laneArmed && Math.abs(diff) < TILT_RESET_DEG) {
-      laneArmed = true;
     }
   }
 
