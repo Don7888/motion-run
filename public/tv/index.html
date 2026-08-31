@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Motion Run — TV</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #0b1220; color: #fff;
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    overflow: hidden;
+  }
+  #gameCanvas { display: block; width: 100vw; height: 100vh; }
+
+  #hud {
+    position: fixed; inset: 0; pointer-events: none;
+    display: flex; flex-direction: column; justify-content: space-between;
+  }
+  .top-bar {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    padding: 28px 40px; font-size: 28px; font-weight: 700;
+    text-shadow: 0 2px 8px rgba(0,0,0,0.6);
+  }
+  .lives { display: flex; gap: 8px; font-size: 32px; }
+  .heart.lost { opacity: 0.25; filter: grayscale(1); }
+
+  .overlay-panel {
+    pointer-events: auto;
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    background: rgba(10, 16, 30, 0.88);
+    border: 2px solid rgba(120, 200, 255, 0.4);
+    border-radius: 24px;
+    padding: 40px 56px;
+    text-align: center;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+    max-width: 640px;
+  }
+  .overlay-panel h1 { font-size: 44px; margin: 0 0 12px; }
+  .overlay-panel p { font-size: 22px; line-height: 1.5; opacity: 0.9; margin: 8px 0; }
+  .room-code {
+    display: inline-block; margin: 18px 0; padding: 14px 28px;
+    font-size: 48px; font-weight: 800; letter-spacing: 8px;
+    background: linear-gradient(135deg, #6ee7ff, #7c8cff);
+    color: #0b1220; border-radius: 16px;
+  }
+  .hint { font-size: 18px; opacity: 0.75; }
+  .pulse { animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.55} }
+
+  .score-big { font-size: 64px; font-weight: 800; margin: 8px 0 24px; color: #6ee7ff; }
+  .action-btn {
+    margin-top: 10px; font-size: 20px; padding: 12px 24px; border-radius: 12px;
+    border: none; background: #6ee7ff; color: #0b1220; font-weight: 700; cursor: pointer;
+  }
+
+  #combo {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    font-size: 38px; font-weight: 800; color: #ffd166;
+    text-shadow: 0 2px 10px rgba(0,0,0,0.7);
+    opacity: 0; transition: opacity 0.15s;
+  }
+  #flash {
+    position: fixed; inset: 0; background: #ff3b3b; opacity: 0;
+    pointer-events: none; transition: opacity 0.1s;
+  }
+</style>
+</head>
+<body>
+  <canvas id="gameCanvas"></canvas>
+  <div id="flash"></div>
+
+  <div id="hud">
+    <div class="top-bar">
+      <div>Score<br /><span id="scoreVal" style="font-size:36px;">0</span></div>
+      <div class="lives" id="lives"></div>
+    </div>
+    <div style="height:1px"></div>
+  </div>
+
+  <div id="combo"></div>
+
+  <div id="pairingPanel" class="overlay-panel">
+    <h1>Motion Run</h1>
+    <p>On your phone, open:</p>
+    <p style="font-size:26px; font-weight:700;" id="playUrl">…/play</p>
+    <p>and enter this code:</p>
+    <div class="room-code" id="roomCode">······</div>
+    <p class="hint pulse" id="pairingHint">Waiting for your phone to connect…</p>
+  </div>
+
+  <div id="readyPanel" class="overlay-panel" style="display:none;">
+    <h1>Player connected! 🎉</h1>
+    <p>Get some space to move. Lean left/right to change lanes, jump to hop over hurdles, and punch to smash crates.</p>
+    <p class="hint pulse">Sending a JUMP or PUNCH from your phone starts the run…</p>
+  </div>
+
+  <div id="gameOverPanel" class="overlay-panel" style="display:none;">
+    <h1>Run Over!</h1>
+    <div class="score-big"><span id="finalScore">0</span> pts</div>
+    <p class="hint pulse">Jump or punch on your phone to run again</p>
+  </div>
+
+  <script type="module" src="./game.js"></script>
+</body>
+</html>
