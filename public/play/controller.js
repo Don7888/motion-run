@@ -746,8 +746,15 @@
     }
   }
 
-  // Prevent double-tap-to-zoom / accidental scrolling during play.
-  document.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
+  // Prevent double-tap-to-zoom / accidental scrolling during play — but
+  // NOT inside #characterScreen, which relies on native touch scrolling
+  // (overflow-y: auto) to reach Hat/Shirt/Continue below the fold on
+  // shorter phone screens. Every other screen is a fixed, non-scrolling
+  // layout, so blocking touchmove there is safe and intentional.
+  document.addEventListener('touchmove', (e) => {
+    if (e.target.closest('#characterScreen')) return;
+    e.preventDefault();
+  }, { passive: false });
 
   showScreen(characterScreen);
 })();
