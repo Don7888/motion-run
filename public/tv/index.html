@@ -64,6 +64,11 @@
     position: fixed; inset: 0; background: #ff3b3b; opacity: 0;
     pointer-events: none; transition: opacity 0.1s;
   }
+
+  .cal-move-icon { font-size: 96px; line-height: 1; margin: 6px 0; }
+  .cal-move-text { font-size: 46px; font-weight: 800; margin: 4px 0 10px; color: #6ee7ff; }
+  .cal-dots { font-size: 26px; margin-top: 6px; letter-spacing: 4px; }
+  .cal-step-counter { font-size: 18px; opacity: 0.75; margin-bottom: 4px; }
 </style>
 </head>
 <body>
@@ -93,6 +98,15 @@
     <h1>Player connected! 🎉</h1>
     <p>Get some space to move. Lean left/right to change lanes, jump to hop over hurdles, and punch to smash crates.</p>
     <p class="hint pulse">Sending a JUMP or PUNCH from your phone starts the run…</p>
+  </div>
+
+  <div id="calibrationPanel" class="overlay-panel" style="display:none;">
+    <h1>Quick Setup</h1>
+    <p class="cal-step-counter" id="calStepCounter">Step 1 of 4</p>
+    <div class="cal-move-icon" id="calMoveIcon">⬅️</div>
+    <div class="cal-move-text" id="calMoveText">Step LEFT</div>
+    <p class="hint">Copy the move shown here to check it off</p>
+    <div class="cal-dots" id="calDots"></div>
   </div>
 
   <div id="gameOverPanel" class="overlay-panel" style="display:none;">
