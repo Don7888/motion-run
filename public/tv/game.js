@@ -311,6 +311,11 @@ const livesEl = document.getElementById('lives');
 const pairingPanel = document.getElementById('pairingPanel');
 const readyPanel = document.getElementById('readyPanel');
 const gameOverPanel = document.getElementById('gameOverPanel');
+const calibrationPanel = document.getElementById('calibrationPanel');
+const calStepCounter = document.getElementById('calStepCounter');
+const calMoveIcon = document.getElementById('calMoveIcon');
+const calMoveText = document.getElementById('calMoveText');
+const calDots = document.getElementById('calDots');
 const roomCodeEl = document.getElementById('roomCode');
 const playUrlEl = document.getElementById('playUrl');
 const pairingHint = document.getElementById('pairingHint');
@@ -333,6 +338,74 @@ function showPanel(which) {
   pairingPanel.style.display = which === 'pairing' ? 'block' : 'none';
   readyPanel.style.display = which === 'ready' ? 'block' : 'none';
   gameOverPanel.style.display = which === 'gameover' ? 'block' : 'none';
+  calibrationPanel.style.display = which === 'calibrating' ? 'block' : 'none';
+}
+
+// A player calibrating on the phone shouldn't fight the "Player connected!"
+// panel for screen space — calibrating overrides whatever `state.phase`
+// would otherwise show, until the phone signals it's done.
+function syncPanel() {
+  if (calibrating) { showPanel('calibrating'); return; }
+  if (state.phase === 'pairing') showPanel('pairing');
+  else if (state.phase === 'ready') showPanel('ready');
+  else if (state.phase === 'gameover') showPanel('gameover');
+  else showPanel(null);
+}
+
+// =========================================================================
+// GUIDED CALIBRATION — walked through here on the TV, one move at a time,
+// while the phone (which owns the camera/motion sensors) detects each move
+// and reports progress over WebSocket. See README "The guided calibration
+// screen" for the full flow.
+// =========================================================================
+const CAL_ORDER = ['left', 'right', 'jump', 'punch'];
+const CAL_META = {
+  left: { icon: '⬅️', textCamera: 'Step LEFT', textHold: 'Lean LEFT' },
+  right: { icon: '➡️', textCamera: 'Step RIGHT', textHold: 'Lean RIGHT' },
+  jump: { icon: '⬆️', textCamera: 'JUMP', textHold: 'JUMP' },
+  punch: { icon: '👊', textCamera: 'PUNCH', textHold: 'PUNCH' },
+};
+let calibrating = false;
+let calMode = 'camera';
+let calIndex = 0;
+let calDone = { left: false, right: false, jump: false, punch: false };
+
+function renderCalDots() {
+  calDots.textContent = CAL_ORDER.map((key, i) => (calDone[key] ? '✅' : i === calIndex ? '🔵' : '⚪')).join(' ');
+}
+function showCalibrationStep() {
+  if (calIndex >= CAL_ORDER.length) {
+    calMoveIcon.textContent = '🎉';
+    calMoveText.textContent = 'All set!';
+    calStepCounter.textContent = 'Nice work!';
+    renderCalDots();
+    return;
+  }
+  const meta = CAL_META[CAL_ORDER[calIndex]];
+  calMoveIcon.textContent = meta.icon;
+  calMoveText.textContent = calMode === 'hold' ? meta.textHold : meta.textCamera;
+  calStepCounter.textContent = `Step ${calIndex + 1} of ${CAL_ORDER.length}`;
+  renderCalDots();
+}
+function startCalibrationUI(mode) {
+  calibrating = true;
+  calMode = mode || 'camera';
+  calIndex = 0;
+  calDone = { left: false, right: false, jump: false, punch: false };
+  showCalibrationStep();
+  syncPanel();
+}
+function advanceCalibrationUI(step) {
+  if (!calibrating || !(step in calDone) || calDone[step]) return;
+  calDone[step] = true;
+  // Advance to the next not-yet-done step — keeps things moving forward
+  // even if the player's attempts land slightly out of the shown order.
+  while (calIndex < CAL_ORDER.length && calDone[CAL_ORDER[calIndex]]) calIndex++;
+  showCalibrationStep();
+}
+function finishCalibrationUI() {
+  calibrating = false;
+  syncPanel();
 }
 
 function popCombo(text) {
@@ -366,13 +439,14 @@ function resetRun() {
 function startPlaying() {
   resetRun();
   state.phase = 'playing';
+  calibrating = false;
   showPanel(null);
 }
 
 function gameOver() {
   state.phase = 'gameover';
   finalScoreEl.textContent = Math.floor(state.score);
-  showPanel('gameover');
+  syncPanel();
 }
 
 // ---------------------------------------------------------------------
@@ -396,15 +470,20 @@ ws.addEventListener('message', (ev) => {
   } else if (msg.type === 'controller_connected') {
     if (msg.count > 0 && (state.phase === 'pairing')) {
       state.phase = 'ready';
-      showPanel('ready');
+      syncPanel();
     } else if (msg.count === 0 && state.phase !== 'playing') {
       state.phase = 'pairing';
-      showPanel('pairing');
+      calibrating = false;
+      syncPanel();
     }
   } else if (msg.type === 'input') {
     handleInput(msg);
   } else if (msg.type === 'character') {
     dressPlayer(msg);
+  } else if (msg.type === 'calibration') {
+    if (msg.event === 'start') startCalibrationUI(msg.mode);
+    else if (msg.event === 'step') advanceCalibrationUI(msg.step);
+    else if (msg.event === 'done') finishCalibrationUI();
   } else if (msg.type === 'error') {
     pairingHint.textContent = msg.message;
   }
@@ -426,8 +505,16 @@ function handleInput(msg) {
   if (state.phase !== 'playing') return;
 
   if (msg.action === 'lane') {
+    // Relative one-lane nudge (used by tap-to-steer on the phone).
     const dir = msg.value > 0 ? 1 : -1;
     state.lane = Math.max(0, Math.min(2, state.lane + dir));
+  } else if (msg.action === 'lane_set') {
+    // Absolute lane target (used by camera/hold-phone body tracking) —
+    // msg.value is -1/0/1 for left/center/right, so the character always
+    // sits wherever the player's body currently is, including snapping
+    // straight back to the center lane the moment they return to a
+    // neutral stance, with no extra "return" gesture required.
+    state.lane = Math.max(0, Math.min(2, 1 + msg.value));
   } else if (msg.action === 'jump') {
     if (state.grounded) {
       state.grounded = false;
