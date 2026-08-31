@@ -196,6 +196,15 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    // Guided-calibration progress (start / step / done) — the phone owns
+    // the camera/motion sensors and detects each move, but the walkthrough
+    // itself is displayed on the TV, so every event gets relayed there.
+    if (msg.type === 'calibration' && ws.role === 'controller' && ws.roomCode) {
+      const room = rooms.get(ws.roomCode);
+      if (room && room.tv) send(room.tv, msg);
+      return;
+    }
+
     // Optional: TV -> controller feedback (e.g. game-over, buzz cue).
     if (msg.type === 'feedback' && ws.role === 'tv' && ws.roomCode) {
       const room = rooms.get(ws.roomCode);
