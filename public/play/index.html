@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>Motion Run — Controller</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; user-select: none; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #0b1220; color: #fff;
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    overscroll-behavior: none; touch-action: manipulation;
+  }
+  #app { display: flex; flex-direction: column; height: 100%; padding: env(safe-area-inset-top) 20px env(safe-area-inset-bottom); }
+
+  h1 { font-size: 22px; text-align: center; margin: 18px 0 4px; }
+  h2 { font-size: 16px; margin: 0 0 8px; opacity: 0.9; }
+  .subtitle { text-align: center; opacity: 0.7; font-size: 14px; margin-bottom: 18px; }
+
+  .btn {
+    font-size: 18px; font-weight: 700; padding: 14px 32px; border-radius: 14px;
+    border: none; background: #6ee7ff; color: #0b1220; cursor: pointer;
+  }
+  .btn:active { transform: scale(0.97); }
+  .btn.secondary { background: #2a3650; color: #fff; }
+  .btn.small { font-size: 14px; padding: 10px 18px; }
+
+  /* --- Character creator screen --- */
+  #characterScreen { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow-y: auto; padding-bottom: 8px; }
+  .avatar-preview-wrap { display: flex; justify-content: center; margin: 4px 0 14px; flex-shrink: 0; }
+  .avatar-stage {
+    width: 130px; height: 170px; position: relative;
+    background: radial-gradient(circle at 50% 30%, #1a2440, #0b1220);
+    border-radius: 18px; border: 2px solid rgba(120,200,255,0.25);
+  }
+  .avatar-body {
+    position: absolute; left: 50%; bottom: 14px; width: 74px; height: 58px;
+    border-radius: 16px 16px 8px 8px; transform: translateX(-50%); background: #ff5a5f;
+  }
+  .avatar-head {
+    position: absolute; left: 50%; bottom: 62px; width: 62px; height: 62px;
+    border-radius: 50%; transform: translateX(-50%); background: #ffd7b0; overflow: visible;
+  }
+  .avatar-hair { position: absolute; left: 50%; transform: translateX(-50%); background: #3b2a1a; }
+  .hair-bald { display: none; }
+  .hair-short { top: -6px; width: 66px; height: 34px; border-radius: 50% 50% 8px 8px; }
+  .hair-afro { top: -20px; width: 82px; height: 66px; border-radius: 50%; }
+  .hair-spiky {
+    top: -18px; width: 70px; height: 30px;
+    clip-path: polygon(0% 100%, 10% 20%, 20% 100%, 30% 10%, 40% 100%, 50% 15%, 60% 100%, 70% 10%, 80% 100%, 90% 20%, 100% 100%);
+  }
+  .hair-pony {
+    top: -6px; width: 66px; height: 34px; border-radius: 50% 50% 8px 8px;
+  }
+  .hair-pony::after {
+    content: ''; position: absolute; right: -10px; top: 10px; width: 14px; height: 34px;
+    background: inherit; border-radius: 8px; transform: rotate(25deg);
+  }
+  .avatar-hat { position: absolute; left: 50%; transform: translateX(-50%); background: #ff5a5f; }
+  .hat-none { display: none; }
+  .hat-party {
+    top: -40px; width: 0; height: 0; border-left: 22px solid transparent; border-right: 22px solid transparent;
+    border-bottom: 40px solid; background: none; border-bottom-color: #ff5a5f;
+  }
+  .hat-party::after {
+    content: ''; position: absolute; top: -46px; left: -5px; width: 10px; height: 10px; border-radius: 50%; background: #fff;
+  }
+  .hat-top { top: -34px; width: 44px; height: 32px; border-radius: 4px 4px 0 0; }
+  .hat-top::after { content: ''; position: absolute; bottom: -6px; left: -10px; width: 64px; height: 8px; border-radius: 4px; background: inherit; }
+  .hat-cap { top: -18px; width: 68px; height: 26px; border-radius: 50% 50% 0 0; }
+  .hat-cap::after { content: ''; position: absolute; bottom: 2px; left: -6px; width: 30px; height: 8px; border-radius: 0 0 12px 12px; background: inherit; }
+  .hat-propeller { top: -18px; width: 68px; height: 26px; border-radius: 50% 50% 0 0; }
+  .hat-propeller::after {
+    content: ''; position: absolute; top: -14px; left: 50%; width: 26px; height: 5px; margin-left: -13px;
+    background: #ddd; border-radius: 3px; animation: spin 0.6s linear infinite; transform-origin: center;
+  }
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+  .picker-section { margin-bottom: 14px; flex-shrink: 0; }
+  .option-row { display: flex; gap: 8px; overflow-x: auto; padding: 2px; }
+  .option-chip {
+    flex-shrink: 0; padding: 10px 14px; border-radius: 12px; border: 2px solid transparent;
+    background: #1a2436; color: #fff; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap;
+  }
+  .option-chip.active { border-color: #6ee7ff; background: #24314f; color: #6ee7ff; }
+  .color-row { display: flex; gap: 8px; overflow-x: auto; padding: 4px 2px; }
+  .color-swatch {
+    flex-shrink: 0; width: 30px; height: 30px; border-radius: 50%; border: 2px solid transparent; cursor: pointer;
+  }
+  .color-swatch.active { border-color: #fff; box-shadow: 0 0 0 2px #6ee7ff; }
+
+  .character-actions { display: flex; gap: 10px; margin-top: 4px; flex-shrink: 0; }
+  .character-actions .btn { flex: 1; padding: 12px 0; font-size: 15px; }
+
+  /* --- Join screen --- */
+  #joinScreen { flex: 1; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 16px; }
+  #codeInput {
+    font-size: 42px; letter-spacing: 14px; text-align: center; width: 240px;
+    padding: 14px 0 14px 14px; border-radius: 14px; border: none;
+    background: #1a2436; color: #fff; font-weight: 800;
+  }
+  #codeInput:focus { outline: 2px solid #6ee7ff; }
+  #joinError { color: #ff8a8a; min-height: 20px; font-size: 14px; }
+
+  /* --- Camera permission screen --- */
+  #permScreen { flex: 1; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 18px; text-align: center; padding: 0 20px; }
+  #permScreen p { opacity: 0.85; line-height: 1.5; }
+
+  /* --- Calibration screen --- */
+  #calibrationScreen { flex: 1; display: none; flex-direction: column; min-height: 0; }
+  #calSensorSlot, #playSensorSlot { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  .checklist { display: flex; flex-direction: column; gap: 8px; margin: 10px 0; flex-shrink: 0; }
+  .check-item {
+    display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: 12px;
+    background: #1a2436; font-size: 14px; font-weight: 600;
+  }
+  .check-item .mark {
+    width: 22px; height: 22px; border-radius: 50%; background: #2a3650; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center; font-size: 13px; transition: background 0.2s;
+  }
+  .check-item.done .mark { background: #4ade80; color: #0b1220; }
+  .check-item.done { opacity: 0.7; }
+  #calibrationHint { text-align: center; font-size: 13px; opacity: 0.7; margin: 6px 0; min-height: 18px; }
+  .calibration-actions { display: flex; gap: 10px; margin-top: 10px; flex-shrink: 0; }
+  .calibration-actions .btn { flex: 1; padding: 12px 0; font-size: 15px; }
+
+  /* --- Play screen --- */
+  #playScreen { flex: 1; display: none; flex-direction: column; min-height: 0; }
+  .status-row { display: flex; justify-content: space-between; align-items: center; font-size: 13px; opacity: 0.8; padding: 4px 2px 10px; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #4ade80; margin-right: 6px; }
+
+  .mode-tabs { display: flex; gap: 8px; margin-bottom: 10px; }
+  .mode-tab {
+    flex: 1; padding: 10px 0; border-radius: 12px; border: 2px solid transparent;
+    background: #1a2436; color: #fff; font-size: 14px; font-weight: 700; cursor: pointer;
+  }
+  .mode-tab.active { background: #24314f; border-color: #6ee7ff; color: #6ee7ff; }
+
+  /* --- Camera view (shared by calibration + play screens) --- */
+  .camera-view {
+    flex: 1; border-radius: 22px; background: #000; position: relative; overflow: hidden;
+    border: 2px solid rgba(120,200,255,0.25); min-height: 160px; display: none;
+  }
+  .camera-view video, .camera-view canvas {
+    position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
+    transform: scaleX(-1); /* mirror for natural "selfie" framing */
+  }
+  .camera-status {
+    position: absolute; left: 0; right: 0; top: 10px; text-align: center;
+    font-size: 13px; background: rgba(0,0,0,0.5); margin: 0 auto; padding: 6px 14px;
+    border-radius: 10px; width: fit-content; pointer-events: none;
+  }
+  .lane-bar {
+    position: absolute; left: 12px; right: 12px; bottom: 10px; height: 8px;
+    background: rgba(255,255,255,0.15); border-radius: 4px; pointer-events: none;
+  }
+  .lane-marker {
+    position: absolute; top: -4px; width: 16px; height: 16px; border-radius: 50%;
+    background: #6ee7ff; box-shadow: 0 0 10px 2px rgba(110,231,255,0.7);
+    transform: translateX(-50%); transition: background 0.1s;
+  }
+
+  /* --- Tilt (hold-phone) view (shared by calibration + play screens) --- */
+  .tilt-zone {
+    flex: 1; border-radius: 22px; background: radial-gradient(circle at 50% 40%, #16213a, #0b1220);
+    border: 2px solid rgba(120,200,255,0.25); position: relative; overflow: hidden;
+    display: none; align-items: center; justify-content: center; min-height: 140px;
+  }
+  .tilt-marker {
+    width: 14px; height: 14px; border-radius: 50%; background: #6ee7ff;
+    box-shadow: 0 0 18px 4px rgba(110,231,255,0.6);
+    position: absolute; left: 50%; top: 50%;
+    transform: translate(-50%, -50%);
+    transition: background 0.1s;
+  }
+  .tilt-hint { position: absolute; bottom: 10px; font-size: 13px; opacity: 0.55; }
+  .lane-arrows { position: absolute; inset: 0; display: flex; justify-content: space-between; align-items: center; padding: 0 14px; font-size: 30px; opacity: 0.25; pointer-events: none; }
+
+  .action-row { display: flex; gap: 14px; margin-top: 12px; flex-shrink: 0; }
+  .action-btn {
+    flex: 1; padding: 22px 0; font-size: 20px; font-weight: 800; border-radius: 18px;
+    border: none; color: #0b1220; text-align: center;
+  }
+  #jumpBtn { background: linear-gradient(160deg, #ffe27a, #ffb703); }
+  #punchBtn { background: linear-gradient(160deg, #ff9a9e, #ff5a5f); }
+  .action-btn:active { transform: scale(0.96); }
+  .action-btn .sub { display: block; font-size: 11px; font-weight: 500; opacity: 0.7; margin-top: 2px; }
+
+  .bottom-row { display: flex; gap: 10px; margin-top: 10px; flex-shrink: 0; }
+  .bottom-row .btn { flex: 1; padding: 12px 0; font-size: 14px; }
+
+  #toast {
+    position: fixed; left: 50%; bottom: 18px; transform: translate(-50%, 0);
+    background: rgba(0,0,0,0.75); padding: 10px 18px; border-radius: 12px; font-size: 14px;
+    opacity: 0; transition: opacity 0.25s; pointer-events: none; z-index: 10;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>🏃 Motion Run</h1>
+  <div class="subtitle" id="subtitle">Your phone is the controller</div>
+
+  <!-- 1. Character creator -->
+  <div id="characterScreen">
+    <div class="avatar-preview-wrap">
+      <div class="avatar-stage">
+        <div class="avatar-body" id="avatarBody"></div>
+        <div class="avatar-head" id="avatarHead">
+          <div class="avatar-hair" id="avatarHair"></div>
+          <div class="avatar-hat" id="avatarHat"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="picker-section">
+      <h2>Hair</h2>
+      <div class="option-row" id="hairOptions"></div>
+      <div class="color-row" id="hairColors"></div>
+    </div>
+
+    <div class="picker-section">
+      <h2>Hat</h2>
+      <div class="option-row" id="hatOptions"></div>
+      <div class="color-row" id="hatColors"></div>
+    </div>
+
+    <div class="picker-section">
+      <h2>Shirt</h2>
+      <div class="color-row" id="shirtColors"></div>
+    </div>
+
+    <div class="character-actions">
+      <button class="btn secondary" id="randomBtn">🎲 Random</button>
+      <button class="btn secondary" id="standardBtn">⚡ Standard</button>
+    </div>
+    <div class="character-actions">
+      <button class="btn" id="characterContinueBtn" style="width:100%;">Continue →</button>
+    </div>
+  </div>
+
+  <!-- 2. Join screen -->
+  <div id="joinScreen">
+    <input id="codeInput" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="000000" autocomplete="off" />
+    <button class="btn" id="joinBtn">Connect to TV</button>
+    <div id="joinError"></div>
+  </div>
+
+  <!-- 3. Camera permission -->
+  <div id="permScreen">
+    <p id="permText">Motion Run wants to use your camera to watch your movements — prop your phone up facing you, step back so your whole body is in view, and your character on the TV will copy you.</p>
+    <button class="btn" id="grantCameraBtn">Enable Camera Tracking</button>
+    <button class="btn secondary" id="skipCameraBtn">Hold my phone instead</button>
+  </div>
+
+  <!-- 4. Guided calibration -->
+  <div id="calibrationScreen">
+    <div class="status-row">
+      <span>Quick setup</span>
+      <button class="btn secondary small" id="calRecenterBtn">Recenter</button>
+    </div>
+
+    <!-- sensorPanel (the actual camera-view/tilt-zone elements) is moved in here by JS -->
+    <div id="calSensorSlot"></div>
+
+    <div id="calibrationHint">Try each move below — we'll check it off once we see it.</div>
+    <div class="checklist">
+      <div class="check-item" id="checkLeft"><span class="mark">1</span><span id="checkLeftLabel">Step / lean left</span></div>
+      <div class="check-item" id="checkRight"><span class="mark">2</span><span id="checkRightLabel">Step / lean right</span></div>
+      <div class="check-item" id="checkJump"><span class="mark">3</span><span>Jump</span></div>
+      <div class="check-item" id="checkPunch"><span class="mark">4</span><span>Punch</span></div>
+    </div>
+
+    <div class="calibration-actions">
+      <button class="btn secondary" id="calSkipBtn">Skip setup</button>
+      <button class="btn" id="calStartBtn">Start Run →</button>
+    </div>
+  </div>
+
+  <!-- 5. Play screen -->
+  <div id="playScreen">
+    <div class="status-row">
+      <span><span class="dot"></span>Connected — room <b id="roomLabel">····</b></span>
+      <button class="btn secondary small" id="calibrateBtn">Recenter</button>
+    </div>
+
+    <div class="mode-tabs">
+      <button class="mode-tab" id="tabCamera">📷 Camera</button>
+      <button class="mode-tab" id="tabHold">📳 Hold phone</button>
+    </div>
+
+    <!-- sensorPanel is moved in here by JS once calibration is done -->
+    <div id="playSensorSlot"></div>
+
+    <div class="action-row">
+      <button class="action-btn" id="jumpBtn">⬆ JUMP<span class="sub">or hop in place</span></button>
+      <button class="action-btn" id="punchBtn">👊 PUNCH<span class="sub">or jab forward</span></button>
+    </div>
+
+    <div class="bottom-row">
+      <button class="btn secondary" id="motionToggleBtn">Detection: On</button>
+    </div>
+  </div>
+
+  <!-- Shared sensor panel: one real camera/tilt UI, moved by JS between
+       #calSensorSlot (during setup) and #playSensorSlot (during real play)
+       so the camera stream and pose loop never restart between screens. -->
+  <div id="sensorPanel" style="flex:1; display:flex; flex-direction:column; min-height:0;">
+    <div class="tilt-zone" id="tiltZone">
+      <div class="lane-arrows"><span>◀</span><span>▶</span></div>
+      <div class="tilt-marker" id="tiltMarker"></div>
+      <div class="tilt-hint" id="tiltHint">Lean left / right to change lanes</div>
+    </div>
+
+    <div class="camera-view" id="cameraView">
+      <video id="cameraVideo" autoplay playsinline muted></video>
+      <canvas id="cameraCanvas"></canvas>
+      <div class="camera-status" id="cameraStatus">Loading pose tracker…</div>
+      <div class="lane-bar"><div class="lane-marker" id="laneMarker"></div></div>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script src="./controller.js"></script>
+</body>
+</html>
