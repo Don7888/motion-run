@@ -71,9 +71,11 @@ Find your computer's LAN IP (e.g. `192.168.1.42`) — on Mac/Linux,
 4. Enter the room code and tap **Connect to TV**.
 5. Choose **Enable Camera Tracking** (prop the phone up, step back) or
    **Hold my phone instead** (the original accelerometer mode).
-6. **Quick setup**: a short calibration screen checks that stepping/leaning
-   left, right, jumping, and punching are all being detected before the run
-   starts — tap **Skip setup** any time, or **Start Run** once you're happy.
+6. **Quick setup**: a short calibration walkthrough appears **on the TV**,
+   one move at a time (step/lean left, step/lean right, jump, punch) — copy
+   whatever it shows and the phone (which is doing the actual detecting)
+   checks it off. Tap **Skip setup** on the phone any time, or **Start Run**
+   once you're happy.
 
 You can also test entirely on one machine: open `/tv` and `/play` in two
 browser tabs/windows on the same computer, or on the TV page use the keyboard
@@ -160,8 +162,12 @@ and place the files, same as the first time.)
 
 ## Gameplay
 
-- **3 lanes.** Step or lean left/right past a threshold to shift one lane;
-  it resets once you return to center.
+- **3 lanes.** Lane control is absolute, not a step-and-return toggle: the
+  game continuously tracks which of 3 zones (left/center/right) your body
+  is currently in and puts your character there. Step or lean past a
+  threshold to enter the left/right zone, and just standing/holding
+  normally again snaps you straight back to the center lane — no
+  exaggerated "return" gesture needed.
 - **Hurdles** (low orange bars) — jump (hop) to clear them.
 - **Crates** (brown boxes) — punch to smash them.
 - **Walls** (grey barriers) — too tall to jump, too tough to punch; the only
@@ -194,14 +200,19 @@ Jump/Punch buttons and tap-left/tap-right zones work in either mode.
 
 ## The guided calibration screen
 
-After choosing a mode, a short "quick setup" screen appears before the real
-run starts: it runs the exact same gesture detection as gameplay, but routes
-detected gestures to an on-screen checklist (step left, step right, jump,
-punch) instead of to the TV — otherwise a practice jump would prematurely
-start the run, since the TV starts the game on its first real jump/punch
-input. Tap **Recenter** if detection seems off-center, **Skip setup** to
-jump straight to playing, or **Start Run** once you're happy (it's not
-gated on completing the checklist — skipping is always fine).
+After choosing a mode, a short "quick setup" walkthrough appears **on the
+TV** — one move at a time (step/lean left, step/lean right, jump, punch),
+shown as a big icon + label with a progress dot row. The phone (which owns
+the camera/motion sensors) runs the exact same gesture detection as real
+gameplay, but routes each detected gesture to the TV as calibration
+progress instead of as real game input — otherwise a practice jump would
+prematurely start the run, since the TV starts the game on its first real
+jump/punch input. The phone screen itself just shows "Look at your TV" plus
+a **Recenter** button (if detection seems off-center), **Skip setup**, and
+**Start Run** — it's not gated on finishing all four moves, skipping is
+always fine. This split exists because it's a lot easier to follow a
+walkthrough on the big screen you're already facing than on the phone
+you're not looking at while moving.
 
 ## Tuning the motion detection
 
@@ -209,33 +220,41 @@ Both `public/play/controller.js` detection paths have their thresholds as
 plain constants at the top of the file — **none of them were tuned against
 a real phone, camera, or person**, since this build environment has neither
 a phone, a camera, nor a body attached to it. They're reasoned starting
-points; the calibration screen exists specifically so you can see what
-needs adjusting before you actually play. Expect to nudge things after
-trying it for real:
+points, deliberately loosened (biased toward triggering too easily rather
+than not at all, since this is a fun family game, not a precision
+instrument); the calibration screen exists specifically so you can see what
+still needs adjusting before you actually play. Expect to nudge things
+after trying it for real:
 
 **Camera / pose-tracking mode:**
-- `LANE_TRIGGER_FRAC` / `LANE_RESET_FRAC` — how far (as a fraction of frame
-  width) you need to step sideways to change lanes.
+- `LANE_ENTER_FRAC` / `LANE_EXIT_FRAC` — lane control is absolute zone
+  tracking, not a step-and-return toggle: `LANE_ENTER_FRAC` is how far (as
+  a fraction of frame width) your hips need to move off-center to enter the
+  left/right zone, and `LANE_EXIT_FRAC` (kept smaller, so a normal stance
+  reliably re-centers you) is how far back you need to come to leave it.
+  See `computeZone()`.
 - `JUMP_TRIGGER_TORSO_FRAC` — how much your hips need to rise (relative to
   your torso height, so it scales with distance from the camera) to count
   as a jump.
 - `PUNCH_EXTENSION_FRAC` / `PUNCH_VELOCITY_TORSO_FRAC` — how extended and
   how fast a wrist movement needs to be to count as a punch.
-- If left/right feels backwards on your setup, swap the two
-  `actionHandlers.lane(...)` calls in `processPose()` — see the comment
-  right above them explaining the (unmirrored raw camera frame) sign
-  convention it assumes.
+- If left/right feels backwards on your setup, negate `dx` where it's
+  passed into `computeZone()` in `processPose()` — see the comment right
+  above it explaining the (unmirrored raw camera frame) sign convention it
+  assumes.
 
 **Hold-phone / accelerometer mode:**
-- `TILT_TRIGGER_DEG` / `TILT_RESET_DEG` — lean angle for lane changes.
+- `TILT_ENTER_DEG` / `TILT_EXIT_DEG` — same absolute-zone idea as the
+  camera mode's `LANE_ENTER_FRAC`/`LANE_EXIT_FRAC`, in degrees of tilt from
+  the calibrated baseline.
 - `MOTION_JUMP_TRIGGER` / `MOTION_PUNCH_TRIGGER` / `MOTION_ROTATION_LOW` —
   acceleration/rotation thresholds distinguishing a hop from a jab.
 
 **Either mode:** the **Recenter** button re-zeroes whichever baseline the
-current mode uses. The on-screen **Jump**/**Punch** buttons and
-tap-left/tap-right zones always work, independent of detection, so you
-always have a reliable way to play or to test the WebSocket relay in
-isolation.
+current mode uses (and resets its lane zone to center). The on-screen
+**Jump**/**Punch** buttons and tap-left/tap-right zones always work,
+independent of detection, so you always have a reliable way to play or to
+test the WebSocket relay in isolation.
 
 ## Why no `express`/`ws` package
 
@@ -249,8 +268,8 @@ for what this project needs, and was verified end-to-end (see below).
 
 **If you have normal npm access wherever you continue this project**,
 swapping in `express` + `ws` is a reasonable cleanup — the message protocol
-(`register` / `room` / `paired` / `input` / `character` / `error` /
-`controller_connected` / `feedback`) would carry over unchanged; only
+(`register` / `room` / `paired` / `input` / `character` / `calibration` /
+`error` / `controller_connected` / `feedback`) would carry over unchanged; only
 `server.js`'s plumbing would need to change. The TensorFlow.js/pose-detection
 libraries used by camera mode are loaded from a CDN in the browser directly
 (see the `TFJS_URL`/`POSE_DETECTION_URL` constants in `controller.js`), so
