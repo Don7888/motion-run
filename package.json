@@ -1,0 +1,13 @@
+{
+  "name": "motion-run",
+  "version": "0.1.0",
+  "description": "Phone-controlled 3D movement runner for Fire TV (Danny-Go style prototype)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {}
+}
