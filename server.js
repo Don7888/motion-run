@@ -7,6 +7,12 @@
 // The TV page requests a 6-digit room code. The phone page joins that room
 // code. From then on, every input event the phone detects (lane change,
 // jump, punch) is relayed over WebSocket straight to that TV's game loop.
+// The guided camera-setup flow (place phone -> get in frame -> per-move
+// calibration) runs in both directions: the phone reports its own progress
+// to the TV ('calibration' messages), and the TV relays Fire TV remote "OK"
+// presses back to the phone ('calibration_control' messages) so setup can
+// be driven from the couch once the phone's been propped up and walked
+// away from — see tv/game.js and play/controller.js for the details.
 //
 // This build uses only Node's built-in `https`/`fs` modules plus the tiny
 // hand-rolled WebSocket server in lib/ws-lite.js — see that file's header
@@ -207,6 +213,15 @@ wss.on('connection', (ws) => {
 
     // Optional: TV -> controller feedback (e.g. game-over, buzz cue).
     if (msg.type === 'feedback' && ws.role === 'tv' && ws.roomCode) {
+      const room = rooms.get(ws.roomCode);
+      if (room) room.controllers.forEach((c) => send(c, msg));
+      return;
+    }
+
+    // TV -> controller setup control (Fire TV remote "OK" presses that
+    // advance the guided camera-setup flow — see the big comment block at
+    // the top of tv/game.js's calibration section for the full picture).
+    if (msg.type === 'calibration_control' && ws.role === 'tv' && ws.roomCode) {
       const room = rooms.get(ws.roomCode);
       if (room) room.controllers.forEach((c) => send(c, msg));
       return;
