@@ -26,10 +26,31 @@ const SPAWN_RAMP = 0.00035;
 const JUMP_VELOCITY = 8.2;
 const GRAVITY = -22;
 
-const PUNCH_DURATION = 0.34; // seconds arm is "active"
+const PUNCH_DURATION = 0.34; // seconds arm is "active" (gameplay hit-window — untouched, balance-sensitive)
 const HIT_INVULN_TIME = 1.1;
 
+// Cosmetic-only punch animation timing — deliberately separate from
+// PUNCH_DURATION above. PUNCH_DURATION gates real gameplay (how long a
+// crate arriving at the collision zone counts as "safely smashed"), so it
+// stays exactly as tuned. This timer just drives the exaggerated visual
+// windup/snap/settle and can run longer without touching game balance.
+const PUNCH_ANIM_DURATION = 0.55;
+const PUNCH_WINDUP_FRAC = 0.16; // fraction of the animation spent winding up (arm pulls back)
+const PUNCH_SNAP_FRAC = 0.34;   // fraction spent snapping forward (with overshoot)
+const PUNCH_WINDUP_PULL = 0.5;  // radians the arm pulls back before throwing the punch
+const PUNCH_MAX_EXTEND = -2.5;  // radians of forward extension at full reach (~143°) — big and cartoonish
+
 const OBSTACLE_TYPES = ['hurdle', 'crate', 'wall'];
+
+// Obstacle knockback (see launchObstacleFlying()) — a punched crate
+// rockets off with its own little projectile arc instead of just scrolling
+// past like normal, which is the whole "send it flying" payoff of a
+// successful punch.
+const OBSTACLE_GRAVITY = -30;
+const PUNCH_LAUNCH_VY = 12;
+const PUNCH_LAUNCH_VZ_BOOST = 15;
+const PUNCH_LAUNCH_VX_SPREAD = 7;
+const FLYING_DESPAWN_Z = DESPAWN_Z + 24;
 
 // ---------------------------------------------------------------------
 // Renderer / scene / camera
@@ -256,6 +277,7 @@ for (let i = 0; i < 16; i++) {
 // Obstacles
 // ---------------------------------------------------------------------
 const obstacles = [];
+const impactBursts = []; // small comedic particle bursts spawned by launchObstacleFlying()
 
 function buildObstacleMesh(type) {
   if (type === 'hurdle') {
@@ -286,7 +308,109 @@ function spawnObstacle() {
   mesh.position.x = LANE_X[lane];
   mesh.position.z = SPAWN_Z;
   scene.add(mesh);
-  obstacles.push({ type, lane, mesh, resolved: false });
+  obstacles.push({ type, lane, mesh, resolved: false, flying: false });
+}
+
+// Sends a successfully-punched obstacle rocketing off with its own little
+// projectile arc (random sideways scatter + a big upward pop + gravity +
+// tumbling spin) instead of just continuing to scroll past like normal —
+// the visual payoff of a successful punch. `speed` is folded into the
+// launch so it still looks like it's being knocked further down the track,
+// not just straight up.
+function launchObstacleFlying(o, speed) {
+  o.flying = true;
+  o.flyVel = {
+    x: (Math.random() * 2 - 1) * PUNCH_LAUNCH_VX_SPREAD,
+    y: PUNCH_LAUNCH_VY,
+    z: speed + PUNCH_LAUNCH_VZ_BOOST,
+  };
+  o.spin = {
+    x: (Math.random() * 2 - 1) * 12,
+    y: (Math.random() * 2 - 1) * 12,
+    z: (Math.random() * 2 - 1) * 12,
+  };
+  spawnImpactBurst(o.mesh.position);
+}
+
+// A small comic-book "POW" burst of little cubes at the point of impact —
+// pure juice, no gameplay effect. Self-contained: each burst tracks its
+// own particles and removes itself from the scene once they've faded.
+const IMPACT_COLORS = [0xffd166, 0xff5a5f, 0x6ee7ff, 0xffffff];
+function spawnImpactBurst(position) {
+  const group = new THREE.Group();
+  const particles = [];
+  for (let i = 0; i < 10; i++) {
+    const mat = new THREE.MeshBasicMaterial({ color: IMPACT_COLORS[i % IMPACT_COLORS.length], transparent: true });
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.14, 0.14), mat);
+    mesh.position.copy(position);
+    const angle = (i / 10) * Math.PI * 2 + Math.random() * 0.4;
+    const speedXZ = 3.5 + Math.random() * 3;
+    particles.push({
+      mesh,
+      vel: { x: Math.cos(angle) * speedXZ, y: 3 + Math.random() * 4, z: Math.sin(angle) * speedXZ },
+    });
+    group.add(mesh);
+  }
+  scene.add(group);
+  impactBursts.push({ group, particles, age: 0 });
+}
+const IMPACT_BURST_LIFETIME = 0.5; // seconds
+
+function updateImpactBursts(dt) {
+  for (let i = impactBursts.length - 1; i >= 0; i--) {
+    const burst = impactBursts[i];
+    burst.age += dt;
+    const fade = Math.max(0, 1 - burst.age / IMPACT_BURST_LIFETIME);
+    burst.particles.forEach((p) => {
+      p.vel.y += OBSTACLE_GRAVITY * dt;
+      p.mesh.position.x += p.vel.x * dt;
+      p.mesh.position.y += p.vel.y * dt;
+      p.mesh.position.z += p.vel.z * dt;
+      p.mesh.material.opacity = fade;
+      p.mesh.scale.setScalar(Math.max(0.05, fade));
+    });
+    if (burst.age >= IMPACT_BURST_LIFETIME) {
+      scene.remove(burst.group);
+      impactBursts.splice(i, 1);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------
+// Exaggerated punch animation — anticipation (windup), a fast forward
+// snap with a cartoonish overshoot past full extension, then a settle back
+// to neutral. Driven by state.punchAnimTimer, which is purely cosmetic
+// (see its declaration above) — completely separate from the gameplay
+// hit-window timer (state.punchTimer / PUNCH_DURATION), so this can be as
+// big and floppy as we want without touching game balance.
+// ---------------------------------------------------------------------
+function easeOutBack(x) {
+  const c1 = 1.70158;
+  const c3 = c1 + 1;
+  return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2);
+}
+function punchArmRotation(elapsedFrac) {
+  if (elapsedFrac < PUNCH_WINDUP_FRAC) {
+    const w = elapsedFrac / PUNCH_WINDUP_FRAC;
+    return PUNCH_WINDUP_PULL * Math.sin(w * Math.PI / 2);
+  }
+  const snapEnd = PUNCH_WINDUP_FRAC + PUNCH_SNAP_FRAC;
+  if (elapsedFrac < snapEnd) {
+    const s = (elapsedFrac - PUNCH_WINDUP_FRAC) / PUNCH_SNAP_FRAC;
+    const eased = easeOutBack(s); // overshoots past 1.0 then eases back toward it — the cartoonish "snap"
+    return PUNCH_WINDUP_PULL + eased * (PUNCH_MAX_EXTEND - PUNCH_WINDUP_PULL);
+  }
+  const r = (elapsedFrac - snapEnd) / (1 - snapEnd);
+  const eased = 1 - Math.pow(1 - r, 2);
+  return PUNCH_MAX_EXTEND * (1 - eased);
+}
+// A short triangular "impact" bump centered on the moment of full
+// extension — drives the torso squash/stretch and the forward lunge.
+function punchImpactBump(elapsedFrac) {
+  const peak = PUNCH_WINDUP_FRAC + PUNCH_SNAP_FRAC;
+  const width = 0.14;
+  const d = Math.abs(elapsedFrac - peak);
+  return d < width ? 1 - d / width : 0;
 }
 
 // ---------------------------------------------------------------------
@@ -301,12 +425,36 @@ const state = {
   vy: 0,
   jumping: false,
   punchTimer: 0,
+  punchAnimTimer: 0, // cosmetic-only — see PUNCH_ANIM_DURATION above
   invulnTimer: 0,
   spawnTimer: BASE_SPAWN_INTERVAL,
   distanceForTex: 0,
 };
 
+// ---------------------------------------------------------------------
+// High score — persisted in this browser's localStorage. There's no
+// server-side database in this project (see server.js), and a Fire TV is
+// normally one shared device anyway, so "best score seen on this TV" is
+// the right scope — no accounts or sync needed. Falls back to an
+// in-memory-only high score (never persists) if localStorage throws, e.g.
+// a locked-down browser profile.
+// ---------------------------------------------------------------------
+const HIGH_SCORE_KEY = 'motionrun_highscore';
+function loadHighScore() {
+  try {
+    return Math.max(0, parseInt(localStorage.getItem(HIGH_SCORE_KEY), 10) || 0);
+  } catch {
+    return 0;
+  }
+}
+function saveHighScore(value) {
+  try { localStorage.setItem(HIGH_SCORE_KEY, String(Math.floor(value))); } catch { /* ignore */ }
+}
+let highScore = loadHighScore();
+let highScoreAtRunStart = highScore;
+
 const scoreVal = document.getElementById('scoreVal');
+const highScoreVal = document.getElementById('highScoreVal');
 const livesEl = document.getElementById('lives');
 const pairingPanel = document.getElementById('pairingPanel');
 const readyPanel = document.getElementById('readyPanel');
@@ -338,15 +486,46 @@ function renderLives() {
   }
 }
 renderLives();
+highScoreVal.textContent = String(Math.floor(highScore));
+
+const controlBadge = document.getElementById('controlBadge');
+const pausedPanel = document.getElementById('pausedPanel');
+const pausedScoreVal = document.getElementById('pausedScoreVal');
+const newHighScoreNote = document.getElementById('newHighScoreNote');
 
 const PANELS = {
   pairing: pairingPanel,
   ready: readyPanel,
   gameover: gameOverPanel,
+  paused: pausedPanel,
   calibrating: calibrationPanel,
   placement: placementPanel,
   framing: framingPanel,
 };
+
+// ---------------------------------------------------------------------
+// Control badge — a small persistent "what do I use right now?" pill so
+// it's obvious at every stage, not just the first one, whether the Fire TV
+// remote or the phone is what drives the current screen. Shown for every
+// non-playing stage; hidden once a run is actually in progress (input is
+// coming from the phone continuously at that point, no ambiguity).
+// ---------------------------------------------------------------------
+const CONTROL_BADGE_TEXT = {
+  pairing: { text: '📱 Use your phone to join', cls: 'phone' },
+  ready: { text: '🎮 Remote OK, or 📱 jump/punch, to start', cls: 'remote' },
+  placement: { text: '🎮 Use your Fire TV remote', cls: 'remote' },
+  framing: { text: '🎮 Use your Fire TV remote', cls: 'remote' },
+  calibrating: { text: '📱 Use your phone', cls: 'phone' },
+  paused: { text: '🎮 Remote OK to resume, Back to exit', cls: 'remote' },
+  gameover: { text: '🎮 Remote OK, or 📱 jump/punch, to retry', cls: 'remote' },
+};
+function updateControlBadge(stageKey) {
+  const meta = CONTROL_BADGE_TEXT[stageKey];
+  if (!meta) { controlBadge.style.display = 'none'; return; }
+  controlBadge.textContent = meta.text;
+  controlBadge.className = `control-badge ${meta.cls}`;
+  controlBadge.style.display = 'block';
+}
 function showPanel(which) {
   Object.entries(PANELS).forEach(([name, el]) => {
     el.style.display = name === which ? 'block' : 'none';
@@ -359,13 +538,14 @@ function showPanel(which) {
 // show, until the phone signals it's done. Priority: placement > framing >
 // per-move calibration > normal phase-based panels.
 function syncPanel() {
-  if (setupStage === 'placement') { showPanel('placement'); return; }
-  if (setupStage === 'framing') { showPanel('framing'); return; }
-  if (calibrating) { showPanel('calibrating'); return; }
-  if (state.phase === 'pairing') showPanel('pairing');
-  else if (state.phase === 'ready') showPanel('ready');
-  else if (state.phase === 'gameover') showPanel('gameover');
-  else showPanel(null);
+  if (setupStage === 'placement') { showPanel('placement'); updateControlBadge('placement'); return; }
+  if (setupStage === 'framing') { showPanel('framing'); updateControlBadge('framing'); return; }
+  if (calibrating) { showPanel('calibrating'); updateControlBadge('calibrating'); return; }
+  if (state.phase === 'pairing') { showPanel('pairing'); updateControlBadge('pairing'); }
+  else if (state.phase === 'ready') { showPanel('ready'); updateControlBadge('ready'); }
+  else if (state.phase === 'paused') { showPanel('paused'); updateControlBadge('paused'); }
+  else if (state.phase === 'gameover') { showPanel('gameover'); updateControlBadge('gameover'); }
+  else { showPanel(null); updateControlBadge(null); }
 }
 
 // =========================================================================
@@ -527,10 +707,14 @@ function resetRun() {
   state.vy = 0;
   state.jumping = false;
   state.punchTimer = 0;
+  state.punchAnimTimer = 0;
   state.invulnTimer = 0;
   state.spawnTimer = BASE_SPAWN_INTERVAL;
   obstacles.splice(0).forEach((o) => scene.remove(o.mesh));
+  impactBursts.splice(0).forEach((b) => scene.remove(b.group));
   player.position.set(0, 0, 0);
+  player.rotation.y = 0;
+  torso.scale.set(1, 1, 1);
   renderLives();
   scoreVal.textContent = '0';
 }
@@ -539,12 +723,62 @@ function startPlaying() {
   resetRun();
   state.phase = 'playing';
   calibrating = false;
+  highScoreAtRunStart = highScore;
   showPanel(null);
+  updateControlBadge(null);
 }
 
 function gameOver() {
   state.phase = 'gameover';
   finalScoreEl.textContent = Math.floor(state.score);
+  commitHighScore();
+  newHighScoreNote.style.display = state.score > highScoreAtRunStart ? 'block' : 'none';
+  syncPanel();
+}
+
+// ---------------------------------------------------------------------
+// Pause / Exit — driven by the Fire TV remote's Back button (untested on
+// real hardware, same open question as the OK button — see the isSelectPress
+// comment below) and, always reliably, by the ⏸/✕ buttons on the phone
+// (see pauseBtn/exitBtn in play/controller.js). Pausing just stops
+// updatePlaying() from running (see animate() — it only calls updatePlaying
+// when state.phase === 'playing'), so the whole game genuinely freezes: no
+// separate "pause the physics" bookkeeping needed. Exiting is a soft
+// game-over — it banks the high score if this run earned one, then drops
+// back to the "ready" screen so the next run can start right away without
+// re-pairing.
+// ---------------------------------------------------------------------
+function commitHighScore() {
+  // updatePlaying() already live-updates the in-memory `highScore` the
+  // instant state.score passes it (for the HUD to react immediately), so
+  // by the time this runs `highScore` already reflects this run's best —
+  // this just persists that current value at a natural checkpoint
+  // (gameOver/exitToMenu) rather than writing to localStorage every frame.
+  saveHighScore(highScore);
+  highScoreVal.textContent = String(Math.floor(highScore));
+}
+
+function pauseGame() {
+  if (state.phase !== 'playing') return;
+  state.phase = 'paused';
+  pausedScoreVal.textContent = String(Math.floor(state.score));
+  syncPanel();
+}
+
+function resumeGame() {
+  if (state.phase !== 'paused') return;
+  state.phase = 'playing';
+  lastT = performance.now(); // avoid a huge dt jump on the first frame back
+  showPanel(null);
+  updateControlBadge(null);
+}
+
+function exitToMenu() {
+  if (state.phase !== 'playing' && state.phase !== 'paused') return;
+  commitHighScore();
+  state.phase = 'ready';
+  calibrating = false;
+  setupStage = 'none';
   syncPanel();
 }
 
@@ -596,6 +830,19 @@ ws.addEventListener('close', () => {
 });
 
 function handleInput(msg) {
+  // Pause/Exit can arrive while playing OR already paused (toggling back
+  // and forth), so handle them before the general "must be playing" guard
+  // below — everything else (lane/jump/punch) only makes sense mid-run.
+  if (msg.action === 'pause_toggle') {
+    if (state.phase === 'playing') pauseGame();
+    else if (state.phase === 'paused') resumeGame();
+    return;
+  }
+  if (msg.action === 'exit_to_menu') {
+    exitToMenu();
+    return;
+  }
+
   if (state.phase === 'ready' && (msg.action === 'jump' || msg.action === 'punch')) {
     startPlaying();
     return;
@@ -625,6 +872,7 @@ function handleInput(msg) {
     }
   } else if (msg.action === 'punch') {
     state.punchTimer = PUNCH_DURATION;
+    state.punchAnimTimer = PUNCH_ANIM_DURATION;
   }
 }
 
@@ -638,6 +886,15 @@ function handleInput(msg) {
 function isSelectPress(e) {
   return e.key === 'Enter' || e.code === 'Enter' || e.code === 'NumpadEnter' || e.code === 'Space';
 }
+// The Fire TV remote's Back button — like the OK button above, we haven't
+// been able to confirm exactly what key event this reaches the page as on
+// real hardware, so we accept the two most likely candidates (Escape is
+// the standard web convention; Backspace is common on some remote/browser
+// combinations). The phone's ✕ Exit button (see play/controller.js) is the
+// guaranteed fallback if neither matches your specific Fire TV.
+function isBackPress(e) {
+  return e.key === 'Escape' || e.code === 'Escape' || e.code === 'Backspace';
+}
 
 window.addEventListener('keydown', (e) => {
   if (setupStage === 'placement' && isSelectPress(e)) {
@@ -649,10 +906,21 @@ window.addEventListener('keydown', (e) => {
     return;
   }
 
-  // Fallback: also allow keyboard testing on this screen (A/D or arrows to
-  // change lane, Space to jump, F to punch) — handy when testing without a
-  // phone in hand.
-  if (state.phase !== 'playing' && (e.code === 'Space' || e.code === 'KeyF')) {
+  // Pause (Back while playing) / Exit (Back again while paused) / Resume
+  // (OK while paused) — remote-first, with the phone's ⏸/✕ buttons as the
+  // always-reliable equivalent (see handleInput's pause_toggle/exit_to_menu).
+  if (isBackPress(e)) {
+    if (state.phase === 'playing') { pauseGame(); return; }
+    if (state.phase === 'paused') { exitToMenu(); return; }
+  }
+  if (state.phase === 'paused' && isSelectPress(e)) { resumeGame(); return; }
+
+  // OK/Select (or Space/F as a keyboard fallback) also starts/retries a run
+  // from the Ready or Game Over screens — the remote works here too, not
+  // just jump/punch from the phone. Excludes `calibrating` (per-move setup
+  // is phone-only — the badge there says so) so a stray OK press mid-setup
+  // can't accidentally launch the run early.
+  if (!calibrating && state.phase !== 'playing' && state.phase !== 'paused' && (isSelectPress(e) || e.code === 'KeyF')) {
     if (state.phase === 'ready' || state.phase === 'gameover') startPlaying();
     return;
   }
@@ -675,6 +943,14 @@ function updatePlaying(dt) {
   const speed = currentSpeed();
   state.score += speed * dt * 1.4;
   scoreVal.textContent = String(Math.floor(state.score));
+  // Live-update the HUD the instant this run beats the record, for the
+  // thrill of it — the actual localStorage write is throttled to natural
+  // checkpoints (gameOver/exitToMenu via commitHighScore()) rather than
+  // every frame.
+  if (state.score > highScore) {
+    highScore = state.score;
+    highScoreVal.textContent = String(Math.floor(highScore));
+  }
 
   // Ground scroll
   state.distanceForTex += speed * dt;
@@ -686,10 +962,14 @@ function updatePlaying(dt) {
     if (t.position.z > 10) t.position.z -= 16 * sceneryPool.length * 0.5;
   });
 
-  // Player lane lerp + lean
+  // Player lane lerp + lean. The multiplier here (was 9) is how snappily
+  // the character visually catches up to the lane the player's body/tilt
+  // just moved into — raised for a noticeably quicker response, since the
+  // input itself (WebSocket message -> lane_set) is already effectively
+  // instant and this easing was the next-biggest source of felt latency.
   const targetX = LANE_X[state.lane];
   const dx = targetX - player.position.x;
-  player.position.x += dx * Math.min(1, dt * 9);
+  player.position.x += dx * Math.min(1, dt * 15);
   player.rotation.z = THREE.MathUtils.lerp(player.rotation.z, THREE.MathUtils.clamp(-dx * 0.35, -0.35, 0.35), dt * 10);
 
   // Jump physics
@@ -706,8 +986,11 @@ function updatePlaying(dt) {
   shadowBlob.position.x = player.position.x;
   shadowBlob.scale.setScalar(THREE.MathUtils.clamp(1 - player.position.y * 0.15, 0.4, 1));
 
-  // Punch timer
+  // Punch timers — punchTimer gates gameplay (crate-safety window),
+  // punchAnimTimer drives the exaggerated cosmetic animation below; see
+  // the big comment above punchArmRotation() for why they're separate.
   if (state.punchTimer > 0) state.punchTimer = Math.max(0, state.punchTimer - dt);
+  if (state.punchAnimTimer > 0) state.punchAnimTimer = Math.max(0, state.punchAnimTimer - dt);
   if (state.invulnTimer > 0) state.invulnTimer = Math.max(0, state.invulnTimer - dt);
 
   // Procedural animation
@@ -715,17 +998,35 @@ function updatePlaying(dt) {
   const swing = state.grounded ? Math.sin(runT) * 0.6 : 0;
   legL.rotation.x = state.grounded ? swing : -0.5;
   legR.rotation.x = state.grounded ? -swing : 0.3;
-  armL.rotation.x = state.grounded ? -swing * 0.8 : -0.4;
   head.position.y = 1.85 + (state.grounded ? Math.abs(Math.sin(runT)) * 0.03 : 0.05);
   if (propellerBlade) propellerBlade.rotation.y += dt * 14;
 
-  if (state.punchTimer > 0) {
-    const t = 1 - state.punchTimer / PUNCH_DURATION;
-    const ext = t < 0.5 ? t * 2 : (1 - t) * 2;
-    armR.rotation.x = -ext * 1.9;
+  if (state.punchAnimTimer > 0) {
+    // Big, floppy, cartoonish: anticipation windup -> fast snap forward
+    // with overshoot -> settle. Both arms sell it (off-arm swings back for
+    // counterbalance), plus a torso twist, a squash/stretch "oomph" at the
+    // moment of impact, and a small forward lunge — all purely cosmetic.
+    const elapsedFrac = 1 - state.punchAnimTimer / PUNCH_ANIM_DURATION;
+    const armAngle = punchArmRotation(elapsedFrac);
+    const bump = punchImpactBump(elapsedFrac);
+    armR.rotation.x = -armAngle;
+    armL.rotation.x = armAngle * 0.5;
+    player.rotation.y = -armAngle * 0.12;
+    player.position.z = -bump * 0.32;
+    torso.scale.set(1 + bump * 0.18, 1 - bump * 0.12, 1 + bump * 0.18);
   } else {
     armR.rotation.x = state.grounded ? swing * 0.8 : -0.4;
+    armL.rotation.x = state.grounded ? -swing * 0.8 : -0.4;
+    player.rotation.y = THREE.MathUtils.lerp(player.rotation.y, 0, Math.min(1, dt * 10));
+    player.position.z = THREE.MathUtils.lerp(player.position.z, 0, Math.min(1, dt * 10));
+    torso.scale.set(
+      THREE.MathUtils.lerp(torso.scale.x, 1, Math.min(1, dt * 10)),
+      THREE.MathUtils.lerp(torso.scale.y, 1, Math.min(1, dt * 10)),
+      THREE.MathUtils.lerp(torso.scale.z, 1, Math.min(1, dt * 10))
+    );
   }
+
+  updateImpactBursts(dt);
 
   // Camera follow
   camera.position.x += (player.position.x * 0.6 - (camera.position.x - 0)) * Math.min(1, dt * 4);
@@ -742,6 +1043,25 @@ function updatePlaying(dt) {
   // Update obstacles
   for (let i = obstacles.length - 1; i >= 0; i--) {
     const o = obstacles[i];
+
+    // Obstacles already knocked flying by a punch (see launchObstacleFlying)
+    // run their own little projectile-physics arc instead of the normal
+    // conveyor-belt scroll below — skip straight to that and move on.
+    if (o.flying) {
+      o.flyVel.y += OBSTACLE_GRAVITY * dt;
+      o.mesh.position.x += o.flyVel.x * dt;
+      o.mesh.position.y += o.flyVel.y * dt;
+      o.mesh.position.z += o.flyVel.z * dt;
+      o.mesh.rotation.x += o.spin.x * dt;
+      o.mesh.rotation.y += o.spin.y * dt;
+      o.mesh.rotation.z += o.spin.z * dt;
+      if (o.mesh.position.z > FLYING_DESPAWN_Z || o.mesh.position.y < -14) {
+        scene.remove(o.mesh);
+        obstacles.splice(i, 1);
+      }
+      continue;
+    }
+
     o.mesh.position.z += speed * dt;
 
     if (!o.resolved && o.mesh.position.z >= COLLISION_Z_MIN && o.mesh.position.z <= COLLISION_Z_MAX) {
@@ -755,6 +1075,7 @@ function updatePlaying(dt) {
         if (safe) {
           popCombo(o.type === 'hurdle' ? 'JUMP!' : o.type === 'crate' ? 'SMASH!' : '');
           state.score += 25;
+          if (o.type === 'crate') launchObstacleFlying(o, speed);
         } else if (state.invulnTimer <= 0) {
           state.lives -= 1;
           state.invulnTimer = HIT_INVULN_TIME;
