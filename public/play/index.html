@@ -106,6 +106,11 @@
   /* --- Camera permission screen --- */
   #permScreen { flex: 1; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 18px; text-align: center; padding: 0 20px; }
   #permScreen p { opacity: 0.85; line-height: 1.5; }
+  .hint-strong {
+    background: rgba(255,209,102,0.12); border: 2px solid rgba(255,209,102,0.55);
+    border-radius: 14px; padding: 12px 16px; font-weight: 700; font-size: 15px;
+    opacity: 1 !important;
+  }
 
   /* --- Calibration screen --- */
   #calibrationScreen { flex: 1; display: none; flex-direction: column; min-height: 0; }
@@ -116,7 +121,9 @@
 
   /* --- Play screen --- */
   #playScreen { flex: 1; display: none; flex-direction: column; min-height: 0; }
-  .status-row { display: flex; justify-content: space-between; align-items: center; font-size: 13px; opacity: 0.8; padding: 4px 2px 10px; }
+  .status-row { display: flex; flex-wrap: wrap; gap: 6px; justify-content: space-between; align-items: center; font-size: 13px; opacity: 0.8; padding: 4px 2px 10px; }
+  .status-actions { display: flex; gap: 6px; flex-shrink: 0; }
+  .btn.danger { background: #ff5a5f; color: #fff; }
   .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #4ade80; margin-right: 6px; }
 
   .mode-tabs { display: flex; gap: 8px; margin-bottom: 10px; }
@@ -179,6 +186,33 @@
   .bottom-row { display: flex; gap: 10px; margin-top: 10px; flex-shrink: 0; }
   .bottom-row .btn { flex: 1; padding: 12px 0; font-size: 14px; }
 
+  /* --- Fullscreen camera preview during setup (see updateFullscreenCam() in
+     controller.js) — camera mode's live preview is genuinely useful info
+     the player needs while placing/framing the phone, so it takes over the
+     whole screen instead of sharing space with headers/hints. Only applied
+     on the calibration (setup) screen — the play screen keeps its normal
+     layout since the Jump/Punch buttons need their room there. */
+  body.cam-fullscreen #calibrationScreen {
+    position: fixed; inset: 0; z-index: 20; padding: 0; margin: 0;
+    display: flex; flex-direction: column;
+  }
+  body.cam-fullscreen #calSensorSlot { flex: 1; min-height: 0; }
+  body.cam-fullscreen .camera-view { border-radius: 0; border: none; }
+  body.cam-fullscreen #calibrationScreen .status-row {
+    position: absolute; top: 0; left: 0; right: 0; z-index: 2; margin: 0;
+    padding: calc(env(safe-area-inset-top) + 10px) 16px 16px;
+    background: linear-gradient(rgba(0,0,0,0.65), transparent);
+  }
+  body.cam-fullscreen #calibrationHint {
+    position: absolute; left: 0; right: 0; bottom: 78px; z-index: 2; margin: 0;
+    padding: 0 16px; text-shadow: 0 2px 6px rgba(0,0,0,0.85);
+  }
+  body.cam-fullscreen .calibration-actions {
+    position: absolute; left: 0; right: 0; bottom: 0; z-index: 2; margin: 0;
+    padding: 12px 16px calc(env(safe-area-inset-bottom) + 12px);
+    background: linear-gradient(transparent, rgba(0,0,0,0.8));
+  }
+
   #toast {
     position: fixed; left: 50%; bottom: 18px; transform: translate(-50%, 0);
     background: rgba(0,0,0,0.75); padding: 10px 18px; border-radius: 12px; font-size: 14px;
@@ -238,7 +272,9 @@
 
   <!-- 3. Camera permission -->
   <div id="permScreen">
-    <p id="permText">Motion Run wants to use your camera to watch your movements. After this, look at your TV — it'll walk you through placing your phone and getting in frame, using your Fire TV remote.</p>
+    <p id="permText">Motion Run wants to use your camera to watch your movements.</p>
+    <p class="hint-strong">📱↔️ Turn your phone sideways (landscape) before propping it up, so it can see your whole body.</p>
+    <p>After this, look at your TV — it'll walk you through placing your phone and getting in frame. From then on you'll use your <b>Fire TV remote</b>, not your phone, until setup is done.</p>
     <button class="btn" id="grantCameraBtn">Enable Camera Tracking</button>
     <button class="btn secondary" id="skipCameraBtn">Hold my phone instead</button>
   </div>
@@ -265,7 +301,11 @@
   <div id="playScreen">
     <div class="status-row">
       <span><span class="dot"></span>Connected — room <b id="roomLabel">····</b></span>
-      <button class="btn secondary small" id="calibrateBtn">Recenter</button>
+      <span class="status-actions">
+        <button class="btn secondary small" id="calibrateBtn">Recenter</button>
+        <button class="btn secondary small" id="pauseBtn">⏸</button>
+        <button class="btn secondary small danger" id="exitBtn">✕ Exit</button>
+      </span>
     </div>
 
     <div class="mode-tabs">
