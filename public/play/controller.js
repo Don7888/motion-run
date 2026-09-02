@@ -80,12 +80,31 @@
   const PUNCH_EXTENSION_FRAC = 0.52;
   const PUNCH_VELOCITY_TORSO_FRAC = 2.0;
   const PUNCH_COOLDOWN_MS = 700;
-  // Was 20 — raised to 30 to cut the worst-case pose-sampling delay (how
-  // long a real movement can sit before we even look at a new camera
-  // frame) from 50ms to ~33ms. Latency-sensitive, so worth the extra CPU;
-  // still well under what a modern phone GPU/WebGL backend can sustain
-  // alongside MoveNet Lightning.
-  const POSE_TARGET_FPS = 30;
+  // Calibration-only punch thresholds (2026-09-02, "ensure punch is in the
+  // list of movements during setup" feedback) — punch IS already one of
+  // the 4 guided-calibration steps (see CAL_ORDER in tv/game.js, and
+  // calState/calHandlers.punch below), but the thresholds directly above
+  // were tightened specifically to stop punch false-firing during real
+  // running, which made a deliberate practice punch during calibration
+  // noticeably harder to land too — worth avoiding, since calibration is
+  // the player's one chance to confirm their device can see this move at
+  // all before a real run. There's no "false start" risk during setup the
+  // way there is mid-run (a stray practice-screen punch just checks off a
+  // box, it can't smash a crate or lose a life), so calibration can safely
+  // use the original, more forgiving values instead. Real gameplay keeps
+  // the stricter thresholds above completely untouched.
+  const CAL_PUNCH_EXTENSION_FRAC = 0.38;
+  const CAL_PUNCH_VELOCITY_TORSO_FRAC = 1.3;
+  const CAL_PUNCH_COOLDOWN_MS = 450;
+  // Was 20, then 30 (2026-09-02) — raised again to 45 (2026-09-02, "reduce
+  // the delay between player movement and character movement" feedback) to
+  // cut the worst-case pose-sampling delay (how long a real movement can
+  // sit before we even look at a new camera frame) from ~33ms down to
+  // ~22ms. This is just an upper cap on the sampling loop — real inference
+  // time on the device is the actual floor, so raising it can only help,
+  // never hurt, and 45 is still comfortably under what a modern phone
+  // GPU/WebGL backend can sustain alongside MoveNet Lightning.
+  const POSE_TARGET_FPS = 45;
 
   // Lane zones (hold-phone mode): same ENTER/EXIT hysteresis idea, in
   // degrees of phone tilt from the calibrated baseline.
@@ -98,6 +117,11 @@
   const MOTION_ROTATION_LOW = 250;
   const MOTION_JUMP_COOLDOWN_MS = 500;
   const MOTION_PUNCH_COOLDOWN_MS = 700;
+  // Calibration-only hold-phone punch thresholds — same reasoning as
+  // CAL_PUNCH_EXTENSION_FRAC etc. above, just for the accelerometer path.
+  // Matches the original pre-tightening values.
+  const CAL_MOTION_PUNCH_TRIGGER = 9;
+  const CAL_MOTION_PUNCH_COOLDOWN_MS = 450;
   const CROSS_TALK_LOCK_MS = 150;
   const GRAVITY_LOWPASS = 0.85;
 
@@ -845,10 +869,17 @@
     const speed = Math.hypot(wrist.x - prev.x, wrist.y - prev.y) / dt;
     const extension = dist(wrist, shoulder) / torsoScale;
 
+    // Calibration practice punches use the original, more forgiving
+    // thresholds — see the CAL_PUNCH_* comment up top for why.
+    const calibrating = actionHandlers === calHandlers;
+    const velocityThresh = calibrating ? CAL_PUNCH_VELOCITY_TORSO_FRAC : PUNCH_VELOCITY_TORSO_FRAC;
+    const extensionThresh = calibrating ? CAL_PUNCH_EXTENSION_FRAC : PUNCH_EXTENSION_FRAC;
+    const cooldown = calibrating ? CAL_PUNCH_COOLDOWN_MS : PUNCH_COOLDOWN_MS;
+
     if (
-      speed > PUNCH_VELOCITY_TORSO_FRAC * torsoScale &&
-      extension > PUNCH_EXTENSION_FRAC &&
-      now - lastPunchTime > PUNCH_COOLDOWN_MS &&
+      speed > velocityThresh * torsoScale &&
+      extension > extensionThresh &&
+      now - lastPunchTime > cooldown &&
       now - lastActionTime > CROSS_TALK_LOCK_MS
     ) {
       lastPunchTime = now;
@@ -985,7 +1016,16 @@
         return;
       }
     }
-    if (mag > MOTION_PUNCH_TRIGGER && now - lastPunchTime > MOTION_PUNCH_COOLDOWN_MS) {
+    // Calibration practice punches use the original, more forgiving
+    // trigger/cooldown — see the CAL_PUNCH_*/CAL_MOTION_PUNCH_* comments
+    // up top for why. The MOTION_JUMP_TRIGGER comparison just below stays
+    // the same real trigger in both cases — it's only disambiguating "was
+    // this reading big enough to also look like a jump", not part of the
+    // punch sensitivity itself.
+    const calibrating = actionHandlers === calHandlers;
+    const punchTrigger = calibrating ? CAL_MOTION_PUNCH_TRIGGER : MOTION_PUNCH_TRIGGER;
+    const punchCooldown = calibrating ? CAL_MOTION_PUNCH_COOLDOWN_MS : MOTION_PUNCH_COOLDOWN_MS;
+    if (mag > punchTrigger && now - lastPunchTime > punchCooldown) {
       if (!hasRotation || rot >= MOTION_ROTATION_LOW || mag <= MOTION_JUMP_TRIGGER) {
         lastPunchTime = now; lastActionTime = now;
         actionHandlers.punch();
