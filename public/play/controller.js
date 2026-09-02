@@ -71,7 +71,12 @@
   const PUNCH_EXTENSION_FRAC = 0.42;
   const PUNCH_VELOCITY_TORSO_FRAC = 1.5;
   const PUNCH_COOLDOWN_MS = 450;
-  const POSE_TARGET_FPS = 20;
+  // Was 20 — raised to 30 to cut the worst-case pose-sampling delay (how
+  // long a real movement can sit before we even look at a new camera
+  // frame) from 50ms to ~33ms. Latency-sensitive, so worth the extra CPU;
+  // still well under what a modern phone GPU/WebGL backend can sustain
+  // alongside MoveNet Lightning.
+  const POSE_TARGET_FPS = 30;
 
   // Lane zones (hold-phone mode): same ENTER/EXIT hysteresis idea, in
   // degrees of phone tilt from the calibrated baseline.
@@ -163,6 +168,8 @@
   const jumpBtn = document.getElementById('jumpBtn');
   const punchBtn = document.getElementById('punchBtn');
   const motionToggleBtn = document.getElementById('motionToggleBtn');
+  const pauseBtn = document.getElementById('pauseBtn');
+  const exitBtn = document.getElementById('exitBtn');
   const toast = document.getElementById('toast');
 
   const sensorPanel = document.getElementById('sensorPanel');
@@ -179,6 +186,17 @@
   function showScreen(el) {
     [characterScreen, joinScreen, permScreen, calibrationScreen, playScreen].forEach((s) => (s.style.display = 'none'));
     el.style.display = 'flex';
+    updateFullscreenCam();
+  }
+  // Camera mode's live preview is genuinely small useful info during setup
+  // (the player needs to actually see themselves to place/frame the phone
+  // correctly) — so while the calibration screen is showing AND camera mode
+  // is active, blow the preview up to fill the whole phone screen instead
+  // of sharing space with headers/hints. Play screen keeps the normal
+  // layout since the Jump/Punch buttons need their room there.
+  function updateFullscreenCam() {
+    const onCalibration = calibrationScreen.style.display !== 'none';
+    document.body.classList.toggle('cam-fullscreen', onCalibration && currentMode === 'camera');
   }
   function showToast(msg) {
     toast.textContent = msg;
@@ -458,6 +476,21 @@
   jumpBtn.addEventListener('click', fireJump);
   punchBtn.addEventListener('click', firePunch);
 
+  // Pause/Exit — a manual, always-reliable path to the same pause/exit
+  // functionality the Fire TV remote's Back button also drives on the TV
+  // side (see tv/game.js). We can't be sure every remote's Back button
+  // reaches the page the way we expect (same open question as the
+  // OK/Select button — see the big header comment in tv/game.js), so this
+  // phone button is the guaranteed fallback, not an afterthought.
+  pauseBtn.addEventListener('click', () => {
+    sendInput('pause_toggle');
+    if (navigator.vibrate) navigator.vibrate(15);
+  });
+  exitBtn.addEventListener('click', () => {
+    sendInput('exit_to_menu');
+    if (navigator.vibrate) navigator.vibrate([15, 40, 15]);
+  });
+
   const realHandlers = {
     lane: (dir) => sendInput('lane', dir),
     laneZone: (zone) => sendInput('lane_set', zone),
@@ -517,6 +550,7 @@
       framingActive = false;
     }
     if (prev) showToast(mode === 'camera' ? 'Camera mode' : 'Hold-phone mode');
+    updateFullscreenCam();
   }
 
   tabCamera.addEventListener('click', () => setMode('camera'));
