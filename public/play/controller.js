@@ -18,6 +18,28 @@
 // jump/punch input). See `actionHandlers` below for that indirection, and
 // `sendCalibration()` for how progress reaches the TV.
 //
+// CAMERA-MODE SETUP HAS A "PLACEMENT" AND "FRAMING" GATE BEFORE ANY OF
+// THAT: after the player taps "Enable Camera Tracking" they still need to
+// physically prop the phone up and walk back to their play space — which
+// takes several seconds, during which the camera is very much pointed at a
+// hand mid-fumble or a person mid-walk, not a calibrated stance. If pose
+// detection reacted to that the way it reacts during real play, it would
+// fire spurious jumps/punches/lane-changes before the player is even in
+// position. So camera mode holds off on ALL of that (both the real
+// realHandlers path and the practice calHandlers path) until:
+//   1. the TV has shown "place your phone" and the player has confirmed
+//      (Fire TV remote OK, relayed back here as `calibration_control`
+//      'placement_ack') that it's in place, and
+//   2. the TV's live framing check (silhouette guide, driven by
+//      `evaluateFraming()` below) reports the player is visible at a
+//      reasonable distance, confirmed either automatically (held for a
+//      moment) or by another remote OK press ('moves_ack').
+// `inCameraSetupGate` is the flag that suppresses lane/jump/punch
+// detection for the whole of that window; `framingActive` is the narrower
+// flag that turns on the framing evaluation itself once stage 1 is done.
+// Hold-phone mode skips both stages entirely — the player never lets go of
+// the phone, so there's nothing to walk away from or get "in frame" for.
+//
 // LANE CONTROL IS ABSOLUTE, NOT RELATIVE: both camera and hold-phone mode
 // continuously track which of 3 zones (left/center/right) the player's
 // body is currently in and tell the TV to put the character in the
@@ -62,6 +84,15 @@
   const MOTION_PUNCH_COOLDOWN_MS = 450;
   const CROSS_TALK_LOCK_MS = 150;
   const GRAVITY_LOWPASS = 0.85;
+
+  // Camera framing check (see the big header comment above): how close/far/
+  // off-center counts as bad framing, and how long "good" framing has to
+  // be held before we tell the TV it's ready to move on.
+  const FRAMING_TOO_CLOSE_FRAC = 0.34; // torso height / frame height
+  const FRAMING_TOO_FAR_FRAC = 0.15;
+  const FRAMING_OFFCENTER_FRAC = 0.28; // |hip x offset| / frame width
+  const FRAMING_GOOD_HOLD_MS = 900;
+  const FRAMING_SEND_INTERVAL_MS = 200;
 
   const TFJS_URL = 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4/dist/tf.min.js';
   const POSE_DETECTION_URL = 'https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2/dist/pose-detection.min.js';
@@ -250,6 +281,12 @@
         roomLabel.textContent = roomCode;
         sendCharacter();
         showScreen(permScreen);
+      } else if (msg.type === 'calibration_control') {
+        // The TV relays Fire TV remote OK presses back to us during the
+        // placement/framing setup stages — see handlePlacementAck/
+        // handleMovesAck (defined further down, alongside beginCalibration).
+        if (msg.action === 'placement_ack') handlePlacementAck();
+        else if (msg.action === 'moves_ack') handleMovesAck();
       } else if (msg.type === 'error') {
         joinError.textContent = msg.message || 'Could not connect.';
         joinBtn.disabled = false;
@@ -301,12 +338,47 @@
   grantCameraBtn.addEventListener('click', () => beginCalibration('camera'));
   skipCameraBtn.addEventListener('click', () => beginCalibration('hold'));
 
+  // See the big header comment for what these gate. Both default to
+  // "everything's fine, detect normally" (false/false) so hold-phone mode
+  // and real play are never accidentally blocked by leftover setup state.
+  let inCameraSetupGate = false;
+  let framingActive = false;
+  let framingGoodStreakStart = null;
+  let lastFramingSentT = 0;
+
   async function beginCalibration(mode) {
     resetCalibration();
     actionHandlers = calHandlers;
     moveSensorPanelTo(calSensorSlot);
     showScreen(calibrationScreen);
+    inCameraSetupGate = false;
+    framingActive = false;
+    framingGoodStreakStart = null;
     await setMode(mode);
+    if (currentMode === 'camera') {
+      // Hold off on real detection — the placement/framing handshake with
+      // the TV (handlePlacementAck/handleMovesAck below) is what lifts
+      // this gate and actually starts per-move calibration.
+      inCameraSetupGate = true;
+      calibrationHint.textContent = '📺 Look at your TV to finish setting up your camera.';
+      sendCalibration('placement');
+    } else {
+      sendCalibration('start', { mode: currentMode });
+    }
+  }
+
+  function handlePlacementAck() {
+    if (currentMode !== 'camera' || !inCameraSetupGate || framingActive) return;
+    framingActive = true;
+    framingGoodStreakStart = null;
+    calibrationHint.textContent = '👀 Watch the TV — line yourself up in the outline.';
+  }
+
+  function handleMovesAck() {
+    if (currentMode !== 'camera' || !inCameraSetupGate) return;
+    inCameraSetupGate = false;
+    framingActive = false;
+    resetCalibration();
     sendCalibration('start', { mode: currentMode });
   }
 
@@ -332,6 +404,11 @@
   }
 
   function finishCalibration() {
+    // Manual escape hatch (Skip setup / Start Run) — can fire mid-placement
+    // or mid-framing if the player would rather just get going, so clear
+    // those gates too or real play would stay stuck undetected.
+    inCameraSetupGate = false;
+    framingActive = false;
     sendCalibration('done');
     actionHandlers = realHandlers;
     moveSensorPanelTo(playSensorSlot);
@@ -433,6 +510,11 @@
     } else {
       stopCamera();
       startMotionListeners();
+      // Switching away from camera mode (e.g. tapping the "Hold phone" tab
+      // mid-setup) means there's no more camera to place or frame — don't
+      // leave a stale gate blocking hold-phone detection.
+      inCameraSetupGate = false;
+      framingActive = false;
     }
     if (prev) showToast(mode === 'camera' ? 'Camera mode' : 'Hold-phone mode');
   }
@@ -578,7 +660,11 @@
 
   function processPose(pose) {
     cameraCtx.clearRect(0, 0, cameraCanvas.width, cameraCanvas.height);
-    if (!pose || !pose.keypoints) { cameraStatus.textContent = 'Step into frame'; return; }
+    if (!pose || !pose.keypoints) {
+      cameraStatus.textContent = 'Step into frame';
+      if (framingActive) sendFramingThrottled('no_person', false);
+      return;
+    }
     const keypoints = pose.keypoints;
     drawSkeleton(keypoints);
 
@@ -588,10 +674,24 @@
     const rHip = kp(keypoints, 'right_hip');
     const shoulderMid = midpoint(lShoulder, rShoulder);
     const hipMid = midpoint(lHip, rHip);
-    if (!shoulderMid || !hipMid) { cameraStatus.textContent = 'Step into frame'; return; }
+    if (!shoulderMid || !hipMid) {
+      cameraStatus.textContent = 'Step into frame';
+      if (framingActive) sendFramingThrottled('no_person', false);
+      return;
+    }
     cameraStatus.textContent = '';
 
     const torsoScale = Math.max(20, dist(shoulderMid, hipMid));
+
+    if (framingActive) {
+      // Still working through the placement/framing handshake with the TV
+      // — evaluate & report how well-framed the player is, but don't ALSO
+      // run real lane/jump/punch detection on top of that (see the big
+      // header comment for why).
+      evaluateFraming(keypoints, hipMid, torsoScale);
+      return;
+    }
+    if (inCameraSetupGate) return; // still on the "place your phone" step — camera's warming up, nothing to detect yet
     if (!detectionEnabled) return;
 
     // Lane (absolute: which zone is the player's body in right now).
@@ -627,6 +727,50 @@
     // Punch (fast wrist extension)
     checkPunch('left', kp(keypoints, 'left_wrist'), lShoulder, torsoScale, now);
     checkPunch('right', kp(keypoints, 'right_wrist'), rShoulder, torsoScale, now);
+  }
+
+  // Reports whether enough of the player is visible, at a sensible
+  // distance, roughly centered — everything the TV's silhouette guide
+  // needs to tell the player "step back" / "come closer" / "you're set".
+  // There's no real-world distance measurement available (no known camera
+  // focal length), so "too close/far" is inferred from torso height as a
+  // fraction of the frame — untested against a real phone camera, same
+  // caveat as the rest of this file's thresholds (see header comment).
+  function evaluateFraming(keypoints, hipMid, torsoScale) {
+    const frameW = cameraVideo.videoWidth;
+    const frameH = cameraVideo.videoHeight;
+    const nose = kp(keypoints, 'nose');
+
+    let status;
+    const torsoFrac = torsoScale / frameH;
+    const centerOffsetFrac = Math.abs(hipMid.x - frameW / 2) / frameW;
+
+    if (!nose) status = 'no_person';
+    else if (torsoFrac > FRAMING_TOO_CLOSE_FRAC) status = 'too_close';
+    else if (torsoFrac < FRAMING_TOO_FAR_FRAC) status = 'too_far';
+    else if (centerOffsetFrac > FRAMING_OFFCENTER_FRAC) status = 'off_center';
+    else status = 'good';
+
+    const now = performance.now();
+    if (status === 'good') {
+      if (framingGoodStreakStart === null) framingGoodStreakStart = now;
+    } else {
+      framingGoodStreakStart = null;
+    }
+    const ready = status === 'good' && framingGoodStreakStart !== null && now - framingGoodStreakStart > FRAMING_GOOD_HOLD_MS;
+
+    sendFramingThrottled(status, ready);
+  }
+
+  // Throttled so a jittery status doesn't flood the WebSocket — but a
+  // freshly-"ready" reading always goes through immediately so the TV's
+  // auto-advance timer starts on time.
+  function sendFramingThrottled(status, ready) {
+    const now = performance.now();
+    if (ready || now - lastFramingSentT > FRAMING_SEND_INTERVAL_MS) {
+      lastFramingSentT = now;
+      sendCalibration('framing', { status, ready });
+    }
   }
 
   function checkPunch(side, wrist, shoulder, torsoScale, now) {
