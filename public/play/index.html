@@ -186,19 +186,25 @@
   .bottom-row { display: flex; gap: 10px; margin-top: 10px; flex-shrink: 0; }
   .bottom-row .btn { flex: 1; padding: 12px 0; font-size: 14px; }
 
-  /* --- Fullscreen camera preview during setup (see updateFullscreenCam() in
+  /* --- Fullscreen camera preview (see updateFullscreenCam() in
      controller.js) — camera mode's live preview is genuinely useful info
-     the player needs while placing/framing the phone, so it takes over the
-     whole screen instead of sharing space with headers/hints. Only applied
-     on the calibration (setup) screen — the play screen keeps its normal
-     layout since the Jump/Punch buttons need their room there. */
-  body.cam-fullscreen #calibrationScreen {
+     the player wants full-size, both while placing/framing the phone
+     during setup AND during real play (camera mode is a "mirror" you
+     watch yourself in), so it takes over the whole screen instead of
+     sharing space with headers/buttons, which become an overlay on top
+     of it instead. Applies to both the calibration (setup) and play
+     screens — 2026-09-02 fix: play used to be excluded here, which is
+     exactly the "camera not fullscreen during the game" bug. */
+  body.cam-fullscreen #calibrationScreen,
+  body.cam-fullscreen #playScreen {
     position: fixed; inset: 0; z-index: 20; padding: 0; margin: 0;
     display: flex; flex-direction: column;
   }
-  body.cam-fullscreen #calSensorSlot { flex: 1; min-height: 0; }
+  body.cam-fullscreen #calSensorSlot,
+  body.cam-fullscreen #playSensorSlot { flex: 1; min-height: 0; }
   body.cam-fullscreen .camera-view { border-radius: 0; border: none; }
-  body.cam-fullscreen #calibrationScreen .status-row {
+  body.cam-fullscreen #calibrationScreen .status-row,
+  body.cam-fullscreen #playScreen .status-row {
     position: absolute; top: 0; left: 0; right: 0; z-index: 2; margin: 0;
     padding: calc(env(safe-area-inset-top) + 10px) 16px 16px;
     background: linear-gradient(rgba(0,0,0,0.65), transparent);
@@ -211,6 +217,33 @@
     position: absolute; left: 0; right: 0; bottom: 0; z-index: 2; margin: 0;
     padding: 12px 16px calc(env(safe-area-inset-bottom) + 12px);
     background: linear-gradient(transparent, rgba(0,0,0,0.8));
+  }
+
+  /* Play screen's own overlay stack: mode-tabs pinned just under the status
+     scrim, Jump/Punch + the motion-detection toggle pinned to the bottom
+     scrim — same idea as the calibration overlay above, sized for the
+     play screen's own controls instead. */
+  body.cam-fullscreen #playScreen .mode-tabs {
+    position: absolute; top: 0; left: 0; right: 0; z-index: 2;
+    margin: 0; padding: calc(env(safe-area-inset-top) + 54px) 16px 0;
+    background: linear-gradient(rgba(0,0,0,0.5), transparent);
+    pointer-events: none;
+  }
+  body.cam-fullscreen #playScreen .mode-tabs .mode-tab { pointer-events: auto; }
+  body.cam-fullscreen #playScreen .action-row,
+  body.cam-fullscreen #playScreen .bottom-row {
+    position: absolute; left: 0; right: 0; z-index: 2; margin: 0;
+    padding: 0 16px;
+  }
+  body.cam-fullscreen #playScreen .action-row {
+    bottom: calc(env(safe-area-inset-bottom) + 58px);
+    padding: 12px 16px 8px;
+    background: linear-gradient(transparent, rgba(0,0,0,0.75));
+  }
+  body.cam-fullscreen #playScreen .bottom-row {
+    bottom: 0;
+    padding: 8px 16px calc(env(safe-area-inset-bottom) + 10px);
+    background: rgba(0,0,0,0.75);
   }
 
   /* The shared sensor panel (camera-view/tilt-zone) starts out as a direct
