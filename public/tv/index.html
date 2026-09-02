@@ -72,6 +72,21 @@
   .cal-move-text { font-size: 46px; font-weight: 800; margin: 4px 0 10px; color: #6ee7ff; }
   .cal-dots { font-size: 26px; margin-top: 6px; letter-spacing: 4px; }
   .cal-step-counter { font-size: 18px; opacity: 0.75; margin-bottom: 4px; }
+
+  .setup-icon { font-size: 72px; line-height: 1; margin: 4px 0 10px; }
+  .silhouette-wrap { margin: 6px 0 10px; }
+  .silhouette {
+    fill: none; stroke: var(--sil-color, #ff8a8a); stroke-width: 5;
+    stroke-linejoin: round; stroke-linecap: round;
+    transition: stroke 0.2s ease;
+    filter: drop-shadow(0 0 6px rgba(0,0,0,0.4));
+  }
+  .silhouette.good { animation: silPulse 1s ease-in-out infinite; }
+  @keyframes silPulse {
+    0%, 100% { filter: drop-shadow(0 0 6px rgba(110,231,255,0.35)); }
+    50% { filter: drop-shadow(0 0 18px rgba(110,231,255,0.85)); }
+  }
+  .setup-status-text { font-size: 34px; font-weight: 800; margin: 6px 0 8px; color: #6ee7ff; }
 </style>
 </head>
 <body>
@@ -101,6 +116,27 @@
     <h1>Player connected! 🎉</h1>
     <p>Get some space to move. Lean left/right to change lanes, jump to hop over hurdles, and punch to smash crates.</p>
     <p class="hint pulse">Sending a JUMP or PUNCH from your phone starts the run…</p>
+  </div>
+
+  <div id="placementPanel" class="overlay-panel" style="display:none;">
+    <h1>Set Up Your Phone</h1>
+    <div class="setup-icon">📱📺</div>
+    <p>Place your phone under the TV, screen facing you, propped up so the camera can see you.</p>
+    <p class="hint">Then step back to your play space.</p>
+    <p class="hint pulse">Press OK on your remote when it's in place</p>
+  </div>
+
+  <div id="framingPanel" class="overlay-panel" style="display:none;">
+    <h1>Get In Frame</h1>
+    <div class="silhouette-wrap">
+      <svg id="framingSilhouette" class="silhouette" viewBox="0 0 120 200" width="120" height="200">
+        <circle cx="60" cy="28" r="20" />
+        <path d="M60 50 C34 54 26 88 30 136 L42 136 L46 188 L58 188 L60 140 L62 140 L64 188 L76 188 L80 136 L92 136 C96 88 88 54 60 50 Z" />
+      </svg>
+    </div>
+    <p class="setup-status-text" id="framingStatusText">Step into frame</p>
+    <p class="hint">Stand about 2–3 metres (7–10 ft) back so your head to hips fit in the outline</p>
+    <p class="hint" id="framingSubHint">Press OK once you're set, or hold still and we'll continue automatically</p>
   </div>
 
   <div id="calibrationPanel" class="overlay-panel" style="display:none;">
