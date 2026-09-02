@@ -1,6 +1,6 @@
 # Motion Run
 
-A "Danny Go"–style movement game: a 3D runner plays on your TV (Fire TV / any
+A "Danny Go"–style movement game: a 3D runner plays on your TV (Fire TV /
 browser), and your phone is the controller. Two control styles are built
 in — camera-based body tracking (prop the phone up and just move) or
 hold-the-phone motion sensing — either way: step/lean left or right to
@@ -198,21 +198,54 @@ control scheme — hold the phone and lean/hop/jab it. Switch between them
 any time from the tabs at the top of the play screen; the on-screen
 Jump/Punch buttons and tap-left/tap-right zones work in either mode.
 
-## The guided calibration screen
+## The guided setup screen
 
-After choosing a mode, a short "quick setup" walkthrough appears **on the
-TV** — one move at a time (step/lean left, step/lean right, jump, punch),
-shown as a big icon + label with a progress dot row. The phone (which owns
-the camera/motion sensors) runs the exact same gesture detection as real
-gameplay, but routes each detected gesture to the TV as calibration
-progress instead of as real game input — otherwise a practice jump would
-prematurely start the run, since the TV starts the game on its first real
-jump/punch input. The phone screen itself just shows "Look at your TV" plus
-a **Recenter** button (if detection seems off-center), **Skip setup**, and
-**Start Run** — it's not gated on finishing all four moves, skipping is
-always fine. This split exists because it's a lot easier to follow a
-walkthrough on the big screen you're already facing than on the phone
-you're not looking at while moving.
+Choosing **hold-phone mode** goes straight into the per-move walkthrough
+described below, since the player keeps the phone in hand the whole time.
+Choosing **camera mode** first walks through two extra stages — driven from
+the couch with the **Fire TV remote**, not the phone — because the player
+needs to physically prop the phone up and walk back to their play space
+before pose detection should react to anything, and reacting to that
+walk-away (or to the phone being fumbled with) as if it were a real jump or
+lane change was exactly the bug this setup exists to fix:
+
+1. **Place your phone** — the TV shows "place your phone under the TV,
+   screen facing you, then step back." Pressing **OK on the remote**
+   confirms it's in place. Nothing is being detected yet at this point —
+   camera and pose model are loading in the background, but gesture
+   detection stays fully off.
+2. **Get in frame** — the TV shows a silhouette outline and a live status
+   ("Step into frame" / "Move back a little" / "Move a bit closer" / "Move
+   to the center" / "Perfect! Hold still…") driven by the phone's pose
+   detection reporting how well-framed the player is — enough of them
+   visible, at a sensible distance, roughly centered. Once that holds for
+   about a second the TV moves on automatically; **OK on the remote** also
+   confirms/skips it early at any point, in case the auto-check is being
+   fussy. Detection is still off — this stage only checks *whether* the
+   player can be seen well, not looking at what they're doing.
+3. **Per-move calibration** — same as before: one move at a time (step/lean
+   left, step/lean right, jump, punch) shown as a big icon + label with a
+   progress dot row on the TV. This is the point gesture detection actually
+   turns on. The phone runs the exact same gesture detection as real
+   gameplay, but routes each detected gesture to the TV as calibration
+   progress instead of as real game input — otherwise a practice jump would
+   prematurely start the run, since the TV starts the game on its first
+   real jump/punch input.
+
+Throughout all of this the phone screen itself just shows a short "look at
+your TV" hint plus a **Recenter** button (if detection seems off-center),
+**Skip setup**, and **Start Run** — neither button is gated on finishing
+every stage, skipping straight to real play is always fine as a manual
+fallback if the remote isn't behaving as expected on your specific Fire TV
+model (see the caveat in *What's been tested* below).
+
+**How the remote reaches the phone:** the TV relays "OK" presses back to
+the phone over the same WebSocket connection as a `calibration_control`
+message (`placement_ack` / `moves_ack`), and the phone's `evaluateFraming()`
+(in `controller.js`) reports framing status back up as `calibration`
+`framing` events — see the big comment blocks in both `tv/game.js`'s camera
+setup section and `play/controller.js`'s header for the full message
+choreography.
 
 ## Tuning the motion detection
 
@@ -242,6 +275,11 @@ after trying it for real:
   passed into `computeZone()` in `processPose()` — see the comment right
   above it explaining the (unmirrored raw camera frame) sign convention it
   assumes.
+- `FRAMING_TOO_CLOSE_FRAC` / `FRAMING_TOO_FAR_FRAC` — the "get in frame"
+  check's too-close/too-far thresholds, as torso height (shoulder-to-hip
+  distance) relative to the frame height. `FRAMING_OFFCENTER_FRAC` is the
+  same idea horizontally. `FRAMING_GOOD_HOLD_MS` is how long "good" framing
+  has to be held before the TV auto-advances — see `evaluateFraming()`.
 
 **Hold-phone / accelerometer mode:**
 - `TILT_ENTER_DEG` / `TILT_EXIT_DEG` — same absolute-zone idea as the
@@ -269,8 +307,11 @@ for what this project needs, and was verified end-to-end (see below).
 **If you have normal npm access wherever you continue this project**,
 swapping in `express` + `ws` is a reasonable cleanup — the message protocol
 (`register` / `room` / `paired` / `input` / `character` / `calibration` /
-`error` / `controller_connected` / `feedback`) would carry over unchanged; only
-`server.js`'s plumbing would need to change. The TensorFlow.js/pose-detection
+`calibration_control` / `error` / `controller_connected` / `feedback`) would
+carry over unchanged; only `server.js`'s plumbing would need to change.
+`calibration_control` is the one message type that flows TV → phone (Fire TV
+remote OK presses during setup); everything else flows phone → TV. The
+TensorFlow.js/pose-detection
 libraries used by camera mode are loaded from a CDN in the browser directly
 (see the `TFJS_URL`/`POSE_DETECTION_URL` constants in `controller.js`), so
 they're unaffected by the sandbox's npm restriction either way.
@@ -288,11 +329,27 @@ what could be checked headlessly:
 - ✅ The WebSocket relay was exercised end-to-end over TLS with a scripted
   client, covering room pairing, `input` events, and `character` events all
   being correctly relayed controller → server → TV.
+- ✅ The full placement → framing → per-move-calibration flow (including
+  the new `calibration_control` TV→phone relay and the TV's remote-Enter
+  keydown handling) was exercised end-to-end with a scripted fake phone
+  client and a real (headless) TV page: placement/framing panels show and
+  hide correctly, framing status text updates per status, sustained
+  "good + ready" framing auto-advances after the hold time, a remote OK
+  press both confirms placement and manually skips the framing wait, the
+  per-move steps and "done" still work exactly as before, and the whole run
+  produced zero browser console errors.
 - ⬜ **Not tested:** actual 3D rendering/game feel in a real browser; the
-  camera pose-detection and accelerometer gesture thresholds on a real
-  device; the TensorFlow.js CDN URLs resolving (this sandbox's network
-  policy blocks the CDN hosts it would need to check them, though they're
-  well-established, long-published packages). These are the things to check
+  camera pose-detection, accelerometer, and get-in-frame thresholds on a
+  real device (the too-close/too-far/off-center fractions in *Tuning the
+  motion detection* are reasoned starting points, not measured); the
+  TensorFlow.js CDN URLs resolving (this sandbox's network policy blocks
+  the CDN hosts it would need to check them, though they're well-
+  established, long-published packages); and **whether your specific Fire
+  TV model's remote actually sends an `Enter` keydown for its OK/Select
+  button** to a plain fullscreen web page — the placement/framing stages'
+  `isSelectPress()` check in `tv/game.js` also accepts Space/NumpadEnter as
+  fallbacks, but if none of those fire on your remote, use **Skip setup**
+  on the phone as the manual way through. These are the things to check
   first when you pick this up — see *Tuning the motion detection* above,
   and just play it.
 
