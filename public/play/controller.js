@@ -68,9 +68,18 @@
   const LANE_EXIT_FRAC = 0.05;
   const JUMP_TRIGGER_TORSO_FRAC = 0.28;
   const JUMP_COOLDOWN_MS = 500;
-  const PUNCH_EXTENSION_FRAC = 0.42;
-  const PUNCH_VELOCITY_TORSO_FRAC = 1.5;
-  const PUNCH_COOLDOWN_MS = 450;
+  // Punch was firing continuously on real-device testing (2026-09-02) —
+  // ordinary running arm swing was crossing these thresholds repeatedly.
+  // Raised extension/velocity requirements (a punch now needs a clearly
+  // more deliberate, further-reaching, faster jab than a running swing)
+  // and roughly doubled the cooldown so even a borderline read can't
+  // re-fire every few hundred ms. See also the TV-side debounce in
+  // tv/game.js's handleInput(), which additionally ignores any punch
+  // message that arrives while the previous punch's animation is still
+  // playing — belt and braces against the same complaint.
+  const PUNCH_EXTENSION_FRAC = 0.52;
+  const PUNCH_VELOCITY_TORSO_FRAC = 2.0;
+  const PUNCH_COOLDOWN_MS = 700;
   // Was 20 — raised to 30 to cut the worst-case pose-sampling delay (how
   // long a real movement can sit before we even look at a new camera
   // frame) from 50ms to ~33ms. Latency-sensitive, so worth the extra CPU;
@@ -83,10 +92,12 @@
   const TILT_ENTER_DEG = 16;
   const TILT_EXIT_DEG = 6;
   const MOTION_JUMP_TRIGGER = 14;
-  const MOTION_PUNCH_TRIGGER = 9;
+  // Raised alongside PUNCH_EXTENSION_FRAC/PUNCH_COOLDOWN_MS above — same
+  // "punch firing continuously" real-device fix, hold-phone side.
+  const MOTION_PUNCH_TRIGGER = 13;
   const MOTION_ROTATION_LOW = 250;
   const MOTION_JUMP_COOLDOWN_MS = 500;
-  const MOTION_PUNCH_COOLDOWN_MS = 450;
+  const MOTION_PUNCH_COOLDOWN_MS = 700;
   const CROSS_TALK_LOCK_MS = 150;
   const GRAVITY_LOWPASS = 0.85;
 
@@ -325,9 +336,19 @@
     });
   }
 
-  function sendInput(action, value) {
+  function sendInput(action, value, opts) {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({ type: 'input', action, value }));
+    const msg = { type: 'input', action, value };
+    // `explicit` marks a message as a deliberate on-screen button tap, as
+    // opposed to one raised by gesture detection (camera pose / phone
+    // motion). The TV only lets an explicit tap (or its own remote) start
+    // or retry a run — see handleInput() in tv/game.js — so a noisy false
+    // -positive gesture can't accidentally kick off a new run on its own.
+    // The Fire TV remote and this phone's own buttons are meant to be the
+    // two reliable, deliberate ways to drive menus; raw gesture detection
+    // is for in-run jump/punch only.
+    if (opts && opts.explicit) msg.explicit = true;
+    ws.send(JSON.stringify(msg));
   }
   function sendCharacter() {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -457,24 +478,26 @@
   let lastPunchTime = 0;
   let lastActionTime = 0;
 
-  function fireJump() {
+  function fireJump(opts) {
     const now = performance.now();
     lastJumpTime = now;
     lastActionTime = now;
-    sendInput('jump');
+    sendInput('jump', undefined, opts);
     pulseAction(jumpBtn);
     if (navigator.vibrate) navigator.vibrate(30);
   }
-  function firePunch() {
+  function firePunch(opts) {
     const now = performance.now();
     lastPunchTime = now;
     lastActionTime = now;
-    sendInput('punch');
+    sendInput('punch', undefined, opts);
     pulseAction(punchBtn);
     if (navigator.vibrate) navigator.vibrate([20, 30, 20]);
   }
-  jumpBtn.addEventListener('click', fireJump);
-  punchBtn.addEventListener('click', firePunch);
+  // A direct tap of the on-screen Jump/Punch button is always "explicit" —
+  // see sendInput()'s comment above.
+  jumpBtn.addEventListener('click', () => fireJump({ explicit: true }));
+  punchBtn.addEventListener('click', () => firePunch({ explicit: true }));
 
   // Pause/Exit — a manual, always-reliable path to the same pause/exit
   // functionality the Fire TV remote's Back button also drives on the TV
@@ -494,6 +517,10 @@
   const realHandlers = {
     lane: (dir) => sendInput('lane', dir),
     laneZone: (zone) => sendInput('lane_set', zone),
+    // Gesture-triggered — deliberately NOT explicit (see sendInput()), so a
+    // stray pose/motion false-positive can't start or retry a run on its
+    // own. Once a run is actually in progress these still work exactly the
+    // same as a button tap for real gameplay jumps/punches.
     jump: () => fireJump(),
     punch: () => firePunch(),
   };
