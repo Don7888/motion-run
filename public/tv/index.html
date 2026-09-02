@@ -8,6 +8,25 @@
 <link rel="icon" type="image/svg+xml" href="./icons/icon.svg" />
 <meta name="theme-color" content="#0b1220" />
 <style>
+  /* 2026-09-02 "menu needs a more professional look" pass: a frosted-glass
+     panel treatment, a subtle full-screen vignette for depth, pill
+     backdrops behind the HUD text so it reads over busy gameplay, and a
+     heavier/tighter display weight for headings and scores. Deliberately
+     NOT pulling in a web font here — this device (Fire TV Stick, weak
+     hardware, and the "lag" complaint this same round is about) doesn't
+     need an extra render-blocking network fetch and a flash-of-unstyled-
+     text on every menu just for typography; the system UI font stack at a
+     heavy weight with tightened letter-spacing gets most of the same
+     "designed" feel for free. Kept to pure CSS/markup otherwise — no
+     game.js logic changed here.
+  */
+  :root {
+    --accent: #6ee7ff;
+    --accent-2: #7c8cff;
+    --gold: #ffd166;
+    --panel-bg: linear-gradient(165deg, rgba(21, 31, 54, 0.92), rgba(10, 15, 28, 0.92));
+    --panel-border: rgba(120, 200, 255, 0.35);
+  }
   html, body {
     margin: 0; padding: 0; width: 100%; height: 100%;
     background: #0b1220; color: #fff;
@@ -16,45 +35,77 @@
   }
   #gameCanvas { display: block; width: 100vw; height: 100vh; }
 
+  /* Permanent, subtle depth vignette — purely decorative, sits above the
+     canvas and below all HUD/panel content — makes both plain gameplay and
+     panel-over-gameplay moments read as more considered/finished. */
+  #vignette {
+    position: fixed; inset: 0; pointer-events: none;
+    background: radial-gradient(ellipse at center, transparent 45%, rgba(2, 5, 12, 0.55) 100%);
+  }
+
   #hud {
     position: fixed; inset: 0; pointer-events: none;
     display: flex; flex-direction: column; justify-content: space-between;
   }
   .top-bar {
     display: flex; justify-content: space-between; align-items: flex-start;
-    padding: 28px 40px; font-size: 28px; font-weight: 700;
+    padding: 24px 36px; font-size: 26px; font-weight: 700;
     text-shadow: 0 2px 8px rgba(0,0,0,0.6);
   }
-  .lives { display: flex; gap: 8px; font-size: 32px; }
+  .top-bar > div {
+    background: rgba(10, 16, 30, 0.55);
+    backdrop-filter: blur(6px);
+    border: 1px solid rgba(120, 200, 255, 0.22);
+    border-radius: 16px;
+    padding: 10px 20px;
+  }
+  .lives { display: flex; gap: 8px; font-size: 32px; align-items: center; }
   .heart.lost { opacity: 0.25; filter: grayscale(1); }
 
   .overlay-panel {
     pointer-events: auto;
-    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
-    background: rgba(10, 16, 30, 0.88);
-    border: 2px solid rgba(120, 200, 255, 0.4);
-    border-radius: 24px;
-    padding: 40px 56px;
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%) scale(1);
+    background: var(--panel-bg);
+    backdrop-filter: blur(18px) saturate(1.2);
+    border: 1px solid var(--panel-border);
+    border-radius: 28px;
+    padding: 44px 60px;
     text-align: center;
-    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+    box-shadow: 0 24px 70px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.03) inset,
+      0 1px 0 rgba(255,255,255,0.08) inset;
     max-width: 640px;
+    animation: panelIn 0.32s cubic-bezier(0.2, 0.8, 0.3, 1);
   }
-  .overlay-panel h1 { font-size: 44px; margin: 0 0 12px; }
-  .overlay-panel p { font-size: 22px; line-height: 1.5; opacity: 0.9; margin: 8px 0; }
+  @keyframes panelIn {
+    from { opacity: 0; transform: translate(-50%, -50%) scale(0.94) translateY(8px); }
+    to   { opacity: 1; transform: translate(-50%, -50%) scale(1) translateY(0); }
+  }
+  .overlay-panel h1 {
+    font-weight: 800; letter-spacing: -0.5px;
+    font-size: 42px; margin: 0 0 14px;
+  }
+  .overlay-panel p { font-size: 21px; line-height: 1.55; opacity: 0.88; margin: 8px 0; }
   .room-code {
     display: inline-block; margin: 18px 0; padding: 14px 28px;
     font-size: 48px; font-weight: 800; letter-spacing: 8px;
-    background: linear-gradient(135deg, #6ee7ff, #7c8cff);
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
     color: #0b1220; border-radius: 16px;
+    box-shadow: 0 10px 30px rgba(110,231,255,0.25);
   }
-  .hint { font-size: 18px; opacity: 0.75; }
+  .hint { font-size: 17px; opacity: 0.7; }
   .pulse { animation: pulse 1.6s ease-in-out infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.55} }
 
-  .score-big { font-size: 64px; font-weight: 800; margin: 8px 0 24px; color: #6ee7ff; }
+  .score-big {
+    font-family: inherit; letter-spacing: -0.5px; font-size: 60px; font-weight: 800;
+    margin: 8px 0 24px; color: var(--accent);
+    text-shadow: 0 0 24px rgba(110,231,255,0.35);
+  }
   .action-btn {
-    margin-top: 10px; font-size: 20px; padding: 12px 24px; border-radius: 12px;
-    border: none; background: #6ee7ff; color: #0b1220; font-weight: 700; cursor: pointer;
+    margin-top: 14px; font-size: 19px; padding: 14px 28px; border-radius: 14px;
+    border: none; background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: #0b1220; font-weight: 800; cursor: pointer; letter-spacing: 0.2px;
+    box-shadow: 0 10px 24px rgba(110,231,255,0.3);
   }
 
   #combo {
@@ -69,9 +120,9 @@
   }
 
   .cal-move-icon { font-size: 96px; line-height: 1; margin: 6px 0; }
-  .cal-move-text { font-size: 46px; font-weight: 800; margin: 4px 0 10px; color: #6ee7ff; }
+  .cal-move-text { font-family: inherit; letter-spacing: -0.5px; font-size: 44px; font-weight: 800; margin: 4px 0 10px; color: var(--accent); }
   .cal-dots { font-size: 26px; margin-top: 6px; letter-spacing: 4px; }
-  .cal-step-counter { font-size: 18px; opacity: 0.75; margin-bottom: 4px; }
+  .cal-step-counter { font-size: 16px; font-weight: 700; opacity: 0.65; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 1.5px; }
 
   .setup-icon { font-size: 72px; line-height: 1; margin: 4px 0 10px; }
   .silhouette-wrap { margin: 6px 0 10px; }
@@ -86,9 +137,9 @@
     0%, 100% { filter: drop-shadow(0 0 6px rgba(110,231,255,0.35)); }
     50% { filter: drop-shadow(0 0 18px rgba(110,231,255,0.85)); }
   }
-  .setup-status-text { font-size: 34px; font-weight: 800; margin: 6px 0 8px; color: #6ee7ff; }
+  .setup-status-text { font-family: inherit; letter-spacing: -0.5px; font-size: 32px; font-weight: 800; margin: 6px 0 8px; color: var(--accent); }
 
-  .high-score { text-align: center; color: #ffd166; }
+  .high-score { text-align: center; color: var(--gold); }
 
   /* Persistent "what do I use right now?" indicator — shown at every
      non-playing stage so it's always obvious whether the Fire TV remote or
@@ -96,21 +147,24 @@
      in game.js. */
   .control-badge {
     position: fixed; top: 28px; left: 50%; transform: translateX(-50%);
-    background: rgba(10,16,30,0.88); border-radius: 999px;
-    padding: 10px 24px; font-size: 18px; font-weight: 700;
+    background: rgba(10,16,30,0.75); backdrop-filter: blur(8px); border-radius: 999px;
+    padding: 10px 26px; font-size: 17px; font-weight: 700; letter-spacing: 0.2px;
     z-index: 30; pointer-events: none; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
-    text-shadow: 0 2px 6px rgba(0,0,0,0.6); border: 2px solid transparent;
+    text-shadow: 0 2px 6px rgba(0,0,0,0.6); border: 1px solid transparent;
   }
-  .control-badge.remote { border-color: #ffd166; color: #ffd166; }
-  .control-badge.phone { border-color: #6ee7ff; color: #6ee7ff; }
+  .control-badge.remote { border-color: rgba(255,209,102,0.6); color: var(--gold); }
+  .control-badge.phone { border-color: rgba(110,231,255,0.6); color: var(--accent); }
 
   .setup-callout {
-    display: inline-block; margin: 10px 0; padding: 10px 18px;
-    background: rgba(255,209,102,0.12); border: 2px solid rgba(255,209,102,0.5);
-    border-radius: 14px; font-weight: 700; font-size: 19px; color: #ffd166;
+    display: inline-block; margin: 10px 0; padding: 10px 20px;
+    background: rgba(255,209,102,0.1); border: 1px solid rgba(255,209,102,0.5);
+    border-radius: 14px; font-weight: 700; font-size: 18px; color: var(--gold);
   }
 
-  .new-high-score { color: #ffd166; font-weight: 800; font-size: 22px; margin: 4px 0 14px; }
+  .new-high-score {
+    color: var(--gold); font-weight: 800; font-size: 21px; margin: 4px 0 14px;
+    text-shadow: 0 0 18px rgba(255,209,102,0.4);
+  }
 
   /* Timing cue — pulses shortly before an obstacle in the player's lane
      reaches them, so jump/punch timing is learnable. See
@@ -130,6 +184,7 @@
 </head>
 <body>
   <canvas id="gameCanvas"></canvas>
+  <div id="vignette"></div>
   <div id="flash"></div>
 
   <div id="hud">
