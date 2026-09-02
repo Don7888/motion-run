@@ -115,6 +115,13 @@
   // "punch firing continuously" real-device fix, hold-phone side.
   const MOTION_PUNCH_TRIGGER = 13;
   const MOTION_ROTATION_LOW = 250;
+  // How much more vertical (device Y-axis) acceleration than lateral
+  // (X/Z) acceleration a reading needs before onDeviceMotion() is willing
+  // to call it a jump at all — see the big comment inside onDeviceMotion()
+  // for why this exists (2026-09-02 "punch still not there" fix). 1.0
+  // means "at least as vertical as lateral"; keeping it modest (not much
+  // above 1.0) avoids over-correcting into swallowing real jumps.
+  const MOTION_VERTICAL_DOMINANCE = 1.05;
   const MOTION_JUMP_COOLDOWN_MS = 500;
   const MOTION_PUNCH_COOLDOWN_MS = 700;
   // Calibration-only hold-phone punch thresholds — same reasoning as
@@ -223,15 +230,23 @@
     el.style.display = 'flex';
     updateFullscreenCam();
   }
-  // Camera mode's live preview is genuinely small useful info during setup
-  // (the player needs to actually see themselves to place/frame the phone
-  // correctly) — so while the calibration screen is showing AND camera mode
-  // is active, blow the preview up to fill the whole phone screen instead
-  // of sharing space with headers/hints. Play screen keeps the normal
-  // layout since the Jump/Punch buttons need their room there.
+  // Camera mode's live preview is genuinely useful to see full-size — both
+  // while setting up (placing/framing the phone) and during real play (the
+  // whole point of camera mode is watching yourself on the "mirror"), so on
+  // either screen, while camera mode is active, blow the preview up to fill
+  // the whole phone screen instead of sharing space with headers/buttons.
+  // 2026-09-02 fix: this used to be gated to the calibration screen only
+  // ("Play screen keeps the normal layout since the Jump/Punch buttons need
+  // their room there") — but the buttons just need to become an overlay on
+  // top of the fullscreen feed instead, same as the calibration screen's
+  // header/hint/actions already do (see the body.cam-fullscreen #playScreen
+  // CSS block), so there's no real reason play should be the exception the
+  // user is hitting every time they turn the phone sideways mid-game.
+  // Hold-phone mode has no camera feed to fill, so it's excluded either way.
   function updateFullscreenCam() {
     const onCalibration = calibrationScreen.style.display !== 'none';
-    document.body.classList.toggle('cam-fullscreen', onCalibration && currentMode === 'camera');
+    const onPlay = playScreen.style.display !== 'none';
+    document.body.classList.toggle('cam-fullscreen', (onCalibration || onPlay) && currentMode === 'camera');
   }
   function showToast(msg) {
     toast.textContent = msg;
@@ -982,9 +997,10 @@
 
   function onDeviceMotion(e) {
     const usePreFiltered = e.acceleration && e.acceleration.x !== null;
-    let mag;
+    let ax, ay, az, mag;
     if (usePreFiltered) {
       const { x, y, z } = e.acceleration;
+      ax = x; ay = y; az = z;
       mag = Math.sqrt(x * x + y * y + z * z);
     } else if (e.accelerationIncludingGravity && e.accelerationIncludingGravity.x !== null) {
       const raw = e.accelerationIncludingGravity;
@@ -992,8 +1008,8 @@
       gravity.x = gravity.x * GRAVITY_LOWPASS + raw.x * (1 - GRAVITY_LOWPASS);
       gravity.y = gravity.y * GRAVITY_LOWPASS + raw.y * (1 - GRAVITY_LOWPASS);
       gravity.z = gravity.z * GRAVITY_LOWPASS + raw.z * (1 - GRAVITY_LOWPASS);
-      const lx = raw.x - gravity.x, ly = raw.y - gravity.y, lz = raw.z - gravity.z;
-      mag = Math.sqrt(lx * lx + ly * ly + lz * lz);
+      ax = raw.x - gravity.x; ay = raw.y - gravity.y; az = raw.z - gravity.z;
+      mag = Math.sqrt(ax * ax + ay * ay + az * az);
     } else {
       return;
     }
@@ -1009,8 +1025,30 @@
     const now = performance.now();
     if (now - lastActionTime < CROSS_TALK_LOCK_MS) return;
 
+    // 2026-09-02 "punch still not there during setup" fix: the old logic
+    // below checked ONLY the overall acceleration magnitude to decide
+    // "jump", and rotationRate (hasRotation/rot) was meant to be the
+    // tie-breaker against punches — but rotationRate is commonly
+    // null/unavailable on real Android browsers, so `!hasRotation` was
+    // true on most real devices, which made the jump check fire (and
+    // `return` before the punch code below ever ran) for ANY hard motion,
+    // including punches, since a real punch's accelerometer magnitude
+    // very often also clears MOTION_JUMP_TRIGGER. That fully explains why
+    // round 4's calibration-only punch *threshold* loosening had no felt
+    // effect — the punch branch was frequently unreachable, not
+    // insensitive. Fix: use the accelerometer's own axis split as the
+    // primary jump/punch disambiguator (always available, unlike
+    // rotationRate) — a jump moves the whole body, and the phone with it,
+    // up/down along the phone's held-upright long axis (Y), while a punch
+    // is a forward/lateral jab, dominant on X/Z, not Y. rotationRate is
+    // still used as a secondary hint on devices that do report it.
+    const verticalMag = Math.abs(ay);
+    const lateralMag = Math.sqrt(ax * ax + az * az);
+    const looksVertical = verticalMag >= lateralMag * MOTION_VERTICAL_DOMINANCE;
+
     if (mag > MOTION_JUMP_TRIGGER && now - lastJumpTime > MOTION_JUMP_COOLDOWN_MS) {
-      if (!hasRotation || rot < MOTION_ROTATION_LOW) {
+      const rotationSaysJump = !hasRotation || rot < MOTION_ROTATION_LOW;
+      if (looksVertical && rotationSaysJump) {
         lastJumpTime = now; lastActionTime = now;
         actionHandlers.jump();
         return;
@@ -1026,7 +1064,8 @@
     const punchTrigger = calibrating ? CAL_MOTION_PUNCH_TRIGGER : MOTION_PUNCH_TRIGGER;
     const punchCooldown = calibrating ? CAL_MOTION_PUNCH_COOLDOWN_MS : MOTION_PUNCH_COOLDOWN_MS;
     if (mag > punchTrigger && now - lastPunchTime > punchCooldown) {
-      if (!hasRotation || rot >= MOTION_ROTATION_LOW || mag <= MOTION_JUMP_TRIGGER) {
+      const rotationSaysPunch = !hasRotation || rot >= MOTION_ROTATION_LOW || mag <= MOTION_JUMP_TRIGGER;
+      if (!looksVertical || rotationSaysPunch) {
         lastPunchTime = now; lastActionTime = now;
         actionHandlers.punch();
       }
