@@ -213,6 +213,20 @@
     background: linear-gradient(transparent, rgba(0,0,0,0.8));
   }
 
+  /* The shared sensor panel (camera-view/tilt-zone) starts out as a direct
+     child of #app, sitting right after #playScreen in the markup, before
+     any JS has run moveSensorPanelTo() to relocate it into whichever
+     screen's slot is active. #app is a flex column, so left un-hidden that
+     idle sensorPanel was a SECOND flex:1 sibling next to whichever screen
+     is showing (e.g. #characterScreen) — the two split #app's height
+     evenly, which is exactly the "character creator is only half the
+     screen" bug. Hiding it specifically while it's still a direct child of
+     #app (not once JS has appended it into #calSensorSlot/#playSensorSlot,
+     which are elsewhere in the tree) fixes that without needing JS to
+     manage its visibility at all. */
+  #app > .sensor-panel { display: none; }
+  .sensor-panel { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+
   #toast {
     position: fixed; left: 50%; bottom: 18px; transform: translate(-50%, 0);
     background: rgba(0,0,0,0.75); padding: 10px 18px; border-radius: 12px; font-size: 14px;
@@ -329,7 +343,7 @@
   <!-- Shared sensor panel: one real camera/tilt UI, moved by JS between
        #calSensorSlot (during setup) and #playSensorSlot (during real play)
        so the camera stream and pose loop never restart between screens. -->
-  <div id="sensorPanel" style="flex:1; display:flex; flex-direction:column; min-height:0;">
+  <div id="sensorPanel" class="sensor-panel">
     <div class="tilt-zone" id="tiltZone">
       <div class="lane-arrows"><span>◀</span><span>▶</span></div>
       <div class="tilt-marker" id="tiltMarker"></div>
