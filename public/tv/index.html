@@ -111,6 +111,21 @@
   }
 
   .new-high-score { color: #ffd166; font-weight: 800; font-size: 22px; margin: 4px 0 14px; }
+
+  /* Timing cue — pulses shortly before an obstacle in the player's lane
+     reaches them, so jump/punch timing is learnable. See
+     updateActionPrompt() in game.js. */
+  #actionPrompt {
+    position: fixed; top: 130px; left: 50%; transform: translateX(-50%);
+    font-size: 42px; font-weight: 900; color: #fff176; letter-spacing: 2px;
+    text-shadow: 0 3px 10px rgba(0,0,0,0.8), 0 0 22px rgba(255,209,102,0.65);
+    z-index: 25; pointer-events: none;
+    animation: promptPulse 0.45s ease-in-out infinite;
+  }
+  @keyframes promptPulse {
+    0%, 100% { transform: translateX(-50%) scale(1); }
+    50% { transform: translateX(-50%) scale(1.18); }
+  }
 </style>
 </head>
 <body>
@@ -127,6 +142,7 @@
   </div>
 
   <div id="controlBadge" class="control-badge" style="display:none;"></div>
+  <div id="actionPrompt" style="display:none;"></div>
 
   <div id="combo"></div>
 
@@ -143,7 +159,7 @@
   <div id="readyPanel" class="overlay-panel" style="display:none;">
     <h1>Player connected! 🎉</h1>
     <p>Get some space to move. Lean left/right to change lanes, jump to hop over hurdles, and punch to smash crates.</p>
-    <p class="hint pulse">Jump or punch on your phone, or press OK on your remote, to start the run…</p>
+    <p class="hint pulse">🎮 Press OK on your remote (or tap Jump/Punch on your phone) to start the run…</p>
   </div>
 
   <div id="placementPanel" class="overlay-panel" style="display:none;">
@@ -188,7 +204,7 @@
     <h1>Run Over!</h1>
     <div class="score-big"><span id="finalScore">0</span> pts</div>
     <p class="new-high-score" id="newHighScoreNote" style="display:none;">🏆 New High Score!</p>
-    <p class="hint pulse">Jump or punch on your phone, or press OK on your remote, to run again</p>
+    <p class="hint pulse">🎮 Press OK on your remote (or tap Jump/Punch on your phone) to run again</p>
   </div>
 
   <script type="module" src="./game.js"></script>
