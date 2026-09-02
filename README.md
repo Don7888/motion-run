@@ -1,6 +1,6 @@
 # Motion Run
 
-A "Danny Go"–style movement game: a 3D runner plays on your TV (Fire TV /
+A "Danny Go"–style movement game: a 3D runner plays on your TV (Fire TV / any
 browser), and your phone is the controller. Two control styles are built
 in — camera-based body tracking (prop the phone up and just move) or
 hold-the-phone motion sensing — either way: step/lean left or right to
