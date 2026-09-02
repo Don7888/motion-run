@@ -87,6 +87,30 @@
     50% { filter: drop-shadow(0 0 18px rgba(110,231,255,0.85)); }
   }
   .setup-status-text { font-size: 34px; font-weight: 800; margin: 6px 0 8px; color: #6ee7ff; }
+
+  .high-score { text-align: center; color: #ffd166; }
+
+  /* Persistent "what do I use right now?" indicator — shown at every
+     non-playing stage so it's always obvious whether the Fire TV remote or
+     the phone is what drives the current screen. See updateControlBadge()
+     in game.js. */
+  .control-badge {
+    position: fixed; top: 28px; left: 50%; transform: translateX(-50%);
+    background: rgba(10,16,30,0.88); border-radius: 999px;
+    padding: 10px 24px; font-size: 18px; font-weight: 700;
+    z-index: 30; pointer-events: none; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    text-shadow: 0 2px 6px rgba(0,0,0,0.6); border: 2px solid transparent;
+  }
+  .control-badge.remote { border-color: #ffd166; color: #ffd166; }
+  .control-badge.phone { border-color: #6ee7ff; color: #6ee7ff; }
+
+  .setup-callout {
+    display: inline-block; margin: 10px 0; padding: 10px 18px;
+    background: rgba(255,209,102,0.12); border: 2px solid rgba(255,209,102,0.5);
+    border-radius: 14px; font-weight: 700; font-size: 19px; color: #ffd166;
+  }
+
+  .new-high-score { color: #ffd166; font-weight: 800; font-size: 22px; margin: 4px 0 14px; }
 </style>
 </head>
 <body>
@@ -96,10 +120,13 @@
   <div id="hud">
     <div class="top-bar">
       <div>Score<br /><span id="scoreVal" style="font-size:36px;">0</span></div>
+      <div class="high-score">🏆 High Score<br /><span id="highScoreVal" style="font-size:28px;">0</span></div>
       <div class="lives" id="lives"></div>
     </div>
     <div style="height:1px"></div>
   </div>
+
+  <div id="controlBadge" class="control-badge" style="display:none;"></div>
 
   <div id="combo"></div>
 
@@ -110,20 +137,22 @@
     <p>and enter this code:</p>
     <div class="room-code" id="roomCode">······</div>
     <p class="hint pulse" id="pairingHint">Waiting for your phone to connect…</p>
+    <p class="hint">🎮 You won't need your Fire TV remote until setup starts — just your phone for now.</p>
   </div>
 
   <div id="readyPanel" class="overlay-panel" style="display:none;">
     <h1>Player connected! 🎉</h1>
     <p>Get some space to move. Lean left/right to change lanes, jump to hop over hurdles, and punch to smash crates.</p>
-    <p class="hint pulse">Sending a JUMP or PUNCH from your phone starts the run…</p>
+    <p class="hint pulse">Jump or punch on your phone, or press OK on your remote, to start the run…</p>
   </div>
 
   <div id="placementPanel" class="overlay-panel" style="display:none;">
     <h1>Set Up Your Phone</h1>
     <div class="setup-icon">📱📺</div>
     <p>Place your phone under the TV, screen facing you, propped up so the camera can see you.</p>
+    <p class="setup-callout">📱↔️ Turn it sideways (landscape) so it can see your whole body</p>
     <p class="hint">Then step back to your play space.</p>
-    <p class="hint pulse">Press OK on your remote when it's in place</p>
+    <p class="hint pulse">🎮 Press OK on your remote when it's in place</p>
   </div>
 
   <div id="framingPanel" class="overlay-panel" style="display:none;">
@@ -136,7 +165,7 @@
     </div>
     <p class="setup-status-text" id="framingStatusText">Step into frame</p>
     <p class="hint">Stand about 2–3 metres (7–10 ft) back so your head to hips fit in the outline</p>
-    <p class="hint" id="framingSubHint">Press OK once you're set, or hold still and we'll continue automatically</p>
+    <p class="hint" id="framingSubHint">🎮 Press OK once you're set, or hold still and we'll continue automatically</p>
   </div>
 
   <div id="calibrationPanel" class="overlay-panel" style="display:none;">
@@ -144,14 +173,22 @@
     <p class="cal-step-counter" id="calStepCounter">Step 1 of 4</p>
     <div class="cal-move-icon" id="calMoveIcon">⬅️</div>
     <div class="cal-move-text" id="calMoveText">Step LEFT</div>
-    <p class="hint">Copy the move shown here to check it off</p>
+    <p class="hint">📱 Copy the move shown here on your phone to check it off — no remote needed here</p>
     <div class="cal-dots" id="calDots"></div>
+  </div>
+
+  <div id="pausedPanel" class="overlay-panel" style="display:none;">
+    <h1>Paused ⏸</h1>
+    <div class="score-big" style="font-size:40px;"><span id="pausedScoreVal">0</span> pts so far</div>
+    <p class="hint pulse">🎮 Press OK on your remote (or tap ▶ on your phone) to resume</p>
+    <p class="hint">🎮 Press Back again (or tap ✕ Exit on your phone) to end this run</p>
   </div>
 
   <div id="gameOverPanel" class="overlay-panel" style="display:none;">
     <h1>Run Over!</h1>
     <div class="score-big"><span id="finalScore">0</span> pts</div>
-    <p class="hint pulse">Jump or punch on your phone to run again</p>
+    <p class="new-high-score" id="newHighScoreNote" style="display:none;">🏆 New High Score!</p>
+    <p class="hint pulse">Jump or punch on your phone, or press OK on your remote, to run again</p>
   </div>
 
   <script type="module" src="./game.js"></script>
