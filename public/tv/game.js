@@ -34,13 +34,26 @@ const HIT_INVULN_TIME = 1.1;
 // crate arriving at the collision zone counts as "safely smashed"), so it
 // stays exactly as tuned. This timer just drives the exaggerated visual
 // windup/snap/settle and can run longer without touching game balance.
-const PUNCH_ANIM_DURATION = 0.55;
-const PUNCH_WINDUP_FRAC = 0.16; // fraction of the animation spent winding up (arm pulls back)
-const PUNCH_SNAP_FRAC = 0.34;   // fraction spent snapping forward (with overshoot)
-const PUNCH_WINDUP_PULL = 0.5;  // radians the arm pulls back before throwing the punch
-const PUNCH_MAX_EXTEND = -2.5;  // radians of forward extension at full reach (~143°) — big and cartoonish
+// Sized up again 2026-09-02 ("not exaggerated enough" feedback) — bigger
+// windup, further reach, and a stronger overshoot snap (see the increased
+// easeOutBack() overshoot constant below too).
+const PUNCH_ANIM_DURATION = 0.68;
+const PUNCH_WINDUP_FRAC = 0.15; // fraction of the animation spent winding up (arm pulls back)
+const PUNCH_SNAP_FRAC = 0.3;    // fraction spent snapping forward (with overshoot)
+const PUNCH_WINDUP_PULL = 0.85; // radians the arm pulls back before throwing the punch
+const PUNCH_MAX_EXTEND = -2.95; // radians of forward extension at full reach (~169°) — big and cartoonish
 
 const OBSTACLE_TYPES = ['hurdle', 'crate', 'wall'];
+
+// On-screen action prompt (added 2026-09-02, "prompt telling the player
+// when to punch/jump so they can time it" feedback) — see
+// updateActionPrompt() below for the logic; this is just the per-type copy.
+const ACTION_PROMPT_META = {
+  hurdle: { icon: '⬆️', text: 'JUMP!' },
+  crate: { icon: '👊', text: 'PUNCH!' },
+  wall: { icon: '↔️', text: 'MOVE!' },
+};
+const PROMPT_LEAD_TIME = 0.85; // seconds of warning shown before the obstacle reaches the collision zone
 
 // Obstacle knockback (see launchObstacleFlying()) — a punched crate
 // rockets off with its own little projectile arc instead of just scrolling
@@ -64,8 +77,9 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x8fd3ff);
 scene.fog = new THREE.Fog(0x8fd3ff, 30, 85);
 
+const CAMERA_BASE_Y = 4.6;
 const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 200);
-camera.position.set(0, 4.6, 8.2);
+camera.position.set(0, CAMERA_BASE_Y, 8.2);
 
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
@@ -336,25 +350,55 @@ function launchObstacleFlying(o, speed) {
 // pure juice, no gameplay effect. Self-contained: each burst tracks its
 // own particles and removes itself from the scene once they've faded.
 const IMPACT_COLORS = [0xffd166, 0xff5a5f, 0x6ee7ff, 0xffffff];
+const IMPACT_PARTICLE_COUNT = 16; // was 10 — bigger, busier "POW" for the exaggerated-punch upgrade
 function spawnImpactBurst(position) {
   const group = new THREE.Group();
   const particles = [];
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < IMPACT_PARTICLE_COUNT; i++) {
     const mat = new THREE.MeshBasicMaterial({ color: IMPACT_COLORS[i % IMPACT_COLORS.length], transparent: true });
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.14, 0.14), mat);
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.18, 0.18), mat);
     mesh.position.copy(position);
-    const angle = (i / 10) * Math.PI * 2 + Math.random() * 0.4;
-    const speedXZ = 3.5 + Math.random() * 3;
+    const angle = (i / IMPACT_PARTICLE_COUNT) * Math.PI * 2 + Math.random() * 0.4;
+    const speedXZ = 4 + Math.random() * 3.5;
     particles.push({
       mesh,
-      vel: { x: Math.cos(angle) * speedXZ, y: 3 + Math.random() * 4, z: Math.sin(angle) * speedXZ },
+      vel: { x: Math.cos(angle) * speedXZ, y: 3.5 + Math.random() * 4.5, z: Math.sin(angle) * speedXZ },
     });
     group.add(mesh);
   }
   scene.add(group);
   impactBursts.push({ group, particles, age: 0 });
 }
-const IMPACT_BURST_LIFETIME = 0.5; // seconds
+const IMPACT_BURST_LIFETIME = 0.6; // seconds — was 0.5
+
+// Shows a pulsing "JUMP!"/"PUNCH!"/"MOVE!" cue shortly before the nearest
+// unresolved, non-flying obstacle in the player's CURRENT lane would reach
+// the collision zone — a timing cue so the player can learn the rhythm
+// instead of just reacting. Recomputed fresh every frame from live state
+// (not a one-shot flag), so it naturally updates if the player changes
+// lanes and a different obstacle becomes the relevant one, and it hides
+// itself the instant nothing in-lane is within the warning window.
+function updateActionPrompt(speed) {
+  let target = null;
+  let bestZ = -Infinity;
+  for (const o of obstacles) {
+    if (o.flying || o.resolved) continue;
+    if (o.lane !== state.lane) continue;
+    if (o.mesh.position.z >= COLLISION_Z_MIN) continue;
+    // Obstacles travel toward +z, so the largest z among candidates is the
+    // one closest to the player right now.
+    if (o.mesh.position.z > bestZ) { bestZ = o.mesh.position.z; target = o; }
+  }
+  if (!target || speed <= 0) { actionPromptEl.style.display = 'none'; return; }
+  const timeToImpact = (COLLISION_Z_MIN - bestZ) / speed;
+  if (timeToImpact > PROMPT_LEAD_TIME || timeToImpact < 0) { actionPromptEl.style.display = 'none'; return; }
+  const meta = ACTION_PROMPT_META[target.type] || ACTION_PROMPT_META.hurdle;
+  actionPromptEl.textContent = `${meta.icon} ${meta.text}`;
+  actionPromptEl.style.display = 'block';
+}
+function hideActionPrompt() {
+  actionPromptEl.style.display = 'none';
+}
 
 function updateImpactBursts(dt) {
   for (let i = impactBursts.length - 1; i >= 0; i--) {
@@ -385,7 +429,9 @@ function updateImpactBursts(dt) {
 // big and floppy as we want without touching game balance.
 // ---------------------------------------------------------------------
 function easeOutBack(x) {
-  const c1 = 1.70158;
+  // c1 raised from the textbook 1.70158 to exaggerate the overshoot — a
+  // bigger cartoonish "snap past the target and settle back" for the punch.
+  const c1 = 2.4;
   const c3 = c1 + 1;
   return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2);
 }
@@ -408,7 +454,7 @@ function punchArmRotation(elapsedFrac) {
 // extension — drives the torso squash/stretch and the forward lunge.
 function punchImpactBump(elapsedFrac) {
   const peak = PUNCH_WINDUP_FRAC + PUNCH_SNAP_FRAC;
-  const width = 0.14;
+  const width = 0.17; // widened slightly alongside the bigger animation below
   const d = Math.abs(elapsedFrac - peak);
   return d < width ? 1 - d / width : 0;
 }
@@ -475,6 +521,7 @@ const pairingHint = document.getElementById('pairingHint');
 const comboEl = document.getElementById('combo');
 const flashEl = document.getElementById('flash');
 const finalScoreEl = document.getElementById('finalScore');
+const actionPromptEl = document.getElementById('actionPrompt');
 
 function renderLives() {
   livesEl.innerHTML = '';
@@ -717,6 +764,7 @@ function resetRun() {
   torso.scale.set(1, 1, 1);
   renderLives();
   scoreVal.textContent = '0';
+  hideActionPrompt();
 }
 
 function startPlaying() {
@@ -733,6 +781,7 @@ function gameOver() {
   finalScoreEl.textContent = Math.floor(state.score);
   commitHighScore();
   newHighScoreNote.style.display = state.score > highScoreAtRunStart ? 'block' : 'none';
+  hideActionPrompt();
   syncPanel();
 }
 
@@ -762,6 +811,7 @@ function pauseGame() {
   if (state.phase !== 'playing') return;
   state.phase = 'paused';
   pausedScoreVal.textContent = String(Math.floor(state.score));
+  hideActionPrompt();
   syncPanel();
 }
 
@@ -779,6 +829,7 @@ function exitToMenu() {
   state.phase = 'ready';
   calibrating = false;
   setupStage = 'none';
+  hideActionPrompt();
   syncPanel();
 }
 
@@ -843,11 +894,19 @@ function handleInput(msg) {
     return;
   }
 
-  if (state.phase === 'ready' && (msg.action === 'jump' || msg.action === 'punch')) {
+  // Starting/retrying a run requires an *explicit* jump/punch — a deliberate
+  // tap of the phone's on-screen button (see sendInput()/fireJump()/
+  // firePunch() in play/controller.js) — not a raw gesture detection, so a
+  // noisy false-positive punch/jump reading can't accidentally kick off a
+  // new run on its own. The Fire TV remote's OK button (see the keydown
+  // handler further down) is the other, equally deliberate way in — those
+  // two are meant to be the primary/reliable paths; gesture detection only
+  // drives real in-run jump/punch, never phase transitions.
+  if (state.phase === 'ready' && (msg.action === 'jump' || msg.action === 'punch') && msg.explicit) {
     startPlaying();
     return;
   }
-  if (state.phase === 'gameover' && (msg.action === 'jump' || msg.action === 'punch')) {
+  if (state.phase === 'gameover' && (msg.action === 'jump' || msg.action === 'punch') && msg.explicit) {
     startPlaying();
     return;
   }
@@ -871,6 +930,15 @@ function handleInput(msg) {
       state.vy = JUMP_VELOCITY;
     }
   } else if (msg.action === 'punch') {
+    // Ignore a new punch while the last one's big cosmetic animation is
+    // still playing. Without this, a burst of punch messages (e.g. an
+    // over-sensitive gesture reading) restarted the animation every time
+    // one arrived, which looked like the punch was "going off continuously"
+    // and also meant it never got to play out its full exaggerated
+    // windup/snap. This lets every punch that does register finish its
+    // full animation before the next one can begin — a natural rate limit
+    // on top of the phone-side cooldown/threshold tightening.
+    if (state.punchAnimTimer > 0) return;
     state.punchTimer = PUNCH_DURATION;
     state.punchAnimTimer = PUNCH_ANIM_DURATION;
   }
@@ -1001,19 +1069,27 @@ function updatePlaying(dt) {
   head.position.y = 1.85 + (state.grounded ? Math.abs(Math.sin(runT)) * 0.03 : 0.05);
   if (propellerBlade) propellerBlade.rotation.y += dt * 14;
 
+  // Tracks this frame's impact-bump strength (0 outside a punch) so the
+  // camera-kick code after the follow-cam update below can react to it too.
+  let punchBump = 0;
+
   if (state.punchAnimTimer > 0) {
     // Big, floppy, cartoonish: anticipation windup -> fast snap forward
     // with overshoot -> settle. Both arms sell it (off-arm swings back for
-    // counterbalance), plus a torso twist, a squash/stretch "oomph" at the
-    // moment of impact, and a small forward lunge — all purely cosmetic.
+    // counterbalance), plus a bigger torso twist, a squash/stretch "oomph"
+    // at the moment of impact, and a forward lunge — all purely cosmetic.
+    // Sized up 2026-09-02 ("not exaggerated enough" feedback): bigger
+    // multipliers across the board plus a camera kick, on top of the
+    // bigger windup/reach/overshoot constants above.
     const elapsedFrac = 1 - state.punchAnimTimer / PUNCH_ANIM_DURATION;
     const armAngle = punchArmRotation(elapsedFrac);
     const bump = punchImpactBump(elapsedFrac);
+    punchBump = bump;
     armR.rotation.x = -armAngle;
-    armL.rotation.x = armAngle * 0.5;
-    player.rotation.y = -armAngle * 0.12;
-    player.position.z = -bump * 0.32;
-    torso.scale.set(1 + bump * 0.18, 1 - bump * 0.12, 1 + bump * 0.18);
+    armL.rotation.x = armAngle * 0.65;
+    player.rotation.y = -armAngle * 0.22;
+    player.position.z = -bump * 0.6;
+    torso.scale.set(1 + bump * 0.34, 1 - bump * 0.24, 1 + bump * 0.34);
   } else {
     armR.rotation.x = state.grounded ? swing * 0.8 : -0.4;
     armL.rotation.x = state.grounded ? -swing * 0.8 : -0.4;
@@ -1027,9 +1103,13 @@ function updatePlaying(dt) {
   }
 
   updateImpactBursts(dt);
+  updateActionPrompt(speed);
 
   // Camera follow
   camera.position.x += (player.position.x * 0.6 - (camera.position.x - 0)) * Math.min(1, dt * 4);
+  // A small extra "kick" at the moment of punch impact — quick camera pop
+  // toward the player for a bit more comic-book oomph, purely cosmetic.
+  camera.position.y = CAMERA_BASE_Y + punchBump * 0.18;
   camera.lookAt(player.position.x * 0.4, 1.3, -8);
 
   // Spawn obstacles
