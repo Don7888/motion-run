@@ -69,13 +69,55 @@ const FLYING_DESPAWN_Z = DESPAWN_Z + 24;
 // Renderer / scene / camera
 // ---------------------------------------------------------------------
 const canvas = document.getElementById('gameCanvas');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+// 2026-09-02 "lag is still just as bad" fix: Fire TV Stick GPUs are weak
+// mobile-class hardware (often well below even a mid-range phone), and
+// the previous settings here — MSAA antialiasing plus rendering at up to
+// 2x devicePixelRatio — can easily cost more fill-rate than that hardware
+// has, which produces real, felt choppiness no amount of input-latency
+// tuning (the previous round's fix) can paper over. A TV output is a
+// fixed physical resolution anyway, so supersampling above 1x buys very
+// little visible sharpness there for a lot of extra per-pixel cost.
+// Start conservative — no MSAA, pixelRatio capped at 1 — and see
+// maybeDowngradeQuality() below animate() for a one-time further
+// step-down if the device is still measurably short of a smooth frame
+// rate even at these settings.
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1));
 renderer.setSize(window.innerWidth, window.innerHeight);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x8fd3ff);
-scene.fog = new THREE.Fog(0x8fd3ff, 30, 85);
+// 2026-09-02 "improve the locations" visual pass: a plain flat-color
+// background reads as an empty void behind the track. A baked (not
+// per-frame — this canvas runs once, at startup) vertical gradient sky
+// with a soft sun glow costs nothing extra at render time (it's still
+// just one background fill, same as the flat color it replaces) but adds
+// real atmosphere. Fog color is sampled from the gradient's horizon band
+// so distant obstacles/scenery fade into the sky instead of into a
+// mismatched flat tone.
+function makeSkyTexture() {
+  const c = document.createElement('canvas');
+  c.width = 2; c.height = 512;
+  const ctx = c.getContext('2d');
+  const grad = ctx.createLinearGradient(0, 0, 0, 512);
+  grad.addColorStop(0, '#2f6fd8');
+  grad.addColorStop(0.45, '#6fb3ea');
+  grad.addColorStop(0.72, '#bfe3f5');
+  grad.addColorStop(1, '#e9f6ea');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 2, 512);
+  // Soft sun glow near the horizon, off to one side, matching the
+  // directional "sun" light's rough position below.
+  const sun = ctx.createRadialGradient(1.4, 300, 0, 1.4, 300, 220);
+  sun.addColorStop(0, 'rgba(255,250,225,0.9)');
+  sun.addColorStop(1, 'rgba(255,250,225,0)');
+  ctx.fillStyle = sun;
+  ctx.fillRect(0, 0, 2, 512);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+scene.background = makeSkyTexture();
+scene.fog = new THREE.Fog(0xbfe3f5, 30, 85);
 
 const CAMERA_BASE_Y = 4.6;
 const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 200);
@@ -87,11 +129,20 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-// Lights
-scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 0.9));
-const sun = new THREE.DirectionalLight(0xffffff, 0.9);
+// Lights — hemisphere for soft sky/ground fill (cheap, no shadow cost),
+// directional "sun" for shape-defining highlights, plus a very low-cost
+// second directional as a cool rim/fill from the opposite side so the
+// character and obstacles don't look flatly lit head-on. None of these
+// cast shadow maps — that's a real GPU cost on weak Fire TV Stick
+// hardware and blob shadows (see shadowBlob below) already sell "grounded"
+// well enough for this low-poly style.
+scene.add(new THREE.HemisphereLight(0xcfe8ff, 0x445566, 0.95));
+const sun = new THREE.DirectionalLight(0xfff3d6, 1.0);
 sun.position.set(-6, 12, 6);
 scene.add(sun);
+const rimLight = new THREE.DirectionalLight(0x8fb8ff, 0.35);
+rimLight.position.set(8, 6, -10);
+scene.add(rimLight);
 
 // ---------------------------------------------------------------------
 // Ground (scrolling texture, no geometry recycling needed)
@@ -100,10 +151,29 @@ function makeRoadTexture() {
   const c = document.createElement('canvas');
   c.width = 256; c.height = 512;
   const ctx = c.getContext('2d');
+  // Grass either side of the path — two-tone with a scatter of darker
+  // flecks instead of a single flat fill, so the ground reads as a
+  // textured surface rather than a solid color plane, even at a glance.
   ctx.fillStyle = '#3a7d3f';
   ctx.fillRect(0, 0, 256, 512);
+  ctx.fillStyle = 'rgba(45,100,50,0.5)';
+  for (let i = 0; i < 260; i++) {
+    const x = Math.random() * 256, y = Math.random() * 512;
+    if (x > 40 && x < 216) continue; // keep the path itself clean
+    ctx.fillRect(x, y, 2 + Math.random() * 3, 2 + Math.random() * 3);
+  }
+  // Path: subtle asphalt-grain variation instead of one flat gray.
   ctx.fillStyle = '#5a5f6b';
   ctx.fillRect(48, 0, 160, 512);
+  ctx.fillStyle = 'rgba(0,0,0,0.08)';
+  for (let i = 0; i < 140; i++) {
+    ctx.fillRect(48 + Math.random() * 160, Math.random() * 512, 1 + Math.random() * 2, 1 + Math.random() * 2);
+  }
+  // Worn shoulder edge where grass meets path.
+  ctx.strokeStyle = 'rgba(60,90,55,0.6)';
+  ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(48, 0); ctx.lineTo(48, 512); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(208, 0); ctx.lineTo(208, 512); ctx.stroke();
   ctx.strokeStyle = 'rgba(255,255,255,0.85)';
   ctx.lineWidth = 6;
   ctx.setLineDash([28, 24]);
@@ -127,7 +197,12 @@ scene.add(ground);
 // ---------------------------------------------------------------------
 // Player (procedural low-poly character)
 // ---------------------------------------------------------------------
-function limb(w, h, d, color, pivotYOffset) {
+// `cap` (2026-09-02 "improve the character" pass) optionally adds a small
+// sphere at the free end of the limb — a hand on an arm, a shoe on a leg —
+// so the rig doesn't just end in a bare rectangular stump. One extra cheap
+// primitive per limb; negligible triangle count next to the win in
+// readability.
+function limb(w, h, d, color, pivotYOffset, cap) {
   const pivot = new THREE.Group();
   const mesh = new THREE.Mesh(
     new THREE.BoxGeometry(w, h, d),
@@ -135,6 +210,14 @@ function limb(w, h, d, color, pivotYOffset) {
   );
   mesh.position.y = -h / 2;
   pivot.add(mesh);
+  if (cap) {
+    const capMesh = new THREE.Mesh(
+      new THREE.SphereGeometry(cap.radius, 8, 8),
+      new THREE.MeshLambertMaterial({ color: cap.color })
+    );
+    capMesh.position.y = -h - cap.radius * 0.3;
+    pivot.add(capMesh);
+  }
   pivot.position.y = pivotYOffset;
   return pivot;
 }
@@ -154,6 +237,17 @@ const head = new THREE.Mesh(
 );
 head.position.y = 1.85;
 player.add(head);
+
+// A couple of tiny extra primitives (2026-09-02 "improve the character"
+// pass) — cheap (two small spheres) but they're the single biggest reason
+// the character used to read as a faceless blank capsule-and-ball rig.
+const eyeGeo = new THREE.SphereGeometry(0.045, 8, 8);
+const eyeMat = new THREE.MeshBasicMaterial({ color: 0x1a1a1a });
+const eyeL = new THREE.Mesh(eyeGeo, eyeMat);
+eyeL.position.set(-0.12, 0.03, 0.29);
+const eyeR = new THREE.Mesh(eyeGeo, eyeMat);
+eyeR.position.set(0.12, 0.03, 0.29);
+head.add(eyeL, eyeR);
 
 // Hair/hat are rebuilt on demand by dressPlayer() from the phone's
 // character-creator choice; both groups live in head-local space so they
@@ -241,17 +335,17 @@ function dressPlayer(character) {
 }
 dressPlayer({ hair: 'short', hairColor: '#3b2a1a', hat: 'none', hatColor: '#ff5a5f', shirtColor: '#ff5a5f' });
 
-const armL = limb(0.18, 0.62, 0.18, 0xff5a5f, 1.52);
+const armL = limb(0.18, 0.62, 0.18, 0xff5a5f, 1.52, { radius: 0.1, color: 0xffd7b0 });
 armL.position.x = -0.52;
 player.add(armL);
-const armR = limb(0.18, 0.62, 0.18, 0xff5a5f, 1.52);
+const armR = limb(0.18, 0.62, 0.18, 0xff5a5f, 1.52, { radius: 0.1, color: 0xffd7b0 });
 armR.position.x = 0.52;
 player.add(armR);
 
-const legL = limb(0.22, 0.62, 0.22, 0x2b2f45, 0.78);
+const legL = limb(0.22, 0.62, 0.22, 0x2b2f45, 0.78, { radius: 0.13, color: 0x1c1f2e });
 legL.position.x = -0.2;
 player.add(legL);
-const legR = limb(0.22, 0.62, 0.22, 0x2b2f45, 0.78);
+const legR = limb(0.22, 0.62, 0.22, 0x2b2f45, 0.78, { radius: 0.13, color: 0x1c1f2e });
 legR.position.x = 0.2;
 player.add(legR);
 
@@ -270,19 +364,55 @@ scene.add(shadowBlob);
 // Scenery (decorative, non-colliding, purely for a sense of speed)
 // ---------------------------------------------------------------------
 const sceneryPool = [];
+// A little per-instance hue jitter (2026-09-02 "improve the locations"
+// pass) so a whole tree-line of identical cones doesn't read as obviously
+// copy-pasted — cheap (one extra color lerp per instance, done once at
+// spawn, not per frame).
+function jitterColor(hex, amount) {
+  const c = new THREE.Color(hex);
+  const hsl = { h: 0, s: 0, l: 0 };
+  c.getHSL(hsl);
+  c.setHSL(
+    (hsl.h + (Math.random() - 0.5) * amount + 1) % 1,
+    Math.max(0, Math.min(1, hsl.s + (Math.random() - 0.5) * amount)),
+    Math.max(0, Math.min(1, hsl.l + (Math.random() - 0.5) * amount))
+  );
+  return c;
+}
 function makeTree() {
   const g = new THREE.Group();
   const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.2, 1.4, 6), new THREE.MeshLambertMaterial({ color: 0x7a5230 }));
   trunk.position.y = 0.7;
-  const leaves = new THREE.Mesh(new THREE.ConeGeometry(1.0, 2.0, 8), new THREE.MeshLambertMaterial({ color: 0x2e7d4f }));
-  leaves.position.y = 2.1;
+  const scale = 0.85 + Math.random() * 0.4;
+  const leaves = new THREE.Mesh(new THREE.ConeGeometry(1.0 * scale, 2.0 * scale, 8), new THREE.MeshLambertMaterial({ color: jitterColor(0x2e7d4f, 0.12) }));
+  leaves.position.y = 0.7 + 1.4 * scale;
   g.add(trunk, leaves);
   return g;
 }
-for (let i = 0; i < 16; i++) {
-  const t = makeTree();
+function makeBush() {
+  const g = new THREE.Group();
+  const n = 2 + Math.floor(Math.random() * 2);
+  for (let i = 0; i < n; i++) {
+    const r = 0.32 + Math.random() * 0.16;
+    const blob = new THREE.Mesh(new THREE.SphereGeometry(r, 8, 6), new THREE.MeshLambertMaterial({ color: jitterColor(0x3f9152, 0.1) }));
+    blob.position.set((Math.random() - 0.5) * 0.4, r * 0.7, (Math.random() - 0.5) * 0.3);
+    g.add(blob);
+  }
+  return g;
+}
+function makeRock() {
+  const r = 0.22 + Math.random() * 0.22;
+  const rock = new THREE.Mesh(new THREE.DodecahedronGeometry(r, 0), new THREE.MeshLambertMaterial({ color: jitterColor(0x8a8f99, 0.06) }));
+  rock.position.y = r * 0.5;
+  rock.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+  return rock;
+}
+const SCENERY_MAKERS = [makeTree, makeTree, makeTree, makeBush, makeRock];
+for (let i = 0; i < 26; i++) {
+  const make = SCENERY_MAKERS[Math.floor(Math.random() * SCENERY_MAKERS.length)];
+  const t = make();
   const side = i % 2 === 0 ? -1 : 1;
-  t.position.set(side * (5.5 + Math.random() * 3), 0, -i * 12 - Math.random() * 6);
+  t.position.set(side * (5.5 + Math.random() * 3.5), 0, -i * 7.5 - Math.random() * 6);
   scene.add(t);
   sceneryPool.push(t);
 }
@@ -293,10 +423,72 @@ for (let i = 0; i < 16; i++) {
 const obstacles = [];
 const impactBursts = []; // small comedic particle bursts spawned by launchObstacleFlying()
 
+// Obstacle surface textures (2026-09-02 "improve the objects" pass) — each
+// baked once at startup on a small canvas and reused across every spawned
+// instance of that type, exactly like makeRoadTexture()/makeSkyTexture()
+// above: this swaps a flat MeshLambertMaterial color for a textured one,
+// which costs the same at render time (same triangle count, same shader),
+// just with a more interesting surface instead of a single flat tone.
+function makeCrateTexture() {
+  const c = document.createElement('canvas');
+  c.width = 128; c.height = 128;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#a5682a';
+  ctx.fillRect(0, 0, 128, 128);
+  ctx.strokeStyle = 'rgba(70,40,10,0.55)';
+  ctx.lineWidth = 3;
+  for (let x = 0; x <= 128; x += 32) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, 128); ctx.stroke(); }
+  ctx.strokeStyle = 'rgba(255,220,160,0.25)';
+  ctx.lineWidth = 1;
+  for (let x = 4; x <= 128; x += 32) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, 128); ctx.stroke(); }
+  ctx.strokeStyle = 'rgba(70,40,10,0.6)';
+  ctx.lineWidth = 5;
+  ctx.strokeRect(3, 3, 122, 122);
+  ctx.beginPath(); ctx.moveTo(3, 3); ctx.lineTo(125, 125); ctx.moveTo(125, 3); ctx.lineTo(3, 125); ctx.stroke();
+  return new THREE.CanvasTexture(c);
+}
+function makeHazardTexture() {
+  const c = document.createElement('canvas');
+  c.width = 64; c.height = 64;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#ffb703';
+  ctx.fillRect(0, 0, 64, 64);
+  ctx.fillStyle = '#241a00';
+  ctx.save();
+  ctx.translate(32, 32); ctx.rotate(Math.PI / 4); ctx.translate(-32, -32);
+  for (let x = -64; x < 128; x += 24) ctx.fillRect(x, 0, 12, 64);
+  ctx.restore();
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = THREE.RepeatWrapping; tex.wrapT = THREE.RepeatWrapping;
+  return tex;
+}
+function makeBrickTexture() {
+  const c = document.createElement('canvas');
+  c.width = 128; c.height = 128;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#6c7a89';
+  ctx.fillRect(0, 0, 128, 128);
+  ctx.strokeStyle = 'rgba(40,48,56,0.6)';
+  ctx.lineWidth = 3;
+  const rowH = 21;
+  for (let row = 0, y = 0; y <= 128; y += rowH, row++) {
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(128, y); ctx.stroke();
+    const offset = row % 2 === 0 ? 0 : 21;
+    for (let x = offset; x <= 128; x += 42) { ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y + rowH); ctx.stroke(); }
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = THREE.RepeatWrapping; tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(1.5, 2);
+  return tex;
+}
+const crateTexture = makeCrateTexture();
+const hazardTexture = makeHazardTexture();
+const brickTexture = makeBrickTexture();
+
 function buildObstacleMesh(type) {
   if (type === 'hurdle') {
     const g = new THREE.Group();
-    const bar = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.18, 0.18), new THREE.MeshLambertMaterial({ color: 0xffb703 }));
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.18, 0.18), new THREE.MeshLambertMaterial({ map: hazardTexture }));
     bar.position.y = 0.55;
     const legA = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.55, 0.1), new THREE.MeshLambertMaterial({ color: 0xd98a00 }));
     legA.position.set(-0.65, 0.275, 0);
@@ -305,12 +497,12 @@ function buildObstacleMesh(type) {
     return g;
   }
   if (type === 'crate') {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(1.3, 1.1, 1.0), new THREE.MeshLambertMaterial({ color: 0xa5682a }));
+    const m = new THREE.Mesh(new THREE.BoxGeometry(1.3, 1.1, 1.0), new THREE.MeshLambertMaterial({ map: crateTexture }));
     m.position.y = 0.55;
     return m;
   }
   // wall
-  const m = new THREE.Mesh(new THREE.BoxGeometry(1.8, 2.6, 0.6), new THREE.MeshLambertMaterial({ color: 0x6c7a89 }));
+  const m = new THREE.Mesh(new THREE.BoxGeometry(1.8, 2.6, 0.6), new THREE.MeshLambertMaterial({ map: brickTexture }));
   m.position.y = 1.3;
   return m;
 }
@@ -1183,11 +1375,37 @@ function updatePlaying(dt) {
   }
 }
 
+// One-time adaptive downgrade (see the renderer-setup comment above): if
+// the device is still averaging under ~45fps over the first couple of
+// seconds even at pixelRatio 1 with no antialiasing, drop resolution
+// further rather than staying sharp-but-choppy. Runs once, only ever
+// downward, and touches nothing gameplay-related — dt/timing in animate()
+// below is entirely separate.
+let qualityFrameCount = 0;
+let qualityFrameTimeSum = 0;
+let qualityDowngraded = false;
+const QUALITY_SAMPLE_FRAMES = 90;
+const QUALITY_FRAME_MS_FLOOR = 1000 / 45;
+function maybeDowngradeQuality(rawFrameMs) {
+  if (qualityDowngraded || qualityFrameCount >= QUALITY_SAMPLE_FRAMES) return;
+  qualityFrameCount++;
+  qualityFrameTimeSum += rawFrameMs;
+  if (qualityFrameCount < QUALITY_SAMPLE_FRAMES) return;
+  qualityDowngraded = true;
+  const avgFrameMs = qualityFrameTimeSum / qualityFrameCount;
+  if (avgFrameMs > QUALITY_FRAME_MS_FLOOR) {
+    renderer.setPixelRatio(0.75);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  }
+}
+
 function animate() {
   requestAnimationFrame(animate);
   const now = performance.now();
-  const dt = Math.min(0.05, (now - lastT) / 1000);
+  const rawFrameMs = now - lastT;
+  const dt = Math.min(0.05, rawFrameMs / 1000);
   lastT = now;
+  maybeDowngradeQuality(rawFrameMs);
 
   if (state.phase === 'playing') updatePlaying(dt);
 
