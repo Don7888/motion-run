@@ -1030,15 +1030,22 @@ function updatePlaying(dt) {
     if (t.position.z > 10) t.position.z -= 16 * sceneryPool.length * 0.5;
   });
 
-  // Player lane lerp + lean. The multiplier here (was 9) is how snappily
-  // the character visually catches up to the lane the player's body/tilt
-  // just moved into — raised for a noticeably quicker response, since the
-  // input itself (WebSocket message -> lane_set) is already effectively
-  // instant and this easing was the next-biggest source of felt latency.
+  // Player lane lerp + lean. The multiplier here (was 9, then 15) is how
+  // snappily the character visually catches up to the lane the player's
+  // body/tilt just moved into — raised again 2026-09-02 ("reduce the delay
+  // between player movement and character movement" feedback) for an even
+  // quicker response, since the input itself (WebSocket message ->
+  // lane_set) is already effectively instant and this easing remains the
+  // biggest source of felt latency between a real move and the on-screen
+  // reaction. At dt*24 the character reaches ~92% of the way to the new
+  // lane within about 5 frames (~80ms at 60fps), versus needing roughly
+  // twice that many frames at the old dt*15.
+  // The lean-rotation lerp is sped up to match (dt*10 -> dt*16) so the
+  // torso bank doesn't visibly lag behind the now-snappier lane movement.
   const targetX = LANE_X[state.lane];
   const dx = targetX - player.position.x;
-  player.position.x += dx * Math.min(1, dt * 15);
-  player.rotation.z = THREE.MathUtils.lerp(player.rotation.z, THREE.MathUtils.clamp(-dx * 0.35, -0.35, 0.35), dt * 10);
+  player.position.x += dx * Math.min(1, dt * 24);
+  player.rotation.z = THREE.MathUtils.lerp(player.rotation.z, THREE.MathUtils.clamp(-dx * 0.35, -0.35, 0.35), dt * 16);
 
   // Jump physics
   if (!state.grounded) {
@@ -1105,8 +1112,11 @@ function updatePlaying(dt) {
   updateImpactBursts(dt);
   updateActionPrompt(speed);
 
-  // Camera follow
-  camera.position.x += (player.position.x * 0.6 - (camera.position.x - 0)) * Math.min(1, dt * 4);
+  // Camera follow — sped up alongside the lane-lerp above (dt*4 -> dt*7)
+  // so the whole scene re-centers on the player quickly too; otherwise the
+  // character itself would snap to its new lane fast while the camera lags
+  // behind, which still reads as a delayed reaction overall.
+  camera.position.x += (player.position.x * 0.6 - (camera.position.x - 0)) * Math.min(1, dt * 7);
   // A small extra "kick" at the moment of punch impact — quick camera pop
   // toward the player for a bit more comic-book oomph, purely cosmetic.
   camera.position.y = CAMERA_BASE_Y + punchBump * 0.18;
