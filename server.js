@@ -97,7 +97,27 @@ function serveStatic(req, res) {
       return;
     }
     const ext = path.extname(filePath);
-    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+    // No Cache-Control/ETag/Last-Modified was ever set here, which leaves
+    // every browser (and, worse, the Fire TV APK's Chrome Custom Tab —
+    // TWAs are known to cache more aggressively than a normal tab) free to
+    // reuse its own cached copy of index.html/game.js/controller.js
+    // indefinitely using default heuristics. That's a real, previously
+    // unexamined explanation for why verified-deployed fixes could still
+    // "not show up" on a real device: the origin has the new bytes, but
+    // the device never re-requests them. Force revalidation on every load
+    // for the files that actually change (html/js/css) — this project is
+    // tiny, so the extra round-trip cost is negligible next to the risk of
+    // silently stale gameplay code. Static, rarely-changing assets
+    // (icons/images) keep a normal short cache since staleness there is
+    // harmless.
+    const NO_CACHE_EXTS = new Set(['.html', '.js', '.css', '.json']);
+    const cacheControl = NO_CACHE_EXTS.has(ext)
+      ? 'no-cache, no-store, must-revalidate'
+      : 'public, max-age=3600';
+    res.writeHead(200, {
+      'Content-Type': MIME[ext] || 'application/octet-stream',
+      'Cache-Control': cacheControl,
+    });
     res.end(data);
   });
 }
