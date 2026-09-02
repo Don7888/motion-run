@@ -316,6 +316,11 @@ const calStepCounter = document.getElementById('calStepCounter');
 const calMoveIcon = document.getElementById('calMoveIcon');
 const calMoveText = document.getElementById('calMoveText');
 const calDots = document.getElementById('calDots');
+const placementPanel = document.getElementById('placementPanel');
+const framingPanel = document.getElementById('framingPanel');
+const framingSilhouette = document.getElementById('framingSilhouette');
+const framingStatusText = document.getElementById('framingStatusText');
+const framingSubHint = document.getElementById('framingSubHint');
 const roomCodeEl = document.getElementById('roomCode');
 const playUrlEl = document.getElementById('playUrl');
 const pairingHint = document.getElementById('pairingHint');
@@ -334,22 +339,114 @@ function renderLives() {
 }
 renderLives();
 
+const PANELS = {
+  pairing: pairingPanel,
+  ready: readyPanel,
+  gameover: gameOverPanel,
+  calibrating: calibrationPanel,
+  placement: placementPanel,
+  framing: framingPanel,
+};
 function showPanel(which) {
-  pairingPanel.style.display = which === 'pairing' ? 'block' : 'none';
-  readyPanel.style.display = which === 'ready' ? 'block' : 'none';
-  gameOverPanel.style.display = which === 'gameover' ? 'block' : 'none';
-  calibrationPanel.style.display = which === 'calibrating' ? 'block' : 'none';
+  Object.entries(PANELS).forEach(([name, el]) => {
+    el.style.display = name === which ? 'block' : 'none';
+  });
 }
 
-// A player calibrating on the phone shouldn't fight the "Player connected!"
-// panel for screen space — calibrating overrides whatever `state.phase`
-// would otherwise show, until the phone signals it's done.
+// A player working through setup (placement/framing/calibrating) on the
+// phone shouldn't fight the "Player connected!" panel for screen space —
+// any active setup stage overrides whatever `state.phase` would otherwise
+// show, until the phone signals it's done. Priority: placement > framing >
+// per-move calibration > normal phase-based panels.
 function syncPanel() {
+  if (setupStage === 'placement') { showPanel('placement'); return; }
+  if (setupStage === 'framing') { showPanel('framing'); return; }
   if (calibrating) { showPanel('calibrating'); return; }
   if (state.phase === 'pairing') showPanel('pairing');
   else if (state.phase === 'ready') showPanel('ready');
   else if (state.phase === 'gameover') showPanel('gameover');
   else showPanel(null);
+}
+
+// =========================================================================
+// CAMERA SETUP — PLACEMENT + FRAMING CHECK
+//
+// Camera mode needs the player to physically prop the phone up and walk
+// away from it before any gesture detection should react to anything —
+// otherwise the player fumbling with the phone (or just walking across the
+// room) gets misread as jumps/punches/lane changes. So camera-mode setup
+// now runs in three stages, all displayed here on the TV and driven mostly
+// by the Fire TV remote's OK/Select button (Enter key) once the phone is
+// out of the player's hands:
+//
+//   1. "placement"  — static instructions ("place your phone under the TV
+//      and step back"). Advances on remote OK, which we relay back to the
+//      phone as a `calibration_control` message so it knows to start
+//      evaluating the camera framing.
+//   2. "framing"    — the phone continuously reports whether it can see
+//      enough of the player at a sensible distance (`calibration` event
+//      'framing', {status, ready}); we show a silhouette guide here and
+//      either auto-advance once "ready" has held for a bit, or let the
+//      remote OK button confirm/skip early.
+//   3. per-move calibration (existing `calibrating` flow below) — only
+//      begins once we've told the phone `moves_ack`, which is also the
+//      point the phone starts reacting to real jump/punch/lane gestures.
+//
+// Hold-phone mode skips straight to per-move calibration (`calibrating`)
+// since the player keeps the phone in hand throughout — there's nothing to
+// "get in frame" for.
+// =========================================================================
+let setupStage = 'none'; // 'none' | 'placement' | 'framing'
+let framingStatus = 'no_person';
+let framingReady = false;
+let framingReadySinceT = null;
+let movesConfirmSent = false;
+const FRAMING_AUTO_ADVANCE_MS = 900;
+
+const FRAMING_META = {
+  no_person: { text: 'Step into frame', color: '#ff8a8a' },
+  too_close: { text: 'Move back a little', color: '#ffd166' },
+  too_far: { text: 'Move a bit closer', color: '#ffd166' },
+  off_center: { text: 'Move to the center', color: '#ffd166' },
+  good: { text: 'Perfect! Hold still…', color: '#6ee7ff' },
+};
+
+function sendCalibrationControl(action) {
+  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'calibration_control', action }));
+}
+
+function startPlacementUI() {
+  setupStage = 'placement';
+  movesConfirmSent = false;
+  framingReady = false;
+  framingReadySinceT = null;
+  syncPanel();
+}
+
+function renderFramingPanel() {
+  const meta = FRAMING_META[framingStatus] || FRAMING_META.no_person;
+  framingStatusText.textContent = meta.text;
+  framingSilhouette.style.setProperty('--sil-color', meta.color);
+  framingSilhouette.classList.toggle('good', framingStatus === 'good');
+  framingSubHint.textContent = framingReady
+    ? "Press OK to continue, or we'll start in a moment…"
+    : "Press OK once you're set, or hold still and we'll continue automatically";
+}
+
+function updateFramingUI(status, ready) {
+  setupStage = 'framing';
+  framingStatus = status;
+  if (ready && !framingReady) framingReadySinceT = performance.now();
+  if (!ready) framingReadySinceT = null;
+  framingReady = ready;
+  renderFramingPanel();
+  syncPanel();
+}
+
+function confirmMovesStart() {
+  if (movesConfirmSent || setupStage !== 'framing') return;
+  movesConfirmSent = true;
+  sendCalibrationControl('moves_ack');
 }
 
 // =========================================================================
@@ -389,6 +486,7 @@ function showCalibrationStep() {
 }
 function startCalibrationUI(mode) {
   calibrating = true;
+  setupStage = 'none'; // placement/framing are done — the per-move panel takes over
   calMode = mode || 'camera';
   calIndex = 0;
   calDone = { left: false, right: false, jump: false, punch: false };
@@ -405,6 +503,7 @@ function advanceCalibrationUI(step) {
 }
 function finishCalibrationUI() {
   calibrating = false;
+  setupStage = 'none'; // covers the "Skip setup" escape hatch firing mid-placement/framing
   syncPanel();
 }
 
@@ -474,6 +573,7 @@ ws.addEventListener('message', (ev) => {
     } else if (msg.count === 0 && state.phase !== 'playing') {
       state.phase = 'pairing';
       calibrating = false;
+      setupStage = 'none';
       syncPanel();
     }
   } else if (msg.type === 'input') {
@@ -481,7 +581,9 @@ ws.addEventListener('message', (ev) => {
   } else if (msg.type === 'character') {
     dressPlayer(msg);
   } else if (msg.type === 'calibration') {
-    if (msg.event === 'start') startCalibrationUI(msg.mode);
+    if (msg.event === 'placement') startPlacementUI();
+    else if (msg.event === 'framing') updateFramingUI(msg.status, msg.ready);
+    else if (msg.event === 'start') startCalibrationUI(msg.mode);
     else if (msg.event === 'step') advanceCalibrationUI(msg.step);
     else if (msg.event === 'done') finishCalibrationUI();
   } else if (msg.type === 'error') {
@@ -526,10 +628,30 @@ function handleInput(msg) {
   }
 }
 
-// Fallback: also allow keyboard testing on this screen (A/D or arrows to
-// change lane, Space to jump, F to punch) — handy when testing without a
-// phone in hand.
+// The Fire TV remote's center OK/Select button reaches the page as a
+// standard 'Enter' keydown (same as a TV media-app would see) — we haven't
+// been able to test this against real Fire TV hardware in this build
+// environment, so also accept Space/NumpadEnter as fallbacks in case the
+// remote maps differently on your specific device. This is what drives the
+// player through the placement and framing setup stages from the couch,
+// once the phone itself is out of their hands.
+function isSelectPress(e) {
+  return e.key === 'Enter' || e.code === 'Enter' || e.code === 'NumpadEnter' || e.code === 'Space';
+}
+
 window.addEventListener('keydown', (e) => {
+  if (setupStage === 'placement' && isSelectPress(e)) {
+    sendCalibrationControl('placement_ack');
+    return;
+  }
+  if (setupStage === 'framing' && isSelectPress(e)) {
+    confirmMovesStart();
+    return;
+  }
+
+  // Fallback: also allow keyboard testing on this screen (A/D or arrows to
+  // change lane, Space to jump, F to punch) — handy when testing without a
+  // phone in hand.
   if (state.phase !== 'playing' && (e.code === 'Space' || e.code === 'KeyF')) {
     if (state.phase === 'ready' || state.phase === 'gameover') startPlaying();
     return;
@@ -657,6 +779,14 @@ function animate() {
   lastT = now;
 
   if (state.phase === 'playing') updatePlaying(dt);
+
+  // Auto-advance out of the framing check once "good" framing has held for
+  // a moment — the remote OK press (see keydown handler above) can also
+  // confirm this early, so whichever happens first wins.
+  if (setupStage === 'framing' && framingReady && framingReadySinceT !== null
+      && now - framingReadySinceT > FRAMING_AUTO_ADVANCE_MS) {
+    confirmMovesStart();
+  }
 
   renderer.render(scene, camera);
 }
