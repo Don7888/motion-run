@@ -377,6 +377,10 @@
         // The TV also drives WHICH move the walkthrough is currently asking
         // for, so we only accept that one — see handleCalStepRequest().
         else if (msg.action === 'step_request') handleCalStepRequest(msg);
+        // The TV ends setup — either because the last move just got ticked
+        // off, or because OK was pressed on the remote. Either way the
+        // player doesn't have to come back to the phone to start.
+        else if (msg.action === 'finish') finishCalibration({ notifyTv: false });
       } else if (msg.type === 'error') {
         joinError.textContent = msg.message || 'Could not connect.';
         joinBtn.disabled = false;
@@ -536,7 +540,7 @@
     calSkipStepBtn.style.display = 'none';
     if (calStuckTimer) clearTimeout(calStuckTimer);
     if (!expectedCalStep) {
-      calibrationHint.textContent = 'All set! Tap Start Run whenever you\'re ready.';
+      calibrationHint.textContent = 'All set! Starting on the TV — get into position.';
       calStartBtn.textContent = 'Start Run ✓';
       return;
     }
@@ -566,7 +570,7 @@
     sendCalibration('step', { step: key });
     if (Object.values(calState).every(Boolean)) {
       calStartBtn.textContent = 'Start Run ✓';
-      calibrationHint.textContent = 'All set! Tap Start Run whenever you\'re ready.';
+      calibrationHint.textContent = 'All set! Starting on the TV — get into position.';
     }
   }
   // Manual per-move escape hatch — reports the step as done exactly as a
@@ -587,22 +591,28 @@
     calibrationHint.textContent = "👀 Look at your TV — it'll walk you through each move one at a time.";
   }
 
-  function finishCalibration() {
-    // Manual escape hatch (Skip setup / Start Run) — can fire mid-placement
-    // or mid-framing if the player would rather just get going, so clear
-    // those gates too or real play would stay stuck undetected.
+  // Ends setup and moves to the play screen. Normally driven by the TV now
+  // (`calibration_control` / 'finish'), with the phone's own Skip setup /
+  // Start Run buttons kept as a manual escape hatch — those can fire
+  // mid-placement or mid-framing if the player would rather just get going,
+  // so those gates are cleared here too or real play would stay stuck
+  // undetected. `notifyTv: false` is used when the TV is the one that told
+  // us to finish, so we don't echo the message straight back at it.
+  function finishCalibration(opts) {
     inCameraSetupGate = false;
     framingActive = false;
     expectedCalStep = null;
     if (calStuckTimer) clearTimeout(calStuckTimer);
     calSkipStepBtn.style.display = 'none';
-    sendCalibration('done');
+    if (!opts || opts.notifyTv !== false) sendCalibration('done');
     actionHandlers = realHandlers;
     moveSensorPanelTo(playSensorSlot);
     showScreen(playScreen);
   }
-  calStartBtn.addEventListener('click', finishCalibration);
-  calSkipBtn.addEventListener('click', finishCalibration);
+  // Wrapped rather than passed directly: these are click handlers, so the
+  // MouseEvent would otherwise land in finishCalibration's `opts`.
+  calStartBtn.addEventListener('click', () => finishCalibration());
+  calSkipBtn.addEventListener('click', () => finishCalibration());
 
   function recenter() {
     if (currentMode === 'camera') {
