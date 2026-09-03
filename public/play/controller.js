@@ -848,9 +848,8 @@
       await new Promise((resolve) => {
         cameraVideo.onloadedmetadata = () => { cameraVideo.play(); resolve(); };
       });
-      cameraCanvas.width = cameraVideo.videoWidth;
-      cameraCanvas.height = cameraVideo.videoHeight;
     }
+    syncOverlayCanvas();
 
     cameraStatus.textContent = 'Loading pose tracker…';
     await ensureDetector();
@@ -898,14 +897,14 @@
   function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
 
   function processPose(pose) {
-    cameraCtx.clearRect(0, 0, cameraCanvas.width, cameraCanvas.height);
+    clearOverlay();
     if (!pose || !pose.keypoints) {
+      drawFramingGuide(false);
       cameraStatus.textContent = 'Step into frame';
       if (framingActive) sendFramingThrottled('no_person', false);
       return;
     }
     const keypoints = pose.keypoints;
-    drawSkeleton(keypoints);
 
     const lShoulder = kp(keypoints, 'left_shoulder');
     const rShoulder = kp(keypoints, 'right_shoulder');
@@ -913,7 +912,13 @@
     const rHip = kp(keypoints, 'right_hip');
     const shoulderMid = midpoint(lShoulder, rShoulder);
     const hipMid = midpoint(lHip, rHip);
-    if (!shoulderMid || !hipMid) {
+    // "Locked" = the tracker has a full torso, which is what every gesture
+    // is measured against. Drives the overlay colour so the player can see
+    // at a glance whether they're actually being tracked.
+    const locked = !!(shoulderMid && hipMid);
+    drawFramingGuide(locked);
+    drawSkeleton(keypoints, locked);
+    if (!locked) {
       cameraStatus.textContent = 'Step into frame';
       if (framingActive) sendFramingThrottled('no_person', false);
       return;
@@ -1048,25 +1053,119 @@
     laneMarker.style.background = Math.abs(dx) > LANE_ENTER_FRAC * frameW ? '#ffd166' : '#6ee7ff';
   }
 
-  function drawSkeleton(keypoints) {
-    cameraCtx.lineWidth = 3;
-    cameraCtx.strokeStyle = 'rgba(110, 231, 255, 0.85)';
-    SKELETON_PAIRS.forEach(([a, b]) => {
-      const pa = kp(keypoints, a), pb = kp(keypoints, b);
-      if (pa && pb) {
-        cameraCtx.beginPath();
-        cameraCtx.moveTo(pa.x, pa.y);
-        cameraCtx.lineTo(pb.x, pb.y);
-        cameraCtx.stroke();
-      }
-    });
-    cameraCtx.fillStyle = '#ffd166';
+  // =========================================================================
+  // POSE OVERLAY — 2026-09-03 alignment fix
+  //
+  // The skeleton is drawn in the canvas's OWN displayed pixels, and pose
+  // keypoints (which come back in the raw video frame's coordinate space)
+  // are mapped into that space here. Two things have to be undone to make
+  // them line up with what the player actually sees:
+  //   1. the video is displayed with `object-fit: cover`, i.e. scaled up by
+  //      whichever axis needs it most and centre-cropped on the other, and
+  //   2. it's mirrored horizontally so it reads like a selfie mirror.
+  // Previously the canvas leaned on the browser to reproduce (1) via its own
+  // `object-fit` and (2) via a CSS transform. That only lines up while the
+  // canvas bitmap's aspect ratio exactly matches the live video's — and it
+  // often doesn't (the bitmap was sized once at stream start, so any later
+  // resolution change, rotation, or a stream that didn't honour the
+  // requested 640x480 left it stale), which is what put the mesh off the
+  // body. Doing the mapping explicitly here removes that whole class of
+  // mismatch, and also lets the overlay be re-sized on rotation.
+  // =========================================================================
+  let overlayW = 0, overlayH = 0, overlayDpr = 1;
+
+  function syncOverlayCanvas() {
+    const cssW = cameraCanvas.clientWidth;
+    const cssH = cameraCanvas.clientHeight;
+    if (!cssW || !cssH) return false;
+    // Cap the backing store — this canvas is redrawn every pose frame and
+    // there's no detail here that needs full retina resolution.
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    if (cssW !== overlayW || cssH !== overlayH || dpr !== overlayDpr) {
+      overlayW = cssW; overlayH = cssH; overlayDpr = dpr;
+      cameraCanvas.width = Math.round(cssW * dpr);
+      cameraCanvas.height = Math.round(cssH * dpr);
+    }
+    return true;
+  }
+  window.addEventListener('resize', syncOverlayCanvas);
+  window.addEventListener('orientationchange', () => setTimeout(syncOverlayCanvas, 250));
+
+  // Maps a point from raw video-frame coordinates to displayed CSS pixels,
+  // applying the same cover-crop the video gets and the same mirroring.
+  function videoToDisplay(x, y) {
+    const vw = cameraVideo.videoWidth || 1;
+    const vh = cameraVideo.videoHeight || 1;
+    const scale = Math.max(overlayW / vw, overlayH / vh); // object-fit: cover
+    const drawnW = vw * scale;
+    const drawnH = vh * scale;
+    const ox = (overlayW - drawnW) / 2; // centre-crop offsets (negative = cropped)
+    const oy = (overlayH - drawnH) / 2;
+    return {
+      x: overlayW - (x * scale + ox), // mirrored, matching the video's scaleX(-1)
+      y: y * scale + oy,
+    };
+  }
+
+  function clearOverlay() {
+    if (!syncOverlayCanvas()) return;
+    cameraCtx.setTransform(1, 0, 0, 1, 0, 0);
+    cameraCtx.clearRect(0, 0, cameraCanvas.width, cameraCanvas.height);
+    cameraCtx.setTransform(overlayDpr, 0, 0, overlayDpr, 0, 0);
+  }
+
+  // A dashed head-to-hips target box, so lining yourself up is a matter of
+  // stepping into an outline rather than guessing. Turns cyan once the
+  // tracker actually has your torso, which doubles as a "it can see me"
+  // signal without needing to look at the TV.
+  function drawFramingGuide(locked) {
+    const w = overlayW, h = overlayH;
+    const boxH = h * 0.72;
+    const boxW = Math.min(w * 0.5, boxH * 0.52);
+    const x = (w - boxW) / 2;
+    const y = (h - boxH) / 2;
+    cameraCtx.save();
+    cameraCtx.setLineDash([10, 9]);
+    cameraCtx.lineWidth = 2.5;
+    cameraCtx.strokeStyle = locked ? 'rgba(110,231,255,0.85)' : 'rgba(255,255,255,0.35)';
+    cameraCtx.strokeRect(x, y, boxW, boxH);
+    cameraCtx.restore();
+  }
+
+  function drawSkeleton(keypoints, locked) {
+    const pts = {};
     keypoints.forEach((p) => {
-      if (p.score >= POSE_MIN_SCORE) {
+      if (p.score >= POSE_MIN_SCORE) pts[p.name] = videoToDisplay(p.x, p.y);
+    });
+
+    // Dark under-stroke first so the mesh stays readable over a bright or
+    // busy background — the old thin single-pass line was easy to lose.
+    cameraCtx.lineCap = 'round';
+    cameraCtx.lineJoin = 'round';
+    [['rgba(0,0,0,0.45)', 9], [locked ? 'rgba(110,231,255,0.95)' : 'rgba(255,209,102,0.95)', 5]]
+      .forEach(([colour, width]) => {
+        cameraCtx.strokeStyle = colour;
+        cameraCtx.lineWidth = width;
         cameraCtx.beginPath();
-        cameraCtx.arc(p.x, p.y, 5, 0, Math.PI * 2);
-        cameraCtx.fill();
-      }
+        SKELETON_PAIRS.forEach(([a, b]) => {
+          const pa = pts[a], pb = pts[b];
+          if (pa && pb) {
+            cameraCtx.moveTo(pa.x, pa.y);
+            cameraCtx.lineTo(pb.x, pb.y);
+          }
+        });
+        cameraCtx.stroke();
+      });
+
+    Object.values(pts).forEach((p) => {
+      cameraCtx.beginPath();
+      cameraCtx.arc(p.x, p.y, 6, 0, Math.PI * 2);
+      cameraCtx.fillStyle = 'rgba(0,0,0,0.5)';
+      cameraCtx.fill();
+      cameraCtx.beginPath();
+      cameraCtx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+      cameraCtx.fillStyle = '#fff';
+      cameraCtx.fill();
     });
   }
 
