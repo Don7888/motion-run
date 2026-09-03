@@ -202,6 +202,7 @@
   const calSensorSlot = document.getElementById('calSensorSlot');
   const calibrationHint = document.getElementById('calibrationHint');
   const calSkipBtn = document.getElementById('calSkipBtn');
+  const calSkipStepBtn = document.getElementById('calSkipStepBtn');
   const calStartBtn = document.getElementById('calStartBtn');
 
   const tabCamera = document.getElementById('tabCamera');
@@ -355,6 +356,9 @@
         // handleMovesAck (defined further down, alongside beginCalibration).
         if (msg.action === 'placement_ack') handlePlacementAck();
         else if (msg.action === 'moves_ack') handleMovesAck();
+        // The TV also drives WHICH move the walkthrough is currently asking
+        // for, so we only accept that one — see handleCalStepRequest().
+        else if (msg.action === 'step_request') handleCalStepRequest(msg);
       } else if (msg.type === 'error') {
         joinError.textContent = msg.message || 'Could not connect.';
         joinBtn.disabled = false;
@@ -465,9 +469,66 @@
   // through calHandlers below) and tells the TV which one just happened.
   const calState = { left: false, right: false, jump: false, punch: false };
 
+  // 2026-09-03 fix ("the 4-stage setup never asks for a punch"). All four
+  // detectors run at once during calibration, so before this change a stray
+  // motion could tick off a move the TV hadn't asked for yet — punch most
+  // of all, being the easiest to trigger accidentally while stepping around
+  // — and the TV would then skip straight past it as "already done". The TV
+  // now tells us exactly which single move it is asking for and we accept
+  // only that one. `null` means "accept anything" and is just a safety
+  // fallback for a TV that hasn't sent us a step yet.
+  let expectedCalStep = null;
+  let lastCalStepAt = 0;
+  // A jump and a punch are both one sharp burst of motion, and the tail of
+  // one can easily still be arriving when the next step appears. Without a
+  // short deadline after each accepted step, a single physical movement
+  // could satisfy two steps in a row and skip a prompt again by a different
+  // route.
+  const CAL_STEP_LOCKOUT_MS = 900;
+  // If a move's detection just won't fire for this player, strict ordering
+  // would trap them on that step. After a few seconds the phone offers a
+  // per-move skip so they can always reach (and see) the remaining steps.
+  const CAL_STUCK_HINT_MS = 6000;
+  let calStuckTimer = null;
+
+  const CAL_STEP_LABEL = {
+    left: '⬅️ Step/lean LEFT',
+    right: '➡️ Step/lean RIGHT',
+    jump: '⬆️ JUMP',
+    punch: '👊 PUNCH',
+  };
+
+  function handleCalStepRequest(msg) {
+    expectedCalStep = msg && msg.step ? msg.step : null;
+    calSkipStepBtn.style.display = 'none';
+    if (calStuckTimer) clearTimeout(calStuckTimer);
+    if (!expectedCalStep) {
+      calibrationHint.textContent = 'All set! Tap Start Run whenever you\'re ready.';
+      calStartBtn.textContent = 'Start Run ✓';
+      return;
+    }
+    const label = CAL_STEP_LABEL[expectedCalStep] || expectedCalStep;
+    const n = typeof msg.index === 'number' ? msg.index + 1 : null;
+    const total = msg.total || 4;
+    calibrationHint.textContent = n
+      ? 'Step ' + n + ' of ' + total + ' — do this now: ' + label
+      : 'Do this now: ' + label;
+    calStuckTimer = setTimeout(() => {
+      calSkipStepBtn.textContent = 'Skip ' + label + ' ›';
+      calSkipStepBtn.style.display = 'block';
+    }, CAL_STUCK_HINT_MS);
+  }
+
   function markCalDone(key) {
     if (calState[key]) return;
+    // Only the move the TV is currently asking for counts.
+    if (expectedCalStep && key !== expectedCalStep) return;
+    const now = performance.now();
+    if (now - lastCalStepAt < CAL_STEP_LOCKOUT_MS) return;
+    lastCalStepAt = now;
     calState[key] = true;
+    if (calStuckTimer) clearTimeout(calStuckTimer);
+    calSkipStepBtn.style.display = 'none';
     if (navigator.vibrate) navigator.vibrate(15);
     sendCalibration('step', { step: key });
     if (Object.values(calState).every(Boolean)) {
@@ -475,8 +536,20 @@
       calibrationHint.textContent = 'All set! Tap Start Run whenever you\'re ready.';
     }
   }
+  // Manual per-move escape hatch — reports the step as done exactly as a
+  // detected move would, so the TV advances and the player still gets shown
+  // every remaining step rather than having to abandon setup entirely.
+  calSkipStepBtn.addEventListener('click', () => {
+    if (!expectedCalStep) return;
+    lastCalStepAt = 0;
+    markCalDone(expectedCalStep);
+  });
   function resetCalibration() {
     Object.keys(calState).forEach((k) => (calState[k] = false));
+    expectedCalStep = null;
+    lastCalStepAt = 0;
+    if (calStuckTimer) clearTimeout(calStuckTimer);
+    calSkipStepBtn.style.display = 'none';
     calStartBtn.textContent = 'Start Run →';
     calibrationHint.textContent = "👀 Look at your TV — it'll walk you through each move one at a time.";
   }
@@ -487,6 +560,9 @@
     // those gates too or real play would stay stuck undetected.
     inCameraSetupGate = false;
     framingActive = false;
+    expectedCalStep = null;
+    if (calStuckTimer) clearTimeout(calStuckTimer);
+    calSkipStepBtn.style.display = 'none';
     sendCalibration('done');
     actionHandlers = realHandlers;
     moveSensorPanelTo(playSensorSlot);
