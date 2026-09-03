@@ -40,6 +40,7 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const { WSServer } = require('./lib/ws-lite');
+const qrcodeLite = require('./lib/qrcode-lite');
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -122,11 +123,61 @@ function serveStatic(req, res) {
   });
 }
 
+// 2026-09-03 "scan a code on the TV to join automatically" feature: the TV
+// shows a QR code (generated server-side by lib/qrcode-lite.js — see that
+// file's header for why it's hand-rolled) encoding this server's own
+// /play?code=<room> URL, so a phone camera can jump straight to the join
+// screen with the code already filled in instead of the player typing 6
+// digits by hand. Needs this server's own origin, which depends on how it's
+// reached: Render terminates TLS and proxies to us over plain HTTP, setting
+// x-forwarded-proto/x-forwarded-host; running locally we ARE the TLS
+// endpoint (see the ON_RENDER branch below), so req.socket.encrypted is the
+// right signal there instead.
+function requestOrigin(req) {
+  const proto = req.headers['x-forwarded-proto'] || (req.socket.encrypted ? 'https' : 'http');
+  const host = req.headers['x-forwarded-host'] || req.headers.host;
+  return `${proto}://${host}`;
+}
+
+const QR_ROUTE_RE = /^\/qr\/(\d{6})\.svg$/;
+
+// Returns true if it fully handled the request (a matching /qr/<code>.svg
+// route), false if the caller should fall through to serveStatic.
+function maybeServeQr(req, res) {
+  const urlPath = decodeURIComponent(req.url.split('?')[0]);
+  const m = QR_ROUTE_RE.exec(urlPath);
+  if (!m) return false;
+  const code = m[1];
+  const joinUrl = `${requestOrigin(req)}/play?code=${code}`;
+  let svg;
+  try {
+    svg = qrcodeLite.toSVG(joinUrl);
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'text/plain' });
+    res.end('Could not generate QR code');
+    return true;
+  }
+  // The join URL (and so the QR pixels) is fully determined by the 6-digit
+  // code in the path, so this response can be cached hard — a re-request
+  // for the same code always produces byte-identical output.
+  res.writeHead(200, {
+    'Content-Type': 'image/svg+xml',
+    'Cache-Control': 'public, max-age=86400, immutable',
+  });
+  res.end(svg);
+  return true;
+}
+
+function requestHandler(req, res) {
+  if (maybeServeQr(req, res)) return;
+  serveStatic(req, res);
+}
+
 let server;
 if (ON_RENDER) {
   // Render terminates TLS for us and proxies plain HTTP to this process —
   // speaking HTTPS here ourselves would just break the connection.
-  server = http.createServer(serveStatic);
+  server = http.createServer(requestHandler);
 } else {
   let tlsOptions;
   try {
@@ -139,7 +190,7 @@ if (ON_RENDER) {
     console.error('See README.md — "Regenerating the HTTPS certificate" — to create them.');
     process.exit(1);
   }
-  server = https.createServer(tlsOptions, serveStatic);
+  server = https.createServer(tlsOptions, requestHandler);
 }
 const wss = new WSServer({ server });
 
