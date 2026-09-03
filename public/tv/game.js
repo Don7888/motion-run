@@ -1458,4 +1458,11 @@ function animate() {
 
   renderer.render(scene, camera);
 }
+// Paint the initial (pairing) state once before the loop starts. Without
+// this, syncPanel() only ever ran in response to a state change, so on a
+// fresh page load the pairing badge never appeared and the score/lives HUD
+// stayed visible over the pairing panel until the first phone message
+// arrived. Deliberately down here, after every `let` it reads (setupStage,
+// calibrating, state) has actually been initialised.
+syncPanel();
 animate();
