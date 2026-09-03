@@ -116,6 +116,7 @@
   #calibrationScreen { flex: 1; display: none; flex-direction: column; min-height: 0; }
   #calSensorSlot, #playSensorSlot { flex: 1; display: flex; flex-direction: column; min-height: 0; }
   #calibrationHint { text-align: center; font-size: 15px; opacity: 0.85; margin: 10px 0; min-height: 18px; }
+  #calSkipStepBtn { display: block; margin: 0 auto 10px; opacity: 0.85; }
   .calibration-actions { display: flex; gap: 10px; margin-top: 10px; flex-shrink: 0; }
   .calibration-actions .btn { flex: 1; padding: 12px 0; font-size: 15px; }
 
@@ -212,6 +213,10 @@
   body.cam-fullscreen #calibrationHint {
     position: absolute; left: 0; right: 0; bottom: 78px; z-index: 2; margin: 0;
     padding: 0 16px; text-shadow: 0 2px 6px rgba(0,0,0,0.85);
+  }
+  body.cam-fullscreen #calSkipStepBtn {
+    position: absolute; left: 50%; transform: translateX(-50%); bottom: 112px;
+    z-index: 3; margin: 0;
   }
   body.cam-fullscreen .calibration-actions {
     position: absolute; left: 0; right: 0; bottom: 0; z-index: 2; margin: 0;
@@ -337,6 +342,13 @@
     <div id="calSensorSlot"></div>
 
     <div id="calibrationHint">👀 Look at your TV — it'll walk you through each move one at a time.</div>
+
+    <!-- Per-move escape hatch. Setup now insists on each move in order (so
+         the punch step can't be silently ticked off early and skipped), which
+         means a move whose detection won't fire for this player would
+         otherwise trap them. This appears only after a few seconds stuck on
+         the same step. -->
+    <button class="btn secondary small" id="calSkipStepBtn" style="display:none;">Skip this move ›</button>
 
     <div class="calibration-actions">
       <button class="btn secondary" id="calSkipBtn">Skip setup</button>
