@@ -6,77 +6,132 @@
 <title>Motion Run — TV</title>
 <link rel="manifest" href="./manifest.json" />
 <link rel="icon" type="image/svg+xml" href="./icons/icon.svg" />
-<meta name="theme-color" content="#0b1220" />
+<meta name="theme-color" content="#2B1055" />
 <style>
-  /* 2026-09-02 "menu needs a more professional look" pass: a frosted-glass
-     panel treatment, a subtle full-screen vignette for depth, pill
-     backdrops behind the HUD text so it reads over busy gameplay, and a
-     heavier/tighter display weight for headings and scores. Deliberately
-     NOT pulling in a web font here — this device (Fire TV Stick, weak
-     hardware, and the "lag" complaint this same round is about) doesn't
-     need an extra render-blocking network fetch and a flash-of-unstyled-
-     text on every menu just for typography; the system UI font stack at a
-     heavy weight with tightened letter-spacing gets most of the same
-     "designed" feel for free. Kept to pure CSS/markup otherwise — no
-     game.js logic changed here.
-  */
+  /* =====================================================================
+     2026-09-03 "make it look like a real published TV game" pass.
+     Replaces the previous dark-navy frosted-glass treatment with the
+     chunky, candy-coloured arcade language of the reference screens Don
+     sent: flat saturated blocks, hard offset shadows instead of soft
+     blurs, big rounded-rect cards, extruded "press-down" buttons, and
+     pill badges with heavy white type.
+
+     Two deliberate constraints carried over from earlier rounds:
+
+     1. NO WEB FONT. Same reasoning as the round-5 pass — a Fire TV Stick
+        doesn't need a render-blocking font fetch and a flash of unstyled
+        text on every menu. The chunky look here comes from weight 900,
+        tightened letter-spacing and hard text shadows on the system
+        stack. (A self-hosted font file in the repo is the option if the
+        exact reference typeface is ever wanted — no third-party CDN.)
+
+     2. THIS IS CHEAPER TO RENDER THAN WHAT IT REPLACES, which matters on
+        this hardware. Every `backdrop-filter: blur()` is gone — those
+        are genuinely expensive per-frame on a weak mobile GPU — and the
+        big soft `box-shadow` blurs are now mostly hard offsets (no blur
+        radius), which cost almost nothing. Animations stay on transform
+        and opacity only.
+
+     Pure CSS/markup: game.js is untouched by this pass, and every id and
+     class it reads or writes (#scoreVal, .heart.lost, .control-badge
+     .remote/.phone, body.badge-visible, #countdown.tick, .silhouette.good,
+     …) is preserved.
+     ===================================================================== */
   :root {
-    --accent: #6ee7ff;
-    --accent-2: #7c8cff;
-    --gold: #ffd166;
-    --panel-bg: linear-gradient(165deg, rgba(21, 31, 54, 0.92), rgba(10, 15, 28, 0.92));
-    --panel-border: rgba(120, 200, 255, 0.35);
+    /* Candy-arcade palette. Each "solid" colour has a matching darker
+       shade used as its extruded underside, so buttons and pills read as
+       physical objects rather than flat rectangles. */
+    --ink:        #1B0B3B;
+    --grape-900:  #240D4A;
+    --grape-800:  #331466;
+    --grape-700:  #421C82;
+    --violet:     #7C3AED;
+    --violet-dk:  #5418B8;
+    --magenta:    #FF2D95;
+    --magenta-dk: #C10E6C;
+    --mint:       #4ADE80;
+    --mint-dk:    #1FA457;
+    --cyan:       #22D3EE;
+    --cyan-dk:    #0B94AF;
+    --gold:       #FFD93D;
+    --gold-dk:    #D3A400;
+    --coral:      #FF5A5F;
+
+    /* Kept as aliases so any stray older rule still resolves to something
+       sensible in the new palette rather than to nothing. */
+    --accent: var(--cyan);
+    --accent-2: var(--violet);
   }
   html, body {
     margin: 0; padding: 0; width: 100%; height: 100%;
-    background: #0b1220; color: #fff;
-    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--grape-800); color: #fff;
+    font-family: system-ui, 'Segoe UI', Roboto, -apple-system, sans-serif;
     overflow: hidden;
   }
   #gameCanvas { display: block; width: 100vw; height: 100vh; }
 
-  /* Permanent, subtle depth vignette — purely decorative, sits above the
-     canvas and below all HUD/panel content — makes both plain gameplay and
-     panel-over-gameplay moments read as more considered/finished. */
+  /* Depth vignette, now tinted to the grape palette so gameplay sits in
+     the same world as the menus. Decorative only; above the canvas,
+     below every HUD/panel element. */
   #vignette {
     position: fixed; inset: 0; pointer-events: none;
-    background: radial-gradient(ellipse at center, transparent 45%, rgba(2, 5, 12, 0.55) 100%);
+    background: radial-gradient(ellipse at center, transparent 48%, rgba(27, 11, 59, 0.55) 100%);
   }
 
+  /* ---------------------------------------------------------------
+     HUD — three chunky pills across the top
+     --------------------------------------------------------------- */
   #hud {
     position: fixed; inset: 0; pointer-events: none;
     display: flex; flex-direction: column; justify-content: space-between;
   }
   .top-bar {
     display: flex; justify-content: space-between; align-items: flex-start;
-    padding: 24px 36px; font-size: 26px; font-weight: 700;
-    text-shadow: 0 2px 8px rgba(0,0,0,0.6);
+    padding: 26px 40px; font-size: 15px; font-weight: 900;
   }
   .top-bar > div {
-    background: rgba(10, 16, 30, 0.55);
-    backdrop-filter: blur(6px);
-    border: 1px solid rgba(120, 200, 255, 0.22);
-    border-radius: 16px;
-    padding: 10px 20px;
+    background: var(--grape-900);
+    border: 4px solid var(--violet);
+    border-radius: 22px;
+    padding: 10px 22px 12px;
+    box-shadow: 0 6px 0 rgba(11, 4, 26, 0.55);
+    text-transform: uppercase; letter-spacing: 1.6px;
+    line-height: 1.15;
   }
-  .lives { display: flex; gap: 8px; font-size: 32px; align-items: center; }
-  .heart.lost { opacity: 0.25; filter: grayscale(1); }
+  .top-bar .stat-value {
+    display: block; font-size: 40px; font-weight: 900;
+    letter-spacing: -1px; text-transform: none;
+    text-shadow: 0 3px 0 rgba(11, 4, 26, 0.6);
+  }
+  .top-bar .score-pill { color: #fff; }
+  .top-bar .score-pill .stat-value { color: var(--gold); }
+  .lives {
+    display: flex; gap: 10px; font-size: 34px; align-items: center;
+    letter-spacing: 0 !important;
+  }
+  .heart.lost { opacity: 0.22; filter: grayscale(1); }
+  .high-score { text-align: center; color: #fff; border-color: var(--gold) !important; }
+  .high-score .stat-value { color: var(--gold); }
 
+  /* ---------------------------------------------------------------
+     Panels — solid cards with a bright border and a hard underside
+     --------------------------------------------------------------- */
   .overlay-panel {
     pointer-events: auto;
-    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%) scale(1);
-    background: var(--panel-bg);
-    backdrop-filter: blur(18px) saturate(1.2);
-    border: 1px solid var(--panel-border);
-    border-radius: 28px;
-    padding: 44px 60px;
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    background: var(--grape-700);
+    border: 6px solid var(--violet);
+    border-radius: 36px;
+    padding: 34px 54px 40px;
     text-align: center;
-    box-shadow: 0 24px 70px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.03) inset,
-      0 1px 0 rgba(255,255,255,0.08) inset;
-    max-width: 640px;
+    box-shadow:
+      0 14px 0 var(--violet-dk),
+      0 26px 50px rgba(11, 4, 26, 0.55),
+      0 4px 0 rgba(255, 255, 255, 0.18) inset;
+    max-width: 660px;
     max-height: 82vh;
     overflow-y: auto;
-    animation: panelIn 0.32s cubic-bezier(0.2, 0.8, 0.3, 1);
+    animation: panelIn 0.34s cubic-bezier(0.2, 0.9, 0.3, 1.1);
   }
   /* The control badge is a fixed pill near the top of the screen; a tall
      centred panel (the calibration one especially) used to run straight
@@ -84,59 +139,94 @@
      panels down whenever a badge is showing. Toggled by
      updateControlBadge() in game.js. */
   body.badge-visible .overlay-panel {
-    top: calc(50% + 34px);
-    max-height: 74vh;
+    top: calc(50% + 38px);
+    max-height: 72vh;
   }
   @keyframes panelIn {
-    from { opacity: 0; transform: translate(-50%, -50%) scale(0.94) translateY(8px); }
-    to   { opacity: 1; transform: translate(-50%, -50%) scale(1) translateY(0); }
+    from { opacity: 0; transform: translate(-50%, -50%) scale(0.9); }
+    to   { opacity: 1; transform: translate(-50%, -50%) scale(1); }
   }
+
+  /* Panel titles are banners, like the reference screens' headline
+     ribbons — a solid magenta block with its own extruded underside. */
   .overlay-panel h1 {
-    font-weight: 800; letter-spacing: -0.5px;
-    font-size: 42px; margin: 0 0 14px;
+    display: inline-block;
+    font-size: 34px; font-weight: 900;
+    letter-spacing: 0.5px; text-transform: uppercase;
+    margin: 0 0 18px;
+    padding: 12px 30px 14px;
+    background: var(--magenta);
+    color: #fff;
+    border-radius: 20px;
+    box-shadow: 0 7px 0 var(--magenta-dk);
+    text-shadow: 0 3px 0 rgba(0, 0, 0, 0.22);
   }
-  .overlay-panel p { font-size: 21px; line-height: 1.55; opacity: 0.88; margin: 8px 0; }
-  .room-code {
-    display: inline-block; margin: 18px 0; padding: 14px 28px;
-    font-size: 48px; font-weight: 800; letter-spacing: 8px;
-    background: linear-gradient(135deg, var(--accent), var(--accent-2));
-    color: #0b1220; border-radius: 16px;
-    box-shadow: 0 10px 30px rgba(110,231,255,0.25);
+  .overlay-panel p {
+    font-size: 20px; line-height: 1.5; margin: 10px 0;
+    font-weight: 700; color: #E9DDFF;
   }
-  .hint { font-size: 17px; opacity: 0.7; }
+  /* Kept deliberately bright: this is read from a sofa, several feet away,
+     so the usual "muted secondary text" contrast is too low here. */
+  .hint { font-size: 17px !important; color: #D6C6FF !important; font-weight: 700 !important; }
   .pulse { animation: pulse 1.6s ease-in-out infinite; }
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.55} }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+
+  /* The room code reads as a physical key-cap: white face, dark type,
+     hard underside. Highest-contrast thing on the pairing screen, which
+     is what you want someone squinting at it from a sofa to find. */
+  .room-code {
+    display: inline-block; margin: 18px 0; padding: 12px 26px 14px;
+    font-size: 46px; font-weight: 900; letter-spacing: 7px;
+    background: #fff; color: var(--ink);
+    border-radius: 20px;
+    box-shadow: 0 8px 0 rgba(11, 4, 26, 0.45);
+  }
 
   .score-big {
-    font-family: inherit; letter-spacing: -0.5px; font-size: 60px; font-weight: 800;
-    margin: 8px 0 24px; color: var(--accent);
-    text-shadow: 0 0 24px rgba(110,231,255,0.35);
+    font-size: 72px; font-weight: 900; letter-spacing: -2px;
+    margin: 6px 0 20px; color: var(--gold);
+    text-shadow: 0 5px 0 rgba(11, 4, 26, 0.5);
   }
+
+  /* Extruded press-down button: the face lifts off a solid darker slab,
+     and pressing sinks it into that slab. */
   .action-btn {
-    margin-top: 14px; font-size: 19px; padding: 14px 28px; border-radius: 14px;
-    border: none; background: linear-gradient(135deg, var(--accent), var(--accent-2));
-    color: #0b1220; font-weight: 800; cursor: pointer; letter-spacing: 0.2px;
-    box-shadow: 0 10px 24px rgba(110,231,255,0.3);
+    margin-top: 16px; font-size: 20px; padding: 16px 34px;
+    border-radius: 18px; border: none;
+    background: var(--mint); color: var(--ink);
+    font-weight: 900; cursor: pointer; letter-spacing: 0.4px;
+    text-transform: uppercase;
+    box-shadow: 0 7px 0 var(--mint-dk);
+    transition: transform 0.06s, box-shadow 0.06s;
+  }
+  .action-btn:active {
+    transform: translateY(5px);
+    box-shadow: 0 2px 0 var(--mint-dk);
   }
 
   #combo {
     position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
-    font-size: 38px; font-weight: 800; color: #ffd166;
-    text-shadow: 0 2px 10px rgba(0,0,0,0.7);
+    font-size: 46px; font-weight: 900; color: var(--gold);
+    text-shadow: 0 4px 0 rgba(11, 4, 26, 0.7);
     opacity: 0; transition: opacity 0.15s;
   }
   #flash {
-    position: fixed; inset: 0; background: #ff3b3b; opacity: 0;
+    position: fixed; inset: 0; background: var(--coral); opacity: 0;
     pointer-events: none; transition: opacity 0.1s;
   }
 
-  /* Pre-run countdown (2026-09-03). Runs now start on their own rather than
-     waiting for a Start press, so this is the player's cue to put the phone
-     down and get into position before the track starts moving. */
+  /* ---------------------------------------------------------------
+     Pre-run countdown — a sticker-style outlined numeral
+     --------------------------------------------------------------- */
   #countdown {
     position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-    font-size: 190px; font-weight: 900; letter-spacing: -4px; color: #fff;
-    text-shadow: 0 6px 30px rgba(0,0,0,0.75), 0 0 60px rgba(110,231,255,0.55);
+    font-size: 200px; font-weight: 900; letter-spacing: -6px; color: #fff;
+    /* Layered offsets fake a thick outline far more cheaply than an SVG
+       stroke or a filter would on this hardware. */
+    text-shadow:
+      -6px -6px 0 var(--ink),  6px -6px 0 var(--ink),
+      -6px  6px 0 var(--ink),  6px  6px 0 var(--ink),
+       0px  14px 0 var(--violet-dk);
     z-index: 26; pointer-events: none; line-height: 1;
   }
   #countdown.tick { animation: countPop 0.5s cubic-bezier(0.2, 0.9, 0.3, 1); }
@@ -145,106 +235,166 @@
     to   { opacity: 1;   transform: translate(-50%, -50%) scale(1); }
   }
   #countdownHint {
-    position: fixed; top: calc(50% + 130px); left: 50%; transform: translateX(-50%);
-    font-size: 24px; font-weight: 700; opacity: 0.85; z-index: 26; pointer-events: none;
-    text-shadow: 0 2px 10px rgba(0,0,0,0.8);
+    position: fixed; top: calc(50% + 140px); left: 50%; transform: translateX(-50%);
+    font-size: 22px; font-weight: 900; z-index: 26; pointer-events: none;
+    text-transform: uppercase; letter-spacing: 1.5px;
+    background: var(--grape-900); color: #fff;
+    border: 4px solid var(--cyan);
+    border-radius: 999px; padding: 10px 26px 12px;
+    box-shadow: 0 6px 0 rgba(11, 4, 26, 0.55);
   }
 
-  /* Trimmed from 96px/44px alongside the badge-clearance shift above, so the
-     tallest panel in the game still fits comfortably on a TV (which may also
-     be overscanning the edges) instead of needing to scroll. */
-  #calibrationPanel { padding-top: 32px; padding-bottom: 32px; }
-  .cal-move-icon { font-size: 78px; line-height: 1; margin: 4px 0; }
-  .cal-move-text { font-family: inherit; letter-spacing: -0.5px; font-size: 40px; font-weight: 800; margin: 4px 0 8px; color: var(--accent); }
-  .cal-dots { font-size: 26px; margin-top: 6px; letter-spacing: 4px; }
-  .cal-step-counter { font-size: 16px; font-weight: 700; opacity: 0.65; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 1.5px; }
+  /* ---------------------------------------------------------------
+     Guided setup
+     --------------------------------------------------------------- */
+  #calibrationPanel { padding-top: 28px; padding-bottom: 30px; }
+  .cal-move-icon { font-size: 82px; line-height: 1; margin: 6px 0 2px; }
+  .cal-move-text {
+    font-size: 46px; font-weight: 900; letter-spacing: -0.5px;
+    margin: 2px 0 10px; color: var(--mint);
+    text-shadow: 0 4px 0 rgba(11, 4, 26, 0.5);
+    text-transform: uppercase;
+  }
+  /* Progress tiles: done / doing now / still to come, as three clearly
+     different shapes rather than three similar dots. Built by
+     renderCalDots() in game.js. */
+  .cal-dots { display: flex; gap: 12px; justify-content: center; margin-top: 16px; }
+  .cal-tile {
+    width: 54px; height: 54px; border-radius: 16px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 24px; font-weight: 900; color: #fff;
+    background: var(--grape-900);
+    border: 4px solid transparent;
+    box-shadow: 0 5px 0 rgba(11, 4, 26, 0.55);
+  }
+  .cal-tile.done {
+    background: var(--mint); color: var(--ink);
+    box-shadow: 0 5px 0 var(--mint-dk);
+  }
+  .cal-tile.current {
+    border-color: var(--cyan); color: var(--cyan);
+    animation: tileBob 1s ease-in-out infinite;
+  }
+  .cal-tile.todo { opacity: 0.45; }
+  @keyframes tileBob {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-5px); }
+  }
+  /* Small dark counter chip on its own line under the title, like the
+     reference screens' level/step tags. */
+  .overlay-panel p.cal-step-counter {
+    display: block; width: fit-content; margin: 0 auto 8px;
+    font-size: 14px !important; font-weight: 900 !important;
+    text-transform: uppercase; letter-spacing: 2px;
+    background: var(--grape-900); color: var(--cyan) !important;
+    border-radius: 999px; padding: 7px 18px 8px;
+    box-shadow: 0 4px 0 rgba(11, 4, 26, 0.5);
+  }
 
-  .setup-icon { font-size: 72px; line-height: 1; margin: 4px 0 10px; }
+  .setup-icon { font-size: 76px; line-height: 1; margin: 2px 0 10px; }
   .silhouette-wrap { margin: 6px 0 10px; }
   .silhouette {
-    fill: none; stroke: var(--sil-color, #ff8a8a); stroke-width: 5;
+    fill: none; stroke: var(--sil-color, #ff8a8a); stroke-width: 7;
     stroke-linejoin: round; stroke-linecap: round;
     transition: stroke 0.2s ease;
-    filter: drop-shadow(0 0 6px rgba(0,0,0,0.4));
   }
   .silhouette.good { animation: silPulse 1s ease-in-out infinite; }
   @keyframes silPulse {
-    0%, 100% { filter: drop-shadow(0 0 6px rgba(110,231,255,0.35)); }
-    50% { filter: drop-shadow(0 0 18px rgba(110,231,255,0.85)); }
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.55; }
   }
-  .setup-status-text { font-family: inherit; letter-spacing: -0.5px; font-size: 32px; font-weight: 800; margin: 6px 0 8px; color: var(--accent); }
+  .overlay-panel p.setup-status-text {
+    font-size: 36px !important; font-weight: 900 !important;
+    letter-spacing: -0.5px; margin: 8px 0 10px;
+    color: var(--cyan) !important;
+    text-shadow: 0 4px 0 rgba(11, 4, 26, 0.5);
+    text-transform: uppercase;
+  }
 
-  .high-score { text-align: center; color: var(--gold); }
+  /* Gold callout chip for the one instruction that must not be missed. */
+  .overlay-panel p.setup-callout {
+    display: inline-block; margin: 12px 0; padding: 12px 24px 14px;
+    background: var(--gold); color: var(--ink) !important;
+    border-radius: 16px; font-weight: 900 !important; font-size: 19px !important;
+    box-shadow: 0 6px 0 var(--gold-dk);
+  }
 
-  /* Persistent "what do I use right now?" indicator — shown at every
-     non-playing stage so it's always obvious whether the Fire TV remote or
-     the phone is what drives the current screen. See updateControlBadge()
-     in game.js. */
+  /* ---------------------------------------------------------------
+     "What do I use right now?" badge — see updateControlBadge()
+     --------------------------------------------------------------- */
   .control-badge {
-    position: fixed; top: 28px; left: 50%; transform: translateX(-50%);
-    background: rgba(10,16,30,0.75); backdrop-filter: blur(8px); border-radius: 999px;
-    padding: 10px 26px; font-size: 17px; font-weight: 700; letter-spacing: 0.2px;
-    z-index: 30; pointer-events: none; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
-    text-shadow: 0 2px 6px rgba(0,0,0,0.6); border: 1px solid transparent;
+    position: fixed; top: 26px; left: 50%; transform: translateX(-50%);
+    background: var(--grape-900);
+    border: 4px solid var(--violet);
+    border-radius: 999px;
+    padding: 11px 28px 13px; font-size: 17px; font-weight: 900;
+    letter-spacing: 0.6px; color: #fff;
+    z-index: 30; pointer-events: none;
+    box-shadow: 0 6px 0 rgba(11, 4, 26, 0.55);
   }
-  .control-badge.remote { border-color: rgba(255,209,102,0.6); color: var(--gold); }
-  .control-badge.phone { border-color: rgba(110,231,255,0.6); color: var(--accent); }
+  .control-badge.remote { border-color: var(--gold); color: var(--gold); }
+  .control-badge.phone { border-color: var(--cyan); color: var(--cyan); }
 
-  .setup-callout {
-    display: inline-block; margin: 10px 0; padding: 10px 20px;
-    background: rgba(255,209,102,0.1); border: 1px solid rgba(255,209,102,0.5);
-    border-radius: 14px; font-weight: 700; font-size: 18px; color: var(--gold);
-  }
-
-  /* Scan-to-join QR code (2026-09-03) — a plain white card so the code has
-     the quiet, high-contrast border it needs to scan reliably no matter
-     what's behind the frosted-glass panel. Sized by CSS, not by the SVG's
-     own intrinsic size, so it stays sharp (the SVG is drawn on a 1-unit-
-     per-module grid — see lib/qrcode-lite.js's toSVG()) at any panel width.
-     Scan and type-the-code sit SIDE BY SIDE rather than stacked: stacked,
-     the pairing panel ran to ~930px tall, which overflows its own 74vh cap
-     even on a 1080p TV — and an overflowing panel is genuinely stuck there,
-     since there's nothing on a Fire TV remote that scrolls it. */
-  #pairingPanel { max-width: 820px; }
+  /* ---------------------------------------------------------------
+     Scan-to-join (2026-09-03)
+     A plain white card so the code keeps the quiet, high-contrast
+     border it needs to scan reliably. Sized by CSS, not by the SVG's
+     own intrinsic size, so it stays sharp (the SVG is drawn on a
+     1-unit-per-module grid — see lib/qrcode-lite.js's toSVG()).
+     Scan and type-the-code sit SIDE BY SIDE rather than stacked:
+     stacked, the pairing panel ran to ~930px tall, which overflows its
+     own max-height even on a 1080p TV — and an overflowing panel is
+     genuinely stuck there, since nothing on a Fire TV remote scrolls it.
+     --------------------------------------------------------------- */
+  #pairingPanel { max-width: 840px; }
   .join-split {
-    display: flex; align-items: center; justify-content: center; gap: 22px;
-    margin: 10px 0 6px;
+    display: flex; align-items: center; justify-content: center; gap: 26px;
+    margin: 12px 0 8px;
   }
   .join-col { flex: 0 1 auto; }
   .join-col p { margin: 4px 0; }
-  .join-col.scan { width: 210px; }
+  .join-col.scan { width: 214px; }
   .join-or {
-    font-size: 15px; opacity: 0.5; text-transform: uppercase; letter-spacing: 2px;
-    padding: 0 2px; align-self: center;
+    font-size: 15px; font-weight: 900; text-transform: uppercase; letter-spacing: 2px;
+    color: var(--ink); background: var(--gold);
+    border-radius: 999px; padding: 8px 14px 9px;
+    box-shadow: 0 5px 0 var(--gold-dk);
+    align-self: center; flex-shrink: 0;
   }
   .qr-card {
-    width: 190px; height: 190px; margin: 10px auto 0;
-    background: #fff; border-radius: 16px; padding: 10px;
-    box-shadow: 0 10px 26px rgba(0,0,0,0.35);
+    width: 194px; height: 194px; margin: 10px auto 0;
+    background: #fff; border-radius: 20px; padding: 10px;
+    box-shadow: 0 8px 0 rgba(11, 4, 26, 0.45);
   }
   .qr-card img { display: block; width: 100%; height: 100%; }
-  /* Trimmed from 48px/8px letter-spacing so six digits still fit the
-     narrower column this side-by-side layout gives them. */
-  .join-col .room-code { font-size: 40px; letter-spacing: 6px; margin: 10px 0 0; padding: 12px 22px; }
+  /* Trimmed so six digits still fit the narrower column the side-by-side
+     layout gives them. */
+  .join-col .room-code { font-size: 38px; letter-spacing: 5px; margin: 10px 0 0; padding: 11px 20px 13px; }
 
-  .new-high-score {
-    color: var(--gold); font-weight: 800; font-size: 21px; margin: 4px 0 14px;
-    text-shadow: 0 0 18px rgba(255,209,102,0.4);
+  .overlay-panel p.new-high-score {
+    display: inline-block;
+    color: var(--ink) !important; background: var(--gold);
+    font-weight: 900 !important; font-size: 20px !important;
+    margin: 2px 0 14px; padding: 10px 22px 12px;
+    border-radius: 999px; box-shadow: 0 6px 0 var(--gold-dk);
   }
 
   /* Timing cue — pulses shortly before an obstacle in the player's lane
      reaches them, so jump/punch timing is learnable. See
      updateActionPrompt() in game.js. */
   #actionPrompt {
-    position: fixed; top: 130px; left: 50%; transform: translateX(-50%);
-    font-size: 42px; font-weight: 900; color: #fff176; letter-spacing: 2px;
-    text-shadow: 0 3px 10px rgba(0,0,0,0.8), 0 0 22px rgba(255,209,102,0.65);
-    z-index: 25; pointer-events: none;
+    /* Clear of the HUD pills above it — they're taller now. */
+    position: fixed; top: 172px; left: 50%; transform: translateX(-50%);
+    font-size: 44px; font-weight: 900; color: #fff; letter-spacing: 1px;
+    z-index: 25; pointer-events: none; text-transform: uppercase;
+    background: var(--magenta);
+    border-radius: 20px; padding: 10px 28px 13px;
+    box-shadow: 0 7px 0 var(--magenta-dk);
     animation: promptPulse 0.45s ease-in-out infinite;
   }
   @keyframes promptPulse {
     0%, 100% { transform: translateX(-50%) scale(1); }
-    50% { transform: translateX(-50%) scale(1.18); }
+    50% { transform: translateX(-50%) scale(1.1); }
   }
 </style>
 </head>
@@ -255,8 +405,8 @@
 
   <div id="hud">
     <div class="top-bar">
-      <div>Score<br /><span id="scoreVal" style="font-size:36px;">0</span></div>
-      <div class="high-score">🏆 High Score<br /><span id="highScoreVal" style="font-size:28px;">0</span></div>
+      <div class="score-pill">Score<span class="stat-value" id="scoreVal">0</span></div>
+      <div class="high-score">🏆 Best<span class="stat-value" id="highScoreVal">0</span></div>
       <div class="lives" id="lives"></div>
     </div>
     <div style="height:1px"></div>
@@ -279,7 +429,7 @@
       <div class="join-or">or</div>
       <div class="join-col">
         <p>Open on your phone:</p>
-        <p style="font-size:24px; font-weight:700;" id="playUrl">…/play</p>
+        <p style="font-size:22px; font-weight:900;" id="playUrl">…/play</p>
         <p>and enter this code:</p>
         <div class="room-code" id="roomCode">······</div>
       </div>
@@ -306,7 +456,7 @@
   <div id="framingPanel" class="overlay-panel" style="display:none;">
     <h1>Get In Frame</h1>
     <div class="silhouette-wrap">
-      <svg id="framingSilhouette" class="silhouette" viewBox="0 0 120 200" width="120" height="200">
+      <svg id="framingSilhouette" class="silhouette" viewBox="0 0 120 200" width="112" height="186">
         <circle cx="60" cy="28" r="20" />
         <path d="M60 50 C34 54 26 88 30 136 L42 136 L46 188 L58 188 L60 140 L62 140 L64 188 L76 188 L80 136 L92 136 C96 88 88 54 60 50 Z" />
       </svg>
@@ -328,7 +478,7 @@
 
   <div id="pausedPanel" class="overlay-panel" style="display:none;">
     <h1>Paused ⏸</h1>
-    <div class="score-big" style="font-size:40px;"><span id="pausedScoreVal">0</span> pts so far</div>
+    <div class="score-big" style="font-size:52px;"><span id="pausedScoreVal">0</span> pts</div>
     <p class="hint pulse">🎮 Press OK on your remote (or tap ▶ on your phone) to resume</p>
     <p class="hint">🎮 Press Back again (or tap ✕ Exit on your phone) to end this run</p>
   </div>
