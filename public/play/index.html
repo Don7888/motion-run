@@ -15,7 +15,7 @@
      there, iOS drops Safari's URL bar and tab bar entirely (that's the rest
      of the screen the camera wasn't getting) — no native app needed. -->
 <link rel="manifest" href="./manifest.json" />
-<meta name="theme-color" content="#0b1220" />
+<meta name="theme-color" content="#2B1055" />
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -23,41 +23,96 @@
 <link rel="apple-touch-icon" href="../tv/icons/icon-512.png" />
 <link rel="icon" type="image/svg+xml" href="../tv/icons/icon.svg" />
 <style>
+  /* =====================================================================
+     2026-09-03 "make it look like a real published game" pass — phone half.
+     Same candy-arcade language as the TV (see public/tv/index.html for the
+     full rationale): flat saturated blocks, hard offset shadows rather
+     than soft blurs, big rounded rects, extruded press-down buttons.
+     No web font, for the same reason as the TV.
+
+     Layout behaviour is deliberately unchanged — the safe-area insets, the
+     shared sensor panel, and the whole body.cam-fullscreen overlay stack
+     are carried over as they were, because those solve real device
+     problems (notch letterboxing, one camera stream across two screens)
+     and this pass is about how it looks, not how it works.
+     ===================================================================== */
+  :root {
+    --ink:        #1B0B3B;
+    --grape-900:  #240D4A;
+    --grape-800:  #331466;
+    --grape-700:  #421C82;
+    --grape-600:  #52239E;
+    --violet:     #7C3AED;
+    --violet-dk:  #5418B8;
+    --magenta:    #FF2D95;
+    --magenta-dk: #C10E6C;
+    --mint:       #4ADE80;
+    --mint-dk:    #1FA457;
+    --cyan:       #22D3EE;
+    --cyan-dk:    #0B94AF;
+    --gold:       #FFD93D;
+    --gold-dk:    #D3A400;
+    --coral:      #FF5A5F;
+    --coral-dk:   #C22C31;
+  }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; user-select: none; }
   html, body {
     margin: 0; padding: 0; width: 100%; height: 100%;
-    background: #0b1220; color: #fff;
-    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--grape-800);
+    color: #fff;
+    font-family: system-ui, 'Segoe UI', Roboto, -apple-system, sans-serif;
     overscroll-behavior: none; touch-action: manipulation;
   }
-  /* Left/right insets matter now that viewport-fit=cover lets the page run
-     under the notch in landscape — without them the controls would sit
-     underneath it. */
+  /* Left/right insets matter because viewport-fit=cover lets the page run
+     under the notch — without them the controls would sit underneath it. */
   #app {
     display: flex; flex-direction: column; height: 100%;
     padding: env(safe-area-inset-top) max(20px, env(safe-area-inset-right))
              env(safe-area-inset-bottom) max(20px, env(safe-area-inset-left));
+    background: linear-gradient(170deg, var(--grape-700) 0%, var(--grape-900) 100%);
   }
 
-  h1 { font-size: 22px; text-align: center; margin: 18px 0 4px; }
-  h2 { font-size: 16px; margin: 0 0 8px; opacity: 0.9; }
-  .subtitle { text-align: center; opacity: 0.7; font-size: 14px; margin-bottom: 18px; }
+  h1 {
+    font-size: 26px; font-weight: 900; text-align: center; margin: 16px 0 2px;
+    letter-spacing: -0.5px;
+    text-shadow: 0 3px 0 rgba(11, 4, 26, 0.5);
+  }
+  h2 {
+    font-size: 13px; margin: 0 0 8px; font-weight: 900;
+    text-transform: uppercase; letter-spacing: 1.6px; color: var(--cyan);
+  }
+  .subtitle {
+    text-align: center; font-size: 13px; margin-bottom: 16px; font-weight: 700;
+    color: #C0A9F0;
+  }
 
+  /* Extruded press-down button: the face sits on a solid darker slab, and
+     pressing sinks it into that slab. */
   .btn {
-    font-size: 18px; font-weight: 700; padding: 14px 32px; border-radius: 14px;
-    border: none; background: #6ee7ff; color: #0b1220; cursor: pointer;
+    font-size: 17px; font-weight: 900; padding: 15px 30px 17px;
+    border-radius: 18px; border: none;
+    background: var(--mint); color: var(--ink); cursor: pointer;
+    letter-spacing: 0.3px;
+    box-shadow: 0 6px 0 var(--mint-dk);
+    transition: transform 0.06s, box-shadow 0.06s;
   }
-  .btn:active { transform: scale(0.97); }
-  .btn.secondary { background: #2a3650; color: #fff; }
-  .btn.small { font-size: 14px; padding: 10px 18px; }
+  .btn:active { transform: translateY(4px); box-shadow: 0 2px 0 var(--mint-dk); }
+  .btn.secondary { background: var(--violet); color: #fff; box-shadow: 0 6px 0 var(--violet-dk); }
+  .btn.secondary:active { box-shadow: 0 2px 0 var(--violet-dk); }
+  .btn.danger { background: var(--coral); color: #fff; box-shadow: 0 6px 0 var(--coral-dk); }
+  .btn.danger:active { box-shadow: 0 2px 0 var(--coral-dk); }
+  .btn.small { font-size: 13px; padding: 9px 15px 11px; border-radius: 13px; box-shadow: 0 4px 0 var(--violet-dk); }
+  .btn.small:active { transform: translateY(3px); box-shadow: 0 1px 0 var(--violet-dk); }
+  .btn.small.danger { box-shadow: 0 4px 0 var(--coral-dk); }
 
   /* --- Character creator screen --- */
-  #characterScreen { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow-y: auto; padding-bottom: 8px; }
-  .avatar-preview-wrap { display: flex; justify-content: center; margin: 4px 0 14px; flex-shrink: 0; }
+  #characterScreen { flex: 1; display: none; flex-direction: column; min-height: 0; overflow-y: auto; padding-bottom: 8px; }
+  .avatar-preview-wrap { display: flex; justify-content: center; margin: 4px 0 16px; flex-shrink: 0; }
   .avatar-stage {
-    width: 130px; height: 170px; position: relative;
-    background: radial-gradient(circle at 50% 30%, #1a2440, #0b1220);
-    border-radius: 18px; border: 2px solid rgba(120,200,255,0.25);
+    width: 136px; height: 176px; position: relative;
+    background: var(--grape-600);
+    border-radius: 24px; border: 4px solid var(--violet);
+    box-shadow: 0 7px 0 var(--violet-dk);
   }
   .avatar-body {
     position: absolute; left: 50%; bottom: 14px; width: 74px; height: 58px;
@@ -102,80 +157,115 @@
   }
   @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
-  .picker-section { margin-bottom: 14px; flex-shrink: 0; }
-  .option-row { display: flex; gap: 8px; overflow-x: auto; padding: 2px; }
+  .picker-section { margin-bottom: 16px; flex-shrink: 0; }
+  .option-row { display: flex; gap: 8px; overflow-x: auto; padding: 3px 2px 7px; }
   .option-chip {
-    flex-shrink: 0; padding: 10px 14px; border-radius: 12px; border: 2px solid transparent;
-    background: #1a2436; color: #fff; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap;
+    flex-shrink: 0; padding: 11px 16px 13px; border-radius: 15px; border: 3px solid transparent;
+    background: var(--grape-600); color: #fff; font-size: 13px; font-weight: 900;
+    cursor: pointer; white-space: nowrap;
+    box-shadow: 0 4px 0 rgba(11, 4, 26, 0.5);
   }
-  .option-chip.active { border-color: #6ee7ff; background: #24314f; color: #6ee7ff; }
-  .color-row { display: flex; gap: 8px; overflow-x: auto; padding: 4px 2px; }
+  .option-chip:active { transform: translateY(3px); box-shadow: 0 1px 0 rgba(11, 4, 26, 0.5); }
+  .option-chip.active {
+    background: var(--mint); color: var(--ink); border-color: #fff;
+    box-shadow: 0 4px 0 var(--mint-dk);
+  }
+  .color-row { display: flex; gap: 9px; overflow-x: auto; padding: 4px 2px 8px; }
   .color-swatch {
-    flex-shrink: 0; width: 30px; height: 30px; border-radius: 50%; border: 2px solid transparent; cursor: pointer;
+    flex-shrink: 0; width: 34px; height: 34px; border-radius: 50%;
+    border: 3px solid rgba(255,255,255,0.25); cursor: pointer;
+    box-shadow: 0 4px 0 rgba(11, 4, 26, 0.5);
   }
-  .color-swatch.active { border-color: #fff; box-shadow: 0 0 0 2px #6ee7ff; }
+  .color-swatch:active { transform: translateY(3px); box-shadow: 0 1px 0 rgba(11, 4, 26, 0.5); }
+  .color-swatch.active { border-color: #fff; box-shadow: 0 0 0 3px var(--cyan), 0 4px 0 rgba(11, 4, 26, 0.5); }
 
-  .character-actions { display: flex; gap: 10px; margin-top: 4px; flex-shrink: 0; }
-  .character-actions .btn { flex: 1; padding: 12px 0; font-size: 15px; }
+  .character-actions { display: flex; gap: 10px; margin-top: 6px; flex-shrink: 0; }
+  .character-actions .btn { flex: 1; padding: 13px 0 15px; font-size: 15px; }
 
   /* --- Join screen --- */
-  #joinScreen { flex: 1; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 16px; }
+  #joinScreen { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; }
+  .join-title { font-size: 24px !important; color: #fff !important; text-transform: none !important;
+    letter-spacing: -0.3px !important; margin: 0 !important; }
+  .join-hint { font-size: 14px; font-weight: 700; color: #C0A9F0; text-align: center;
+    margin: -6px 0 4px; padding: 0 20px; line-height: 1.5; max-width: 340px; }
+  /* Same white key-cap treatment as the code on the TV, so the thing you
+     read there and the thing you type here obviously match. */
   #codeInput {
-    font-size: 42px; letter-spacing: 14px; text-align: center; width: 240px;
-    padding: 14px 0 14px 14px; border-radius: 14px; border: none;
-    background: #1a2436; color: #fff; font-weight: 800;
+    font-size: 40px; letter-spacing: 12px; text-align: center; width: 250px;
+    padding: 16px 0 18px 12px; border-radius: 20px;
+    border: 4px solid var(--violet);
+    background: #fff; color: var(--ink); font-weight: 900;
+    box-shadow: 0 7px 0 var(--violet-dk);
   }
-  #codeInput:focus { outline: 2px solid #6ee7ff; }
-  #joinError { color: #ff8a8a; min-height: 20px; font-size: 14px; }
+  #codeInput:focus { outline: none; border-color: var(--cyan); box-shadow: 0 7px 0 var(--cyan-dk); }
+  #joinError { color: var(--gold); min-height: 20px; font-size: 14px; font-weight: 900; text-align: center; padding: 0 16px; }
 
-  /* --- Control-method choice screen (first step of setup) --- */
-  #controlChoiceScreen { flex: 1; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 14px; text-align: center; padding: 0 16px; }
-  #controlChoiceScreen h2 { font-size: 20px; margin: 0 0 2px; opacity: 1; }
-  #controlChoiceScreen .choice-sub { opacity: 0.7; font-size: 14px; margin-bottom: 6px; }
+  /* --- Control-method choice screen --- */
+  #controlChoiceScreen { flex: 1; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 16px; text-align: center; padding: 0 12px; }
+  #controlChoiceScreen h2 { font-size: 20px; margin: 0 0 2px; color: #fff; text-transform: none; letter-spacing: -0.3px; }
+  #controlChoiceScreen .choice-sub { font-size: 13px; margin-bottom: 4px; color: #C0A9F0; font-weight: 700; }
   .choice-card {
     width: 100%; max-width: 420px; text-align: left; cursor: pointer;
-    background: #1a2436; border: 2px solid rgba(120,200,255,0.25); border-radius: 18px;
-    padding: 16px 18px; color: #fff;
+    background: var(--grape-600); border: 4px solid var(--violet); border-radius: 22px;
+    padding: 16px 18px 18px; color: #fff;
+    box-shadow: 0 7px 0 var(--violet-dk);
+    transition: transform 0.06s, box-shadow 0.06s;
   }
-  .choice-card:active { transform: scale(0.985); }
-  .choice-card .choice-title { font-size: 18px; font-weight: 800; display: block; margin-bottom: 4px; }
-  .choice-card .choice-desc { font-size: 13px; opacity: 0.72; line-height: 1.45; display: block; }
+  .choice-card:active { transform: translateY(5px); box-shadow: 0 2px 0 var(--violet-dk); }
+  .choice-card .choice-title { font-size: 18px; font-weight: 900; display: block; margin-bottom: 5px; }
+  .choice-card .choice-desc { font-size: 13px; line-height: 1.45; display: block; color: #CDB8F5; font-weight: 700; }
 
   /* --- Camera permission screen --- */
-  #permScreen { flex: 1; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 18px; text-align: center; padding: 0 20px; }
-  #permScreen p { opacity: 0.85; line-height: 1.5; }
+  #permScreen { flex: 1; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 16px; text-align: center; padding: 0 16px; }
+  #permScreen p { line-height: 1.5; font-weight: 700; color: #CDB8F5; margin: 0; }
   .hint-strong {
-    background: rgba(255,209,102,0.12); border: 2px solid rgba(255,209,102,0.55);
-    border-radius: 14px; padding: 12px 16px; font-weight: 700; font-size: 15px;
-    opacity: 1 !important;
+    background: var(--gold); color: var(--ink) !important;
+    border-radius: 16px; padding: 13px 18px 15px;
+    font-weight: 900; font-size: 15px;
+    box-shadow: 0 6px 0 var(--gold-dk);
   }
 
   /* --- Calibration screen --- */
   #calibrationScreen { flex: 1; display: none; flex-direction: column; min-height: 0; }
   #calSensorSlot, #playSensorSlot { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-  #calibrationHint { text-align: center; font-size: 15px; opacity: 0.85; margin: 10px 0; min-height: 18px; }
-  #calSkipStepBtn { display: block; margin: 0 auto 10px; opacity: 0.85; }
+  #calibrationHint {
+    text-align: center; font-size: 15px; font-weight: 900; margin: 12px 0; min-height: 18px;
+    color: #fff;
+  }
+  #calSkipStepBtn { display: block; margin: 0 auto 10px; }
   .calibration-actions { display: flex; gap: 10px; margin-top: 10px; flex-shrink: 0; }
-  .calibration-actions .btn { flex: 1; padding: 12px 0; font-size: 15px; }
+  .calibration-actions .btn { flex: 1; padding: 13px 0 15px; font-size: 15px; }
+
+  /* Setting up or playing: the title and strapline are wasted height,
+     so the controls and camera get it back. Toggled by showScreen(). */
+  body.in-game h1, body.in-game .subtitle { display: none; }
 
   /* --- Play screen --- */
-  #playScreen { flex: 1; display: none; flex-direction: column; min-height: 0; }
-  .status-row { display: flex; flex-wrap: wrap; gap: 6px; justify-content: space-between; align-items: center; font-size: 13px; opacity: 0.8; padding: 4px 2px 10px; }
+  #playScreen { flex: 1; display: none; flex-direction: column; min-height: 0; padding-bottom: 6px; }
+  .status-row {
+    display: flex; flex-wrap: wrap; gap: 7px; justify-content: space-between; align-items: center;
+    font-size: 12px; font-weight: 900; padding: 6px 2px 12px; color: #CDB8F5;
+  }
   .status-actions { display: flex; gap: 6px; flex-shrink: 0; }
-  .btn.danger { background: #ff5a5f; color: #fff; }
-  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #4ade80; margin-right: 6px; }
+  .dot {
+    display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+    background: var(--mint); margin-right: 7px;
+  }
 
   .mode-tabs { display: flex; gap: 8px; margin-bottom: 10px; }
   .mode-tab {
-    flex: 1; padding: 10px 0; border-radius: 12px; border: 2px solid transparent;
-    background: #1a2436; color: #fff; font-size: 14px; font-weight: 700; cursor: pointer;
+    flex: 1; padding: 11px 0 13px; border-radius: 15px; border: 3px solid transparent;
+    background: var(--grape-600); color: #fff; font-size: 13px; font-weight: 900; cursor: pointer;
+    box-shadow: 0 4px 0 rgba(11, 4, 26, 0.5);
   }
-  .mode-tab.active { background: #24314f; border-color: #6ee7ff; color: #6ee7ff; }
+  .mode-tab:active { transform: translateY(3px); box-shadow: 0 1px 0 rgba(11, 4, 26, 0.5); }
+  .mode-tab.active { background: var(--cyan); color: var(--ink); border-color: #fff; box-shadow: 0 4px 0 var(--cyan-dk); }
 
   /* --- Camera view (shared by calibration + play screens) --- */
   .camera-view {
-    flex: 1; border-radius: 22px; background: #000; position: relative; overflow: hidden;
-    border: 2px solid rgba(120,200,255,0.25); min-height: 160px; display: none;
+    flex: 1; border-radius: 24px; background: #000; position: relative; overflow: hidden;
+    border: 4px solid var(--violet); min-height: 160px; display: none;
+    box-shadow: 0 7px 0 var(--violet-dk);
   }
   .camera-view video {
     position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
@@ -195,58 +285,65 @@
     position: absolute; inset: 0; width: 100%; height: 100%;
   }
   .camera-status {
-    position: absolute; left: 0; right: 0; top: 10px; text-align: center;
-    font-size: 13px; background: rgba(0,0,0,0.5); margin: 0 auto; padding: 6px 14px;
-    border-radius: 10px; width: fit-content; pointer-events: none;
+    position: absolute; left: 0; right: 0; top: 12px; text-align: center;
+    font-size: 13px; font-weight: 900; background: var(--grape-900); color: #fff;
+    margin: 0 auto; padding: 8px 16px 10px;
+    border-radius: 999px; width: fit-content; pointer-events: none;
+    box-shadow: 0 4px 0 rgba(11, 4, 26, 0.6);
   }
   .lane-bar {
-    position: absolute; left: 12px; right: 12px; bottom: 10px; height: 8px;
-    background: rgba(255,255,255,0.15); border-radius: 4px; pointer-events: none;
+    position: absolute; left: 14px; right: 14px; bottom: 12px; height: 10px;
+    background: rgba(11, 4, 26, 0.55); border-radius: 999px; pointer-events: none;
   }
   .lane-marker {
-    position: absolute; top: -4px; width: 16px; height: 16px; border-radius: 50%;
-    background: #6ee7ff; box-shadow: 0 0 10px 2px rgba(110,231,255,0.7);
+    position: absolute; top: -5px; width: 20px; height: 20px; border-radius: 50%;
+    background: var(--cyan); border: 3px solid #fff;
     transform: translateX(-50%); transition: background 0.1s;
   }
 
   /* --- Tilt (hold-phone) view (shared by calibration + play screens) --- */
   .tilt-zone {
-    flex: 1; border-radius: 22px; background: radial-gradient(circle at 50% 40%, #16213a, #0b1220);
-    border: 2px solid rgba(120,200,255,0.25); position: relative; overflow: hidden;
+    flex: 1; border-radius: 24px; background: var(--grape-600);
+    border: 4px solid var(--violet); position: relative; overflow: hidden;
     display: none; align-items: center; justify-content: center; min-height: 140px;
+    box-shadow: 0 7px 0 var(--violet-dk);
   }
   .tilt-marker {
-    width: 14px; height: 14px; border-radius: 50%; background: #6ee7ff;
-    box-shadow: 0 0 18px 4px rgba(110,231,255,0.6);
+    width: 20px; height: 20px; border-radius: 50%; background: var(--cyan);
+    border: 3px solid #fff;
     position: absolute; left: 50%; top: 50%;
     transform: translate(-50%, -50%);
     transition: background 0.1s;
   }
-  .tilt-hint { position: absolute; bottom: 10px; font-size: 13px; opacity: 0.55; }
-  .lane-arrows { position: absolute; inset: 0; display: flex; justify-content: space-between; align-items: center; padding: 0 14px; font-size: 30px; opacity: 0.25; pointer-events: none; }
+  .tilt-hint { position: absolute; bottom: 12px; font-size: 13px; font-weight: 700; color: #CDB8F5; }
+  .lane-arrows { position: absolute; inset: 0; display: flex; justify-content: space-between; align-items: center; padding: 0 16px; font-size: 32px; opacity: 0.3; pointer-events: none; }
 
   .action-row { display: flex; gap: 14px; margin-top: 12px; flex-shrink: 0; }
   .action-btn {
-    flex: 1; padding: 22px 0; font-size: 20px; font-weight: 800; border-radius: 18px;
-    border: none; color: #0b1220; text-align: center;
+    flex: 1; padding: 22px 0 26px; font-size: 20px; font-weight: 900; border-radius: 22px;
+    border: none; color: var(--ink); text-align: center;
+    transition: transform 0.06s, box-shadow 0.06s;
   }
-  #jumpBtn { background: linear-gradient(160deg, #ffe27a, #ffb703); }
-  #punchBtn { background: linear-gradient(160deg, #ff9a9e, #ff5a5f); }
-  .action-btn:active { transform: scale(0.96); }
-  .action-btn .sub { display: block; font-size: 11px; font-weight: 500; opacity: 0.7; margin-top: 2px; }
+  #jumpBtn { background: var(--gold); box-shadow: 0 8px 0 var(--gold-dk); }
+  #jumpBtn:active { transform: translateY(6px); box-shadow: 0 2px 0 var(--gold-dk); }
+  #punchBtn { background: var(--coral); color: #fff; box-shadow: 0 8px 0 var(--coral-dk); }
+  #punchBtn:active { transform: translateY(6px); box-shadow: 0 2px 0 var(--coral-dk); }
+  .action-btn .sub { display: block; font-size: 11px; font-weight: 700; opacity: 0.75; margin-top: 3px; }
 
   .bottom-row { display: flex; gap: 10px; margin-top: 10px; flex-shrink: 0; }
-  .bottom-row .btn { flex: 1; padding: 12px 0; font-size: 14px; }
+  .bottom-row .btn { flex: 1; padding: 12px 0 14px; font-size: 14px; }
 
   /* --- Lane buttons (controller mode only) --- */
   .lane-row { display: none; gap: 12px; margin-top: 12px; flex-shrink: 0; }
   .lane-btn {
-    flex: 1; padding: 18px 0; border-radius: 18px; border: 2px solid rgba(120,200,255,0.3);
-    background: #1a2436; color: #fff; font-size: 22px; font-weight: 800; text-align: center;
+    flex: 1; padding: 18px 0 22px; border-radius: 22px; border: 4px solid transparent;
+    background: var(--grape-600); color: #fff; font-size: 24px; font-weight: 900; text-align: center;
+    box-shadow: 0 8px 0 rgba(11, 4, 26, 0.55);
+    transition: transform 0.06s, box-shadow 0.06s;
   }
-  .lane-btn:active { transform: scale(0.96); }
-  .lane-btn.active { background: #24314f; border-color: #6ee7ff; color: #6ee7ff; }
-  .lane-btn .sub { display: block; font-size: 11px; font-weight: 500; opacity: 0.65; margin-top: 2px; }
+  .lane-btn:active { transform: translateY(6px); box-shadow: 0 2px 0 rgba(11, 4, 26, 0.55); }
+  .lane-btn.active { background: var(--cyan); color: var(--ink); border-color: #fff; box-shadow: 0 8px 0 var(--cyan-dk); }
+  .lane-btn .sub { display: block; font-size: 11px; font-weight: 700; opacity: 0.75; margin-top: 3px; }
 
   /* 2026-09-03: the play screen is now one of two quite different things
      depending on the control method chosen at the start of setup.
@@ -275,8 +372,7 @@
      watch yourself in), so it takes over the whole screen instead of
      sharing space with headers/buttons, which become an overlay on top
      of it instead. Applies to both the calibration (setup) and play
-     screens — 2026-09-02 fix: play used to be excluded here, which is
-     exactly the "camera not fullscreen during the game" bug. */
+     screens. */
   body.cam-fullscreen #calibrationScreen,
   body.cam-fullscreen #playScreen {
     position: fixed; inset: 0; z-index: 20; padding: 0; margin: 0;
@@ -284,40 +380,40 @@
   }
   body.cam-fullscreen #calSensorSlot,
   body.cam-fullscreen #playSensorSlot { flex: 1; min-height: 0; }
-  body.cam-fullscreen .camera-view { border-radius: 0; border: none; }
+  body.cam-fullscreen .camera-view { border-radius: 0; border: none; box-shadow: none; }
   body.cam-fullscreen #calibrationScreen .status-row,
   body.cam-fullscreen #playScreen .status-row {
     position: absolute; top: 0; left: 0; right: 0; z-index: 2; margin: 0;
     padding: calc(env(safe-area-inset-top) + 10px) max(16px, env(safe-area-inset-right))
              16px max(16px, env(safe-area-inset-left));
-    background: linear-gradient(rgba(0,0,0,0.65), transparent);
+    background: linear-gradient(rgba(11, 4, 26, 0.75), transparent);
   }
   body.cam-fullscreen #calibrationHint {
-    position: absolute; left: 0; right: 0; bottom: 78px; z-index: 2; margin: 0;
+    position: absolute; left: 0; right: 0; bottom: 84px; z-index: 2; margin: 0;
     padding: 0 max(16px, env(safe-area-inset-right)) 0 max(16px, env(safe-area-inset-left));
-    text-shadow: 0 2px 6px rgba(0,0,0,0.85);
+    text-shadow: 0 2px 6px rgba(11, 4, 26, 0.95);
   }
   body.cam-fullscreen #calSkipStepBtn {
-    position: absolute; left: 50%; transform: translateX(-50%); bottom: 112px;
+    position: absolute; left: 50%; transform: translateX(-50%); bottom: 120px;
     z-index: 3; margin: 0;
   }
   body.cam-fullscreen .calibration-actions {
     position: absolute; left: 0; right: 0; bottom: 0; z-index: 2; margin: 0;
     padding: 12px max(16px, env(safe-area-inset-right))
              calc(env(safe-area-inset-bottom) + 12px) max(16px, env(safe-area-inset-left));
-    background: linear-gradient(transparent, rgba(0,0,0,0.8));
+    background: linear-gradient(transparent, rgba(11, 4, 26, 0.9));
   }
 
   /* Play screen's own overlay stack: mode-tabs pinned just under the status
-     scrim, Jump/Punch + the motion-detection toggle pinned to the bottom
-     scrim — same idea as the calibration overlay above, sized for the
-     play screen's own controls instead. */
+     scrim, the motion-detection toggle pinned to the bottom scrim — same
+     idea as the calibration overlay above, sized for the play screen's own
+     controls instead. */
   body.cam-fullscreen #playScreen .mode-tabs {
     position: absolute; top: 0; left: 0; right: 0; z-index: 2;
     margin: 0;
     padding: calc(env(safe-area-inset-top) + 54px) max(16px, env(safe-area-inset-right))
              0 max(16px, env(safe-area-inset-left));
-    background: linear-gradient(rgba(0,0,0,0.5), transparent);
+    background: linear-gradient(rgba(11, 4, 26, 0.6), transparent);
     pointer-events: none;
   }
   body.cam-fullscreen #playScreen .mode-tabs .mode-tab { pointer-events: auto; }
@@ -328,7 +424,7 @@
     position: absolute; left: 0; right: 0; bottom: 0; z-index: 2; margin: 0;
     padding: 8px max(16px, env(safe-area-inset-right))
              calc(env(safe-area-inset-bottom) + 10px) max(16px, env(safe-area-inset-left));
-    background: rgba(0,0,0,0.75);
+    background: rgba(11, 4, 26, 0.85);
   }
 
   /* The shared sensor panel (camera-view/tilt-zone) starts out as a direct
@@ -346,8 +442,11 @@
   .sensor-panel { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 
   #toast {
-    position: fixed; left: 50%; bottom: 18px; transform: translate(-50%, 0);
-    background: rgba(0,0,0,0.75); padding: 10px 18px; border-radius: 12px; font-size: 14px;
+    position: fixed; left: 50%; bottom: 20px; transform: translate(-50%, 0);
+    background: var(--grape-900); color: #fff;
+    padding: 12px 20px 14px; border-radius: 999px; font-size: 14px; font-weight: 900;
+    border: 3px solid var(--violet);
+    box-shadow: 0 5px 0 rgba(11, 4, 26, 0.6);
     opacity: 0; transition: opacity 0.25s; pointer-events: none; z-index: 10;
   }
 </style>
@@ -362,6 +461,8 @@
        in and joining already under way (see controller.js's startup
        block); typing it in by hand still works exactly the same. -->
   <div id="joinScreen">
+    <h2 class="join-title">Join the game</h2>
+    <p class="join-hint">Point your camera at the code on the TV — or type the 6 digits here.</p>
     <input id="codeInput" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="000000" autocomplete="off" />
     <button class="btn" id="joinBtn">Connect to TV</button>
     <div id="joinError"></div>
