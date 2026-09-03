@@ -15,13 +15,44 @@ const COLLISION_Z_MAX = 1.1;
 const SPAWN_Z = -80;
 const DESPAWN_Z = 8;
 
-const BASE_SPEED = 12;      // units/sec at score 0
+// 2026-09-03: difficulty now ramps on DISTANCE TRAVELLED, not score. Score
+// used to accumulate automatically with distance, so the two were the same
+// quantity — but points now come only from collecting coins and gems, which
+// means a player who misses everything would otherwise never speed up (and
+// a greedy one would ramp unfairly fast). The constants are the old
+// per-score-point values scaled by the old score-per-metre rate (~1.4), so
+// the difficulty curve over a run is unchanged.
+const BASE_SPEED = 12;      // units/sec at the start of a run
 const MAX_SPEED = 26;
-const SPEED_RAMP = 0.0022;  // speed added per score point
+const SPEED_RAMP = 0.003;   // speed added per metre travelled
 
 const BASE_SPAWN_INTERVAL = 1.65; // seconds
 const MIN_SPAWN_INTERVAL = 0.85;
-const SPAWN_RAMP = 0.00035;
+const SPAWN_RAMP = 0.0005;  // per metre travelled
+
+// ---- Collectibles ---------------------------------------------------
+// Coins are the Sonic-ring layer: a near-constant stream to run through, so
+// there's always something to aim for between obstacles. Gems are the
+// reward layer — deliberately placed high, above a hurdle, so the only way
+// to get one is to actually jump the hurdle rather than dodge into another
+// lane. Points come exclusively from these two.
+const COIN_VALUE = 10;
+const GEM_VALUE = 50;
+const COIN_Y = 1.15;          // chest height — collected just by running through
+const GEM_Y = 2.75;           // only reachable mid-jump
+const GEM_MIN_PLAYER_Y = 0.9; // how high the player must actually be to take a gem
+const COIN_RUN_MIN = 4;       // coins per trail
+const COIN_RUN_MAX = 7;
+const COIN_SPACING = 2.6;     // metres between coins in a trail
+const BASE_COIN_INTERVAL = 1.5; // seconds between trails
+const PICKUP_RADIUS_Z = 1.5;  // how forgiving collection is along the track
+const PUNCH_COIN_REWARD = 3;  // coins released by smashing a crate
+
+// Countdown before every run (2026-09-03) — the game now starts on its own
+// rather than waiting for a Start press, so the player needs a moment to
+// put the phone down and get into position first.
+const COUNTDOWN_SECONDS = 4;      // 3, 2, 1, GO!
+const GAMEOVER_RESTART_DELAY = 4.5; // seconds on the Run Over screen before going again
 
 const JUMP_VELOCITY = 8.2;
 const GRAVITY = -22;
@@ -515,6 +546,93 @@ function spawnObstacle() {
   mesh.position.z = SPAWN_Z;
   scene.add(mesh);
   obstacles.push({ type, lane, mesh, resolved: false, flying: false });
+  // A hurdle is the one obstacle you clear by going UP, so it's the natural
+  // place to hang a gem: the jump you already have to make is what earns it.
+  if (type === 'hurdle') spawnGem(lane, SPAWN_Z);
+}
+
+// ---------------------------------------------------------------------
+// Collectibles — coins (constant, run-through) and gems (high, jump-only).
+// Shared geometry/materials: every coin in a run is the same disc and every
+// gem the same octahedron, so this adds a lot of on-screen reward for very
+// little GPU cost (see the rendering-cost note in the renderer setup).
+// ---------------------------------------------------------------------
+const coinGeo = new THREE.CylinderGeometry(0.34, 0.34, 0.07, 16);
+const coinMat = new THREE.MeshLambertMaterial({ color: 0xffc53d, emissive: 0x6b4a00 });
+const gemGeo = new THREE.OctahedronGeometry(0.42);
+const gemMat = new THREE.MeshLambertMaterial({ color: 0x6ee7ff, emissive: 0x0a5f75 });
+const pickups = [];
+// Only ever flipped by the test hook at the bottom of this file, so a test
+// can place one known coin and watch what happens to it without the normal
+// trail spawner dropping more into the scene mid-measurement.
+let coinSpawnEnabled = true;
+
+function addPickup(kind, lane, z) {
+  const mesh = new THREE.Mesh(kind === 'gem' ? gemGeo : coinGeo, kind === 'gem' ? gemMat : coinMat);
+  mesh.position.x = LANE_X[lane];
+  mesh.position.y = kind === 'gem' ? GEM_Y : COIN_Y;
+  mesh.position.z = z;
+  // Coins are discs: stand them upright facing back down the track so the
+  // player sees a full circle coming at them, like a ring.
+  if (kind !== 'gem') mesh.rotation.x = Math.PI / 2;
+  scene.add(mesh);
+  pickups.push({ kind, lane, mesh, collected: false });
+}
+
+function spawnGem(lane, z) {
+  addPickup('gem', lane, z);
+}
+
+// True if any unresolved obstacle in `lane` overlaps the z-range a coin
+// trail would occupy — so trails don't get buried inside a wall or crate.
+function laneBlocked(lane, zStart, zEnd) {
+  return obstacles.some((o) =>
+    !o.flying && o.lane === lane && o.mesh.position.z >= zStart - 3 && o.mesh.position.z <= zEnd + 3);
+}
+
+function spawnCoinRun() {
+  const count = COIN_RUN_MIN + Math.floor(Math.random() * (COIN_RUN_MAX - COIN_RUN_MIN + 1));
+  const zEnd = SPAWN_Z;
+  const zStart = SPAWN_Z - (count - 1) * COIN_SPACING;
+  // Prefer a lane the trail can actually live in; if all three are busy this
+  // trail is simply skipped rather than spawned inside something.
+  const lanes = [0, 1, 2].sort(() => Math.random() - 0.5);
+  const lane = lanes.find((l) => !laneBlocked(l, zStart, zEnd));
+  if (lane === undefined) return;
+  for (let i = 0; i < count; i++) addPickup('coin', lane, zStart + i * COIN_SPACING);
+}
+
+// Coins released by smashing a crate: they pop out of the wreckage and are
+// banked immediately, so a good punch still pays — and the points still
+// come from coins rather than from a bare score bonus.
+function releaseCoins(position, count) {
+  addScore(count * COIN_VALUE);
+  popCombo(`+${count * COIN_VALUE}`);
+  const group = new THREE.Group();
+  const particles = [];
+  // These ride the impact-burst updater, which fades particles by writing
+  // `material.opacity` — so they need their OWN material. Handing them the
+  // shared coinMat would fade every uncollected coin on the track with them.
+  const burstMat = new THREE.MeshLambertMaterial({ color: 0xffc53d, emissive: 0x6b4a00, transparent: true });
+  for (let i = 0; i < count; i++) {
+    const mesh = new THREE.Mesh(coinGeo, burstMat);
+    mesh.position.copy(position);
+    mesh.rotation.x = Math.PI / 2;
+    const angle = (i / count) * Math.PI * 2;
+    particles.push({ mesh, vel: { x: Math.cos(angle) * 3, y: 6 + Math.random() * 3, z: Math.sin(angle) * 3 } });
+    group.add(mesh);
+  }
+  scene.add(group);
+  impactBursts.push({ group, particles, age: 0 });
+}
+
+function addScore(points) {
+  state.score += points;
+  scoreVal.textContent = String(Math.floor(state.score));
+  if (state.score > highScore) {
+    highScore = state.score;
+    highScoreVal.textContent = String(Math.floor(highScore));
+  }
 }
 
 // Sends a successfully-punched obstacle rocketing off with its own little
@@ -655,7 +773,7 @@ function punchImpactBump(elapsedFrac) {
 // Game state
 // ---------------------------------------------------------------------
 const state = {
-  phase: 'pairing', // pairing -> ready -> playing -> gameover
+  phase: 'pairing', // pairing -> ready -> countdown -> playing -> gameover
   score: 0,
   lives: 3,
   lane: 1,
@@ -666,7 +784,11 @@ const state = {
   punchAnimTimer: 0, // cosmetic-only — see PUNCH_ANIM_DURATION above
   invulnTimer: 0,
   spawnTimer: BASE_SPAWN_INTERVAL,
+  coinTimer: 0.8,
+  distance: 0,        // metres this run — drives the difficulty ramp
   distanceForTex: 0,
+  countdownT: 0,      // seconds left on the pre-run countdown
+  gameOverT: 0,       // seconds spent on the Run Over screen (auto-restart)
 };
 
 // ---------------------------------------------------------------------
@@ -728,6 +850,8 @@ renderLives();
 highScoreVal.textContent = String(Math.floor(highScore));
 
 const hudEl = document.getElementById('hud');
+const countdownEl = document.getElementById('countdown');
+const countdownHintEl = document.getElementById('countdownHint');
 const controlBadge = document.getElementById('controlBadge');
 const pausedPanel = document.getElementById('pausedPanel');
 const pausedScoreVal = document.getElementById('pausedScoreVal');
@@ -787,8 +911,10 @@ function syncPanel() {
   // Score/lives belong to a run in progress. Leaving them up during
   // pairing/setup showed a stale score from the *previous* run next to a
   // "Step 1 of 4" setup prompt, which reads like the game is already going.
-  const inRun = state.phase === 'playing' || state.phase === 'paused';
+  const inRun = state.phase === 'playing' || state.phase === 'paused' || state.phase === 'countdown';
   hudEl.style.display = inRun ? 'flex' : 'none';
+  // The countdown owns the screen on its own — no panel, no badge.
+  if (state.phase === 'countdown') { showPanel(null); updateControlBadge(null); return; }
   if (setupStage === 'placement') { showPanel('placement'); updateControlBadge('placement'); return; }
   if (setupStage === 'framing') { showPanel('framing'); updateControlBadge('framing'); return; }
   if (calibrating) { showPanel('calibrating'); updateControlBadge('calibrating'); return; }
@@ -962,6 +1088,13 @@ function advanceCalibrationUI(step) {
 function finishCalibrationUI() {
   calibrating = false;
   setupStage = 'none'; // covers the "Skip setup" escape hatch firing mid-placement/framing
+  // 2026-09-03 ("you still need to press start on the phone"): finishing
+  // setup IS the start signal. Nothing further is required from the player
+  // — the countdown gives them time to put the phone down and get set.
+  if (state.phase === 'ready' || state.phase === 'pairing') {
+    startCountdown();
+    return;
+  }
   syncPanel();
 }
 
@@ -988,7 +1121,10 @@ function resetRun() {
   state.punchAnimTimer = 0;
   state.invulnTimer = 0;
   state.spawnTimer = BASE_SPAWN_INTERVAL;
+  state.coinTimer = 0.8;
+  state.distance = 0;
   obstacles.splice(0).forEach((o) => scene.remove(o.mesh));
+  pickups.splice(0).forEach((p) => scene.remove(p.mesh));
   impactBursts.splice(0).forEach((b) => scene.remove(b.group));
   player.position.set(0, 0, 0);
   player.rotation.y = 0;
@@ -998,21 +1134,63 @@ function resetRun() {
   hideActionPrompt();
 }
 
-function startPlaying() {
+// 2026-09-03: runs now begin with a countdown rather than the instant a
+// start input arrives. Two reasons: the player has just put the phone down
+// and needs a moment to get back into position, and the game now starts
+// itself (see startCountdown()'s callers) rather than waiting to be told,
+// so there has to be *some* warning before the track starts moving.
+function startCountdown() {
+  if (state.phase === 'countdown' || state.phase === 'playing') return;
   resetRun();
+  state.phase = 'countdown';
+  state.countdownT = COUNTDOWN_SECONDS;
+  calibrating = false;
+  setupStage = 'none';
+  highScoreAtRunStart = highScore;
+  syncPanel();
+  renderCountdown();
+}
+
+function renderCountdown() {
+  const whole = Math.ceil(state.countdownT);
+  const go = whole <= 1;
+  countdownEl.textContent = go ? 'GO!' : String(whole - 1);
+  countdownEl.style.display = 'block';
+  countdownHintEl.style.display = go ? 'none' : 'block';
+  // Restart the pop animation on each new number.
+  countdownEl.classList.remove('tick');
+  void countdownEl.offsetWidth;
+  countdownEl.classList.add('tick');
+}
+
+function hideCountdown() {
+  countdownEl.style.display = 'none';
+  countdownHintEl.style.display = 'none';
+}
+
+function startPlaying() {
+  // resetRun() already happened in startCountdown(); don't wipe the scene
+  // again here or the countdown's settled state would be thrown away.
+  if (state.phase !== 'countdown') {
+    resetRun();
+    highScoreAtRunStart = highScore;
+  }
   state.phase = 'playing';
   calibrating = false;
-  highScoreAtRunStart = highScore;
+  hideCountdown();
+  lastT = performance.now(); // the countdown didn't advance the world; don't hand it a big dt
   showPanel(null);
   updateControlBadge(null);
 }
 
 function gameOver() {
   state.phase = 'gameover';
+  state.gameOverT = 0;
   finalScoreEl.textContent = Math.floor(state.score);
   commitHighScore();
   newHighScoreNote.style.display = state.score > highScoreAtRunStart ? 'block' : 'none';
   hideActionPrompt();
+  hideCountdown();
   syncPanel();
 }
 
@@ -1055,8 +1233,9 @@ function resumeGame() {
 }
 
 function exitToMenu() {
-  if (state.phase !== 'playing' && state.phase !== 'paused') return;
+  if (state.phase !== 'playing' && state.phase !== 'paused' && state.phase !== 'countdown') return;
   commitHighScore();
+  hideCountdown();
   state.phase = 'ready';
   calibrating = false;
   setupStage = 'none';
@@ -1133,12 +1312,13 @@ function handleInput(msg) {
   // handler further down) is the other, equally deliberate way in — those
   // two are meant to be the primary/reliable paths; gesture detection only
   // drives real in-run jump/punch, never phase transitions.
-  if (state.phase === 'ready' && (msg.action === 'jump' || msg.action === 'punch') && msg.explicit) {
-    startPlaying();
-    return;
-  }
-  if (state.phase === 'gameover' && (msg.action === 'jump' || msg.action === 'punch') && msg.explicit) {
-    startPlaying();
+  // These now start the COUNTDOWN rather than the run itself — a deliberate
+  // start still works, it just skips ahead to "3, 2, 1, GO!" instead of
+  // dropping the player straight into a moving track. On the game-over
+  // screen it also short-circuits the automatic restart timer.
+  if ((state.phase === 'ready' || state.phase === 'gameover')
+      && (msg.action === 'jump' || msg.action === 'punch') && msg.explicit) {
+    startCountdown();
     return;
   }
   if (state.phase !== 'playing') return;
@@ -1220,7 +1400,7 @@ window.addEventListener('keydown', (e) => {
   // is phone-only — the badge there says so) so a stray OK press mid-setup
   // can't accidentally launch the run early.
   if (!calibrating && state.phase !== 'playing' && state.phase !== 'paused' && (isSelectPress(e) || e.code === 'KeyF')) {
-    if (state.phase === 'ready' || state.phase === 'gameover') startPlaying();
+    if (state.phase === 'ready' || state.phase === 'gameover') startCountdown();
     return;
   }
   if (e.code === 'ArrowLeft' || e.code === 'KeyA') handleInput({ type: 'input', action: 'lane', value: -1 });
@@ -1235,21 +1415,15 @@ window.addEventListener('keydown', (e) => {
 let lastT = performance.now();
 
 function currentSpeed() {
-  return Math.min(MAX_SPEED, BASE_SPEED + state.score * SPEED_RAMP);
+  return Math.min(MAX_SPEED, BASE_SPEED + state.distance * SPEED_RAMP);
 }
 
 function updatePlaying(dt) {
   const speed = currentSpeed();
-  state.score += speed * dt * 1.4;
-  scoreVal.textContent = String(Math.floor(state.score));
-  // Live-update the HUD the instant this run beats the record, for the
-  // thrill of it — the actual localStorage write is throttled to natural
-  // checkpoints (gameOver/exitToMenu via commitHighScore()) rather than
-  // every frame.
-  if (state.score > highScore) {
-    highScore = state.score;
-    highScoreVal.textContent = String(Math.floor(highScore));
-  }
+  // Distance drives the difficulty ramp. Score does NOT accumulate here any
+  // more (2026-09-03): points come only from collecting coins and gems, via
+  // addScore() — see the collectibles section above.
+  state.distance += speed * dt;
 
   // Ground scroll
   state.distanceForTex += speed * dt;
@@ -1357,8 +1531,49 @@ function updatePlaying(dt) {
   state.spawnTimer -= dt;
   if (state.spawnTimer <= 0) {
     spawnObstacle();
-    const interval = Math.max(MIN_SPAWN_INTERVAL, BASE_SPAWN_INTERVAL - state.score * SPAWN_RAMP);
+    const interval = Math.max(MIN_SPAWN_INTERVAL, BASE_SPAWN_INTERVAL - state.distance * SPAWN_RAMP);
     state.spawnTimer = interval * (0.8 + Math.random() * 0.4);
+  }
+
+  // Spawn coin trails on their own cadence, so there's a near-constant
+  // stream of them to run through between obstacles.
+  state.coinTimer -= dt;
+  if (state.coinTimer <= 0) {
+    if (coinSpawnEnabled) spawnCoinRun();
+    state.coinTimer = BASE_COIN_INTERVAL * (0.75 + Math.random() * 0.5);
+  }
+
+  // Update collectibles
+  for (let i = pickups.length - 1; i >= 0; i--) {
+    const p = pickups[i];
+    p.mesh.position.z += speed * dt;
+    // A little spin so they read as collectible rather than scenery.
+    if (p.kind === 'gem') {
+      p.mesh.rotation.y += dt * 2.6;
+      p.mesh.position.y = GEM_Y + Math.sin(state.distanceForTex * 0.9 + p.mesh.position.x) * 0.12;
+    } else {
+      p.mesh.rotation.y += dt * 3.4;
+    }
+
+    if (!p.collected && p.lane === state.lane && Math.abs(p.mesh.position.z) <= PICKUP_RADIUS_Z) {
+      // A gem hangs high on purpose: you have to actually be off the ground
+      // to take it, which is what makes it the reward for jumping a hurdle
+      // rather than something you collect by walking underneath.
+      const reachable = p.kind === 'gem' ? player.position.y >= GEM_MIN_PLAYER_Y : true;
+      if (reachable) {
+        p.collected = true;
+        addScore(p.kind === 'gem' ? GEM_VALUE : COIN_VALUE);
+        if (p.kind === 'gem') popCombo(`GEM +${GEM_VALUE}`);
+        scene.remove(p.mesh);
+        pickups.splice(i, 1);
+        continue;
+      }
+    }
+
+    if (p.mesh.position.z > DESPAWN_Z) {
+      scene.remove(p.mesh);
+      pickups.splice(i, 1);
+    }
   }
 
   // Update obstacles
@@ -1394,9 +1609,14 @@ function updatePlaying(dt) {
         else safe = false; // wall: only lane-dodge saves you
 
         if (safe) {
-          popCombo(o.type === 'hurdle' ? 'JUMP!' : o.type === 'crate' ? 'SMASH!' : '');
-          state.score += 25;
-          if (o.type === 'crate') launchObstacleFlying(o, speed);
+          if (o.type === 'crate') {
+            // Smashing a crate scatters coins — the reward for a good punch
+            // is still points, but they arrive as coins like everything else.
+            launchObstacleFlying(o, speed);
+            releaseCoins(o.mesh.position, PUNCH_COIN_REWARD);
+          } else {
+            popCombo('JUMP!');
+          }
         } else if (state.invulnTimer <= 0) {
           state.lives -= 1;
           state.invulnTimer = HIT_INVULN_TIME;
@@ -1448,6 +1668,23 @@ function animate() {
 
   if (state.phase === 'playing') updatePlaying(dt);
 
+  // Pre-run countdown: the world is already built and sitting still, so the
+  // player can see the track and get into position before it starts moving.
+  if (state.phase === 'countdown') {
+    const before = Math.ceil(state.countdownT);
+    state.countdownT -= dt;
+    if (state.countdownT <= 0) startPlaying();
+    else if (Math.ceil(state.countdownT) !== before) renderCountdown();
+  }
+
+  // Auto-restart after a run ends, so a session keeps flowing without
+  // anyone having to press anything. Exiting (remote Back / phone ✕) still
+  // leaves to the ready screen instead.
+  if (state.phase === 'gameover') {
+    state.gameOverT += dt;
+    if (state.gameOverT >= GAMEOVER_RESTART_DELAY) startCountdown();
+  }
+
   // Auto-advance out of the framing check once "good" framing has held for
   // a moment — the remote OK press (see keydown handler above) can also
   // confirm this early, so whichever happens first wins.
@@ -1458,6 +1695,25 @@ function animate() {
 
   renderer.render(scene, camera);
 }
+// A small read-mostly window onto game state for the automated tests.
+// Gameplay itself (coin runs, the countdown, the auto-restart) is otherwise
+// only observable by watching the screen, which is exactly the kind of thing
+// that has slipped through unnoticed on this project before. Nothing here is
+// used by the game, and nothing the player can reach calls it.
+window.__mrDebug = {
+  phase: () => state.phase,
+  score: () => Math.floor(state.score),
+  distance: () => state.distance,
+  lane: () => state.lane,
+  lives: () => state.lives,
+  pickupCount: (kind) => (kind ? pickups.filter((p) => p.kind === kind).length : pickups.length),
+  clearPickups: () => { pickups.splice(0).forEach((p) => scene.remove(p.mesh)); },
+  placePickup: (kind, lane, z) => addPickup(kind, lane, z),
+  setCoinSpawning: (on) => { coinSpawnEnabled = !!on; },
+  jump: () => { if (state.grounded) { state.grounded = false; state.jumping = true; state.vy = JUMP_VELOCITY; } },
+  endRun: () => gameOver(),
+};
+
 // Paint the initial (pairing) state once before the loop starts. Without
 // this, syncPanel() only ever ran in response to a state change, so on a
 // fresh page load the pairing badge never appeared and the score/lives HUD
