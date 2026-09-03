@@ -262,6 +262,11 @@
     [characterScreen, joinScreen, controlChoiceScreen, permScreen, calibrationScreen, playScreen]
       .forEach((s) => (s.style.display = 'none'));
     el.style.display = 'flex';
+    // 2026-09-03 styling pass: the app title and strapline are worth having
+    // on the join/character/choice screens and are pure wasted height once
+    // you're actually setting up or playing — that's ~80px the camera view
+    // and the buttons want. See body.in-game in index.html.
+    document.body.classList.toggle('in-game', el === playScreen || el === calibrationScreen);
     updateFullscreenCam();
   }
   // Camera mode's live preview is genuinely useful to see full-size — both
