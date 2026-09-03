@@ -831,6 +831,7 @@ const framingStatusText = document.getElementById('framingStatusText');
 const framingSubHint = document.getElementById('framingSubHint');
 const roomCodeEl = document.getElementById('roomCode');
 const playUrlEl = document.getElementById('playUrl');
+const joinQrEl = document.getElementById('joinQr');
 const pairingHint = document.getElementById('pairingHint');
 const comboEl = document.getElementById('combo');
 const flashEl = document.getElementById('flash');
@@ -1285,6 +1286,11 @@ ws.addEventListener('message', (ev) => {
 
   if (msg.type === 'room') {
     roomCodeEl.textContent = msg.code;
+    // Scan-to-join (2026-09-03): the server generates this SVG itself (see
+    // server.js's /qr/<code>.svg route + lib/qrcode-lite.js) so no library
+    // or network fetch is needed here — just point an <img> at it once the
+    // room code exists. Same-origin request, so no CORS concerns either.
+    joinQrEl.src = `/qr/${msg.code}.svg`;
   } else if (msg.type === 'controller_connected') {
     if (msg.count > 0 && (state.phase === 'pairing')) {
       state.phase = 'ready';
