@@ -74,7 +74,18 @@
     box-shadow: 0 24px 70px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.03) inset,
       0 1px 0 rgba(255,255,255,0.08) inset;
     max-width: 640px;
+    max-height: 82vh;
+    overflow-y: auto;
     animation: panelIn 0.32s cubic-bezier(0.2, 0.8, 0.3, 1);
+  }
+  /* The control badge is a fixed pill near the top of the screen; a tall
+     centred panel (the calibration one especially) used to run straight
+     underneath it, so the pill sat on top of the panel's heading. Nudge
+     panels down whenever a badge is showing. Toggled by
+     updateControlBadge() in game.js. */
+  body.badge-visible .overlay-panel {
+    top: calc(50% + 34px);
+    max-height: 74vh;
   }
   @keyframes panelIn {
     from { opacity: 0; transform: translate(-50%, -50%) scale(0.94) translateY(8px); }
@@ -119,8 +130,12 @@
     pointer-events: none; transition: opacity 0.1s;
   }
 
-  .cal-move-icon { font-size: 96px; line-height: 1; margin: 6px 0; }
-  .cal-move-text { font-family: inherit; letter-spacing: -0.5px; font-size: 44px; font-weight: 800; margin: 4px 0 10px; color: var(--accent); }
+  /* Trimmed from 96px/44px alongside the badge-clearance shift above, so the
+     tallest panel in the game still fits comfortably on a TV (which may also
+     be overscanning the edges) instead of needing to scroll. */
+  #calibrationPanel { padding-top: 32px; padding-bottom: 32px; }
+  .cal-move-icon { font-size: 78px; line-height: 1; margin: 4px 0; }
+  .cal-move-text { font-family: inherit; letter-spacing: -0.5px; font-size: 40px; font-weight: 800; margin: 4px 0 8px; color: var(--accent); }
   .cal-dots { font-size: 26px; margin-top: 6px; letter-spacing: 4px; }
   .cal-step-counter { font-size: 16px; font-weight: 700; opacity: 0.65; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 1.5px; }
 
