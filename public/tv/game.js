@@ -879,7 +879,7 @@ const CONTROL_BADGE_TEXT = {
   ready: { text: '🎮 Remote OK, or 📱 jump/punch, to start', cls: 'remote' },
   placement: { text: '🎮 Use your Fire TV remote', cls: 'remote' },
   framing: { text: '🎮 Use your Fire TV remote', cls: 'remote' },
-  calibrating: { text: '📱 Use your phone', cls: 'phone' },
+  calibrating: { text: '📱 Copy the moves · 🎮 OK to start', cls: 'phone' },
   paused: { text: '🎮 Remote OK to resume, Back to exit', cls: 'remote' },
   gameover: { text: '🎮 Remote OK, or 📱 jump/punch, to retry', cls: 'remote' },
 };
@@ -1022,6 +1022,10 @@ const CAL_META = {
   punch: { icon: '👊', textCamera: 'PUNCH', textHold: 'PUNCH' },
 };
 let calibrating = false;
+// Counts down once the last calibration move is done, then finishes setup
+// on its own — see advanceCalibrationUI()/finishSetupFromTv().
+let calAutoFinishT = 0;
+const CAL_AUTO_FINISH_DELAY = 1.6; // seconds of "All set!" before starting
 let calMode = 'camera';
 let calIndex = 0;
 let calDone = { left: false, right: false, jump: false, punch: false };
@@ -1066,6 +1070,7 @@ function showCalibrationStep() {
 }
 function startCalibrationUI(mode) {
   calibrating = true;
+  calAutoFinishT = 0;
   setupStage = 'none'; // placement/framing are done — the per-move panel takes over
   calMode = mode || 'camera';
   calIndex = 0;
@@ -1084,9 +1089,28 @@ function advanceCalibrationUI(step) {
   calDone[step] = true;
   calIndex++;
   showCalibrationStep();
+  if (calIndex >= CAL_ORDER.length) {
+    // 2026-09-03: all four moves done means nothing further is needed from
+    // the player, so setup finishes itself after a beat (long enough for
+    // "All set!" to register) and the run counts in. This used to sit there
+    // waiting for a "Start Run" tap on the phone — the press that shouldn't
+    // have to be made. Pressing OK on the remote skips the beat.
+    calAutoFinishT = CAL_AUTO_FINISH_DELAY;
+  }
+}
+
+// Ends per-move setup from the TV side and rolls straight into the
+// countdown. Tells the phone first so it leaves its calibration screen and
+// switches its detectors back to real gameplay input.
+function finishSetupFromTv() {
+  if (!calibrating) return;
+  calAutoFinishT = 0;
+  sendCalibrationControl('finish');
+  finishCalibrationUI();
 }
 function finishCalibrationUI() {
   calibrating = false;
+  calAutoFinishT = 0;
   setupStage = 'none'; // covers the "Skip setup" escape hatch firing mid-placement/framing
   // 2026-09-03 ("you still need to press start on the phone"): finishing
   // setup IS the start signal. Nothing further is required from the player
@@ -1394,11 +1418,15 @@ window.addEventListener('keydown', (e) => {
   }
   if (state.phase === 'paused' && isSelectPress(e)) { resumeGame(); return; }
 
+  // 2026-09-03: OK during per-move setup ends setup and starts the run.
+  // The moves themselves are body/phone-driven, but STARTING is the
+  // remote's job — the player shouldn't have to walk back to the phone and
+  // tap "Start Run" to get going, which is what this used to require.
+  if (calibrating && isSelectPress(e)) { finishSetupFromTv(); return; }
+
   // OK/Select (or Space/F as a keyboard fallback) also starts/retries a run
   // from the Ready or Game Over screens — the remote works here too, not
-  // just jump/punch from the phone. Excludes `calibrating` (per-move setup
-  // is phone-only — the badge there says so) so a stray OK press mid-setup
-  // can't accidentally launch the run early.
+  // just jump/punch from the phone.
   if (!calibrating && state.phase !== 'playing' && state.phase !== 'paused' && (isSelectPress(e) || e.code === 'KeyF')) {
     if (state.phase === 'ready' || state.phase === 'gameover') startCountdown();
     return;
@@ -1683,6 +1711,13 @@ function animate() {
   if (state.phase === 'gameover') {
     state.gameOverT += dt;
     if (state.gameOverT >= GAMEOVER_RESTART_DELAY) startCountdown();
+  }
+
+  // Setup finishes itself once the last move is done (see
+  // advanceCalibrationUI) — no press needed on the phone or the remote.
+  if (calibrating && calAutoFinishT > 0) {
+    calAutoFinishT -= dt;
+    if (calAutoFinishT <= 0) finishSetupFromTv();
   }
 
   // Auto-advance out of the framing check once "good" framing has held for
