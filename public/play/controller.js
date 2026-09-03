@@ -71,6 +71,13 @@
   // how far back toward center they must return to leave it (EXIT — kept
   // smaller than ENTER so a normal stance reliably re-centers you without
   // needing an exaggerated opposite step).
+  // Deliberately NOT rescaled for the 2026-09-03 switch to a portrait
+  // phone. These are fractions of frame WIDTH, and an upright phone's frame
+  // is narrower, so the same sideways step now covers a bigger fraction of
+  // it — i.e. lane changes need a slightly smaller physical step than they
+  // did in landscape. That's the right direction for a portrait frame,
+  // which has less lateral room to leave before the player exits it. If
+  // lane changes ever feel twitchy on a real device, these are the knob.
   const LANE_ENTER_FRAC = 0.11;
   const LANE_EXIT_FRAC = 0.05;
   const JUMP_TRIGGER_TORSO_FRAC = 0.28;
@@ -142,7 +149,17 @@
   // Camera framing check (see the big header comment above): how close/far/
   // off-center counts as bad framing, and how long "good" framing has to
   // be held before we tell the TV it's ready to move on.
-  const FRAMING_TOO_CLOSE_FRAC = 0.34; // torso height / frame height
+  //
+  // 2026-09-03: setup now asks for the phone PORTRAIT (upright) rather than
+  // landscape, so the player's arms and legs get into frame more easily.
+  // The distance thresholds below are therefore measured against the
+  // frame's SHORT side rather than its height: a phone sensor is 4:3, so
+  // the short side is the "3" whichever way up the phone is propped, and
+  // normalising by it keeps these two numbers meaning the same physical
+  // distance in both orientations. Measured against height, standing the
+  // phone up would have made every player read as ~25% further away than
+  // they are, and the TV would have told them to come closer for no reason.
+  const FRAMING_TOO_CLOSE_FRAC = 0.34; // torso height / frame SHORT side
   const FRAMING_TOO_FAR_FRAC = 0.15;
   const FRAMING_OFFCENTER_FRAC = 0.28; // |hip x offset| / frame width
   const FRAMING_GOOD_HOLD_MS = 900;
@@ -1012,7 +1029,9 @@
     const nose = kp(keypoints, 'nose');
 
     let status;
-    const torsoFrac = torsoScale / frameH;
+    // Short side, not height — see the FRAMING_* constants above for why
+    // this has to be orientation-independent now the phone stands upright.
+    const torsoFrac = torsoScale / Math.min(frameW, frameH);
     const centerOffsetFrac = Math.abs(hipMid.x - frameW / 2) / frameW;
 
     if (!nose) status = 'no_person';
