@@ -1,7 +1,14 @@
 // Motion Run — phone controller
 //
-// Screen flow: Character creator -> Join (room code) -> Camera permission
-// -> Guided calibration -> Play.
+// Screen flow (2026-09-03 — reordered so joining comes first): Join (room
+// code, either typed or auto-filled by scanning the TV's QR code) ->
+// Character creator -> Control-method choice -> Camera permission ->
+// Guided calibration -> Play. Character creation moved to AFTER a
+// successful TV connection specifically so scanning the QR code (see
+// tv/index.html's #joinQr and server.js's /qr/<code>.svg) can skip straight
+// to "you're connected, now build your character" instead of making a
+// player who just scanned a code sit through the character creator before
+// they even know pairing worked.
 //
 // Two ways to control the game once playing, switchable any time from the
 // tabs at the top of the play screen:
@@ -342,7 +349,14 @@
     });
   });
   standardBtn.addEventListener('click', () => applyCharacter({ ...STANDARD_CHARACTER }));
-  characterContinueBtn.addEventListener('click', () => showScreen(joinScreen));
+  // 2026-09-03: character creation now happens AFTER joining (see the
+  // header comment), so "Continue" here sends the finished character to
+  // the (already-connected) TV and leads straight into the control-method
+  // choice, rather than the join screen.
+  characterContinueBtn.addEventListener('click', () => {
+    sendCharacter();
+    showScreen(controlChoiceScreen);
+  });
 
   // =========================================================================
   // 2. WEBSOCKET / JOIN
@@ -364,10 +378,12 @@
       if (msg.type === 'paired') {
         roomCode = msg.code;
         roomLabel.textContent = roomCode;
-        sendCharacter();
-        // First step of setup is now "how do you want to play?" — motion
-        // tracking or the phone as a plain game controller.
-        showScreen(controlChoiceScreen);
+        // 2026-09-03: character creation now happens straight after a
+        // successful connection rather than before it (see the header
+        // comment) — sendCharacter() moves to characterContinueBtn's click
+        // handler below, once there's an actual customized character to
+        // send instead of just the default.
+        showScreen(characterScreen);
       } else if (msg.type === 'calibration_control') {
         // The TV relays Fire TV remote OK presses back to us during the
         // placement/framing setup stages — see handlePlacementAck/
@@ -1330,5 +1346,19 @@
     e.preventDefault();
   }, { passive: false });
 
-  showScreen(characterScreen);
+  // =========================================================================
+  // STARTUP — join screen first (see the header comment for the flow
+  // reorder). If the page was opened by scanning the TV's QR code (see
+  // tv/index.html's #joinQr and server.js's /qr/<code>.svg), the URL
+  // carries the room code already — fill it in and connect immediately
+  // instead of making the player type 6 digits they just scanned past.
+  // =========================================================================
+  const scannedCode = (new URLSearchParams(location.search).get('code') || '').trim();
+  showScreen(joinScreen);
+  if (/^\d{6}$/.test(scannedCode)) {
+    codeInput.value = scannedCode;
+    joinError.textContent = '';
+    joinBtn.disabled = true;
+    connect(scannedCode);
+  }
 })();
