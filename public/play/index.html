@@ -357,7 +357,19 @@
   <h1>🏃 Motion Run</h1>
   <div class="subtitle" id="subtitle">Your phone is the controller</div>
 
-  <!-- 1. Character creator -->
+  <!-- 1. Join screen — shown first (2026-09-03 reorder). A player who
+       scanned the TV's QR code arrives here with the code already filled
+       in and joining already under way (see controller.js's startup
+       block); typing it in by hand still works exactly the same. -->
+  <div id="joinScreen">
+    <input id="codeInput" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="000000" autocomplete="off" />
+    <button class="btn" id="joinBtn">Connect to TV</button>
+    <div id="joinError"></div>
+  </div>
+
+  <!-- 2. Character creator — now shown AFTER a successful TV connection,
+       not before, so scanning the QR code goes straight from "connected"
+       into building a character rather than the other way round. -->
   <div id="characterScreen">
     <div class="avatar-preview-wrap">
       <div class="avatar-stage">
@@ -393,13 +405,6 @@
     <div class="character-actions">
       <button class="btn" id="characterContinueBtn" style="width:100%;">Continue →</button>
     </div>
-  </div>
-
-  <!-- 2. Join screen -->
-  <div id="joinScreen">
-    <input id="codeInput" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="000000" autocomplete="off" />
-    <button class="btn" id="joinBtn">Connect to TV</button>
-    <div id="joinError"></div>
   </div>
 
   <!-- 3. How do you want to play? — the control method is now an explicit
