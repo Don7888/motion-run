@@ -1031,8 +1031,17 @@ let calMode = 'camera';
 let calIndex = 0;
 let calDone = { left: false, right: false, jump: false, punch: false };
 
+// 2026-09-03 styling pass: chunky numbered tiles rather than three
+// near-identical emoji circles, so "done", "doing now" and "still to come"
+// read as three obviously different things from across a room. Styling
+// lives in index.html (.cal-tile); this only decides which class each
+// step gets.
 function renderCalDots() {
-  calDots.textContent = CAL_ORDER.map((key, i) => (calDone[key] ? '✅' : i === calIndex ? '🔵' : '⚪')).join(' ');
+  calDots.innerHTML = CAL_ORDER.map((key, i) => {
+    const cls = calDone[key] ? 'done' : i === calIndex ? 'current' : 'todo';
+    const label = calDone[key] ? '✓' : String(i + 1);
+    return `<span class="cal-tile ${cls}">${label}</span>`;
+  }).join('');
 }
 // 2026-09-03 fix ("the 4-stage setup never asks for a punch"): the phone
 // runs ALL four detectors continuously during calibration, so before this
