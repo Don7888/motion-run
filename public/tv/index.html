@@ -130,6 +130,26 @@
     pointer-events: none; transition: opacity 0.1s;
   }
 
+  /* Pre-run countdown (2026-09-03). Runs now start on their own rather than
+     waiting for a Start press, so this is the player's cue to put the phone
+     down and get into position before the track starts moving. */
+  #countdown {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    font-size: 190px; font-weight: 900; letter-spacing: -4px; color: #fff;
+    text-shadow: 0 6px 30px rgba(0,0,0,0.75), 0 0 60px rgba(110,231,255,0.55);
+    z-index: 26; pointer-events: none; line-height: 1;
+  }
+  #countdown.tick { animation: countPop 0.5s cubic-bezier(0.2, 0.9, 0.3, 1); }
+  @keyframes countPop {
+    from { opacity: 0.2; transform: translate(-50%, -50%) scale(1.7); }
+    to   { opacity: 1;   transform: translate(-50%, -50%) scale(1); }
+  }
+  #countdownHint {
+    position: fixed; top: calc(50% + 130px); left: 50%; transform: translateX(-50%);
+    font-size: 24px; font-weight: 700; opacity: 0.85; z-index: 26; pointer-events: none;
+    text-shadow: 0 2px 10px rgba(0,0,0,0.8);
+  }
+
   /* Trimmed from 96px/44px alongside the badge-clearance shift above, so the
      tallest panel in the game still fits comfortably on a TV (which may also
      be overscanning the edges) instead of needing to scroll. */
@@ -213,6 +233,8 @@
 
   <div id="controlBadge" class="control-badge" style="display:none;"></div>
   <div id="actionPrompt" style="display:none;"></div>
+  <div id="countdown" style="display:none;"></div>
+  <div id="countdownHint" style="display:none;">Get into position!</div>
 
   <div id="combo"></div>
 
