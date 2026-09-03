@@ -196,6 +196,25 @@
     border-radius: 14px; font-weight: 700; font-size: 18px; color: var(--gold);
   }
 
+  /* Scan-to-join QR code (2026-09-03) — a plain white card so the code has
+     the quiet, high-contrast border it needs to scan reliably no matter
+     what's behind the frosted-glass panel. Sized by CSS, not by the SVG's
+     own intrinsic size, so it stays sharp (the SVG is drawn on a 1-unit-
+     per-module grid — see lib/qrcode-lite.js's toSVG()) at any panel width. */
+  .qr-card {
+    width: 176px; height: 176px; margin: 14px auto 6px;
+    background: #fff; border-radius: 16px; padding: 10px;
+    box-shadow: 0 10px 26px rgba(0,0,0,0.35);
+  }
+  .qr-card img { display: block; width: 100%; height: 100%; }
+  .join-divider {
+    display: flex; align-items: center; gap: 12px; margin: 16px 0 4px;
+    font-size: 13px; opacity: 0.55; text-transform: uppercase; letter-spacing: 1.5px;
+  }
+  .join-divider::before, .join-divider::after {
+    content: ''; flex: 1; height: 1px; background: rgba(255,255,255,0.2);
+  }
+
   .new-high-score {
     color: var(--gold); font-weight: 800; font-size: 21px; margin: 4px 0 14px;
     text-shadow: 0 0 18px rgba(255,209,102,0.4);
@@ -240,6 +259,9 @@
 
   <div id="pairingPanel" class="overlay-panel">
     <h1>Motion Run</h1>
+    <p>📱 Scan to join instantly</p>
+    <div class="qr-card"><img id="joinQr" alt="Scan with your phone's camera to join" /></div>
+    <div class="join-divider">or join manually</div>
     <p>On your phone, open:</p>
     <p style="font-size:26px; font-weight:700;" id="playUrl">…/play</p>
     <p>and enter this code:</p>
