@@ -174,6 +174,9 @@
   // ==== DOM ================================================================
   const characterScreen = document.getElementById('characterScreen');
   const joinScreen = document.getElementById('joinScreen');
+  const controlChoiceScreen = document.getElementById('controlChoiceScreen');
+  const chooseMotionBtn = document.getElementById('chooseMotionBtn');
+  const choosePadBtn = document.getElementById('choosePadBtn');
   const permScreen = document.getElementById('permScreen');
   const calibrationScreen = document.getElementById('calibrationScreen');
   const playScreen = document.getElementById('playScreen');
@@ -207,9 +210,14 @@
 
   const tabCamera = document.getElementById('tabCamera');
   const tabHold = document.getElementById('tabHold');
+  const tabPad = document.getElementById('tabPad');
   const playSensorSlot = document.getElementById('playSensorSlot');
   const jumpBtn = document.getElementById('jumpBtn');
   const punchBtn = document.getElementById('punchBtn');
+  const startRunBtn = document.getElementById('startRunBtn');
+  const laneLeftBtn = document.getElementById('laneLeftBtn');
+  const laneCentreBtn = document.getElementById('laneCentreBtn');
+  const laneRightBtn = document.getElementById('laneRightBtn');
   const motionToggleBtn = document.getElementById('motionToggleBtn');
   const pauseBtn = document.getElementById('pauseBtn');
   const exitBtn = document.getElementById('exitBtn');
@@ -227,7 +235,8 @@
   const laneMarker = document.getElementById('laneMarker');
 
   function showScreen(el) {
-    [characterScreen, joinScreen, permScreen, calibrationScreen, playScreen].forEach((s) => (s.style.display = 'none'));
+    [characterScreen, joinScreen, controlChoiceScreen, permScreen, calibrationScreen, playScreen]
+      .forEach((s) => (s.style.display = 'none'));
     el.style.display = 'flex';
     updateFullscreenCam();
   }
@@ -248,6 +257,13 @@
     const onCalibration = calibrationScreen.style.display !== 'none';
     const onPlay = playScreen.style.display !== 'none';
     document.body.classList.toggle('cam-fullscreen', (onCalibration || onPlay) && currentMode === 'camera');
+    // Controller mode ('pad') and the two motion modes want quite different
+    // play screens — see the body.mode-pad / body.mode-motion CSS. Motion
+    // modes drop the Jump/Punch buttons entirely so the camera gets the
+    // whole screen; controller mode drops the sensor view and grows the
+    // buttons instead.
+    document.body.classList.toggle('mode-pad', currentMode === 'pad');
+    document.body.classList.toggle('mode-motion', currentMode === 'camera' || currentMode === 'hold');
   }
   function showToast(msg) {
     toast.textContent = msg;
@@ -349,7 +365,9 @@
         roomCode = msg.code;
         roomLabel.textContent = roomCode;
         sendCharacter();
-        showScreen(permScreen);
+        // First step of setup is now "how do you want to play?" — motion
+        // tracking or the phone as a plain game controller.
+        showScreen(controlChoiceScreen);
       } else if (msg.type === 'calibration_control') {
         // The TV relays Fire TV remote OK presses back to us during the
         // placement/framing setup stages — see handlePlacementAck/
@@ -417,8 +435,23 @@
   // =========================================================================
   // 3 & 4. CAMERA PERMISSION + CALIBRATION
   // =========================================================================
+  chooseMotionBtn.addEventListener('click', () => showScreen(permScreen));
+  choosePadBtn.addEventListener('click', () => beginPadMode());
   grantCameraBtn.addEventListener('click', () => beginCalibration('camera'));
   skipCameraBtn.addEventListener('click', () => beginCalibration('hold'));
+
+  // Controller mode needs no calibration at all — there are no gestures to
+  // teach or thresholds to check, just buttons — so it goes straight to the
+  // play screen and tells the TV setup is finished.
+  async function beginPadMode() {
+    inCameraSetupGate = false;
+    framingActive = false;
+    await setMode('pad');
+    actionHandlers = realHandlers;
+    sendCalibration('done');
+    showScreen(playScreen);
+    showToast('Controller mode — use the buttons');
+  }
 
   // See the big header comment for what these gate. Both default to
   // "everything's fine, detect normally" (false/false) so hold-phone mode
@@ -659,7 +692,10 @@
   // =========================================================================
   // 5. MODE SWITCHING (used both to enter calibration and to switch mid-play)
   // =========================================================================
-  let currentMode = null; // 'camera' | 'hold'
+  // 'camera' and 'hold' are the two motion-tracking modes; 'pad' is the
+  // phone used as a plain game controller (no sensors at all).
+  let currentMode = null; // 'camera' | 'hold' | 'pad'
+  const MODE_LABEL = { camera: 'Camera mode', hold: 'Hold-phone mode', pad: 'Controller mode' };
 
   async function setMode(mode) {
     if (mode === currentMode) return;
@@ -677,12 +713,13 @@
 
     tabCamera.classList.toggle('active', mode === 'camera');
     tabHold.classList.toggle('active', mode === 'hold');
+    tabPad.classList.toggle('active', mode === 'pad');
     cameraView.style.display = mode === 'camera' ? 'block' : 'none';
     tiltZone.style.display = mode === 'hold' ? 'flex' : 'none';
 
     if (mode === 'camera') {
       stopMotionListeners();
-    } else {
+    } else if (mode === 'hold') {
       stopCamera();
       startMotionListeners();
       // Switching away from camera mode (e.g. tapping the "Hold phone" tab
@@ -690,13 +727,39 @@
       // leave a stale gate blocking hold-phone detection.
       inCameraSetupGate = false;
       framingActive = false;
+    } else {
+      // Controller mode: no camera, no motion listeners, nothing to detect.
+      stopCamera();
+      stopMotionListeners();
+      inCameraSetupGate = false;
+      framingActive = false;
     }
-    if (prev) showToast(mode === 'camera' ? 'Camera mode' : 'Hold-phone mode');
+    if (prev) showToast(MODE_LABEL[mode]);
     updateFullscreenCam();
   }
 
   tabCamera.addEventListener('click', () => setMode('camera'));
   tabHold.addEventListener('click', () => setMode('hold'));
+  tabPad.addEventListener('click', () => setMode('pad'));
+
+  // Controller-mode lane buttons. Deliberately absolute (`lane_set`, the
+  // same message the motion modes' zone tracking sends) rather than relative
+  // nudges, so there's never a mismatch between the button you pressed and
+  // the lane you're actually in.
+  function padLane(zone, btn) {
+    sendInput('lane_set', zone);
+    [laneLeftBtn, laneCentreBtn, laneRightBtn].forEach((b) => b.classList.remove('active'));
+    btn.classList.add('active');
+    if (navigator.vibrate) navigator.vibrate(10);
+  }
+  laneLeftBtn.addEventListener('click', () => padLane(-1, laneLeftBtn));
+  laneCentreBtn.addEventListener('click', () => padLane(0, laneCentreBtn));
+  laneRightBtn.addEventListener('click', () => padLane(1, laneRightBtn));
+
+  // Motion modes have no Jump/Punch buttons any more, so this is their
+  // guaranteed non-remote way to start or retry a run. An explicit jump is
+  // exactly what the TV accepts as a deliberate "begin" (see sendInput()).
+  startRunBtn.addEventListener('click', () => fireJump({ explicit: true }));
 
   function tapToSteer(e, zone) {
     const rect = zone.getBoundingClientRect();
