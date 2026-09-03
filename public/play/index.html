@@ -2,8 +2,26 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<!-- viewport-fit=cover (2026-09-03) is what actually makes the camera fill a
+     notched phone's screen in landscape. Without it iOS Safari keeps the
+     whole page inside the "safe" rectangle and paints the notch strips at
+     the left and right edges black — which is exactly the black bars either
+     side of the camera feed. With cover the page owns the full screen and
+     env(safe-area-inset-*) becomes non-zero instead, so the controls below
+     pad themselves clear of the notch while the video runs edge to edge. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
 <title>Motion Run — Controller</title>
+<!-- Makes the controller installable to the home screen. Launched from
+     there, iOS drops Safari's URL bar and tab bar entirely (that's the rest
+     of the screen the camera wasn't getting) — no native app needed. -->
+<link rel="manifest" href="./manifest.json" />
+<meta name="theme-color" content="#0b1220" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Motion Run" />
+<link rel="apple-touch-icon" href="../tv/icons/icon-512.png" />
+<link rel="icon" type="image/svg+xml" href="../tv/icons/icon.svg" />
 <style>
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; user-select: none; }
   html, body {
@@ -12,7 +30,14 @@
     font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
     overscroll-behavior: none; touch-action: manipulation;
   }
-  #app { display: flex; flex-direction: column; height: 100%; padding: env(safe-area-inset-top) 20px env(safe-area-inset-bottom); }
+  /* Left/right insets matter now that viewport-fit=cover lets the page run
+     under the notch in landscape — without them the controls would sit
+     underneath it. */
+  #app {
+    display: flex; flex-direction: column; height: 100%;
+    padding: env(safe-area-inset-top) max(20px, env(safe-area-inset-right))
+             env(safe-area-inset-bottom) max(20px, env(safe-area-inset-left));
+  }
 
   h1 { font-size: 22px; text-align: center; margin: 18px 0 4px; }
   h2 { font-size: 16px; margin: 0 0 8px; opacity: 0.9; }
@@ -103,6 +128,19 @@
   #codeInput:focus { outline: 2px solid #6ee7ff; }
   #joinError { color: #ff8a8a; min-height: 20px; font-size: 14px; }
 
+  /* --- Control-method choice screen (first step of setup) --- */
+  #controlChoiceScreen { flex: 1; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 14px; text-align: center; padding: 0 16px; }
+  #controlChoiceScreen h2 { font-size: 20px; margin: 0 0 2px; opacity: 1; }
+  #controlChoiceScreen .choice-sub { opacity: 0.7; font-size: 14px; margin-bottom: 6px; }
+  .choice-card {
+    width: 100%; max-width: 420px; text-align: left; cursor: pointer;
+    background: #1a2436; border: 2px solid rgba(120,200,255,0.25); border-radius: 18px;
+    padding: 16px 18px; color: #fff;
+  }
+  .choice-card:active { transform: scale(0.985); }
+  .choice-card .choice-title { font-size: 18px; font-weight: 800; display: block; margin-bottom: 4px; }
+  .choice-card .choice-desc { font-size: 13px; opacity: 0.72; line-height: 1.45; display: block; }
+
   /* --- Camera permission screen --- */
   #permScreen { flex: 1; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 18px; text-align: center; padding: 0 20px; }
   #permScreen p { opacity: 0.85; line-height: 1.5; }
@@ -187,6 +225,36 @@
   .bottom-row { display: flex; gap: 10px; margin-top: 10px; flex-shrink: 0; }
   .bottom-row .btn { flex: 1; padding: 12px 0; font-size: 14px; }
 
+  /* --- Lane buttons (controller mode only) --- */
+  .lane-row { display: none; gap: 12px; margin-top: 12px; flex-shrink: 0; }
+  .lane-btn {
+    flex: 1; padding: 18px 0; border-radius: 18px; border: 2px solid rgba(120,200,255,0.3);
+    background: #1a2436; color: #fff; font-size: 22px; font-weight: 800; text-align: center;
+  }
+  .lane-btn:active { transform: scale(0.96); }
+  .lane-btn.active { background: #24314f; border-color: #6ee7ff; color: #6ee7ff; }
+  .lane-btn .sub { display: block; font-size: 11px; font-weight: 500; opacity: 0.65; margin-top: 2px; }
+
+  /* 2026-09-03: the play screen is now one of two quite different things
+     depending on the control method chosen at the start of setup.
+       • Motion tracking (camera / hold phone) — the sensor view IS the
+         interface, so the big Jump/Punch buttons are gone entirely and the
+         camera gets that space back. A small "▶ Start" in the top row is
+         kept as the guaranteed way to begin/retry a run without the remote.
+       • Controller — no sensors at all, so the buttons ARE the interface:
+         lane buttons and action buttons grow to fill the screen. */
+  body.mode-motion #playScreen .action-row { display: none; }
+  body.mode-motion #playScreen .lane-row { display: none; }
+
+  body.mode-pad #playSensorSlot { display: none; }
+  body.mode-pad #playScreen .lane-row { display: flex; }
+  body.mode-pad #playScreen .bottom-row { display: none; }
+  body.mode-pad #playScreen .lane-row,
+  body.mode-pad #playScreen .action-row { flex: 1; min-height: 0; }
+  body.mode-pad #playScreen .lane-btn,
+  body.mode-pad #playScreen .action-btn { height: 100%; }
+  body.mode-pad #startRunBtn { display: none; }
+
   /* --- Fullscreen camera preview (see updateFullscreenCam() in
      controller.js) — camera mode's live preview is genuinely useful info
      the player wants full-size, both while placing/framing the phone
@@ -207,12 +275,14 @@
   body.cam-fullscreen #calibrationScreen .status-row,
   body.cam-fullscreen #playScreen .status-row {
     position: absolute; top: 0; left: 0; right: 0; z-index: 2; margin: 0;
-    padding: calc(env(safe-area-inset-top) + 10px) 16px 16px;
+    padding: calc(env(safe-area-inset-top) + 10px) max(16px, env(safe-area-inset-right))
+             16px max(16px, env(safe-area-inset-left));
     background: linear-gradient(rgba(0,0,0,0.65), transparent);
   }
   body.cam-fullscreen #calibrationHint {
     position: absolute; left: 0; right: 0; bottom: 78px; z-index: 2; margin: 0;
-    padding: 0 16px; text-shadow: 0 2px 6px rgba(0,0,0,0.85);
+    padding: 0 max(16px, env(safe-area-inset-right)) 0 max(16px, env(safe-area-inset-left));
+    text-shadow: 0 2px 6px rgba(0,0,0,0.85);
   }
   body.cam-fullscreen #calSkipStepBtn {
     position: absolute; left: 50%; transform: translateX(-50%); bottom: 112px;
@@ -220,7 +290,8 @@
   }
   body.cam-fullscreen .calibration-actions {
     position: absolute; left: 0; right: 0; bottom: 0; z-index: 2; margin: 0;
-    padding: 12px 16px calc(env(safe-area-inset-bottom) + 12px);
+    padding: 12px max(16px, env(safe-area-inset-right))
+             calc(env(safe-area-inset-bottom) + 12px) max(16px, env(safe-area-inset-left));
     background: linear-gradient(transparent, rgba(0,0,0,0.8));
   }
 
@@ -230,24 +301,20 @@
      play screen's own controls instead. */
   body.cam-fullscreen #playScreen .mode-tabs {
     position: absolute; top: 0; left: 0; right: 0; z-index: 2;
-    margin: 0; padding: calc(env(safe-area-inset-top) + 54px) 16px 0;
+    margin: 0;
+    padding: calc(env(safe-area-inset-top) + 54px) max(16px, env(safe-area-inset-right))
+             0 max(16px, env(safe-area-inset-left));
     background: linear-gradient(rgba(0,0,0,0.5), transparent);
     pointer-events: none;
   }
   body.cam-fullscreen #playScreen .mode-tabs .mode-tab { pointer-events: auto; }
-  body.cam-fullscreen #playScreen .action-row,
+  /* Only the detection toggle is pinned to the bottom now — the action row
+     is hidden entirely in motion modes (see body.mode-motion above), which
+     is what gives the camera the bottom third of the screen back. */
   body.cam-fullscreen #playScreen .bottom-row {
-    position: absolute; left: 0; right: 0; z-index: 2; margin: 0;
-    padding: 0 16px;
-  }
-  body.cam-fullscreen #playScreen .action-row {
-    bottom: calc(env(safe-area-inset-bottom) + 58px);
-    padding: 12px 16px 8px;
-    background: linear-gradient(transparent, rgba(0,0,0,0.75));
-  }
-  body.cam-fullscreen #playScreen .bottom-row {
-    bottom: 0;
-    padding: 8px 16px calc(env(safe-area-inset-bottom) + 10px);
+    position: absolute; left: 0; right: 0; bottom: 0; z-index: 2; margin: 0;
+    padding: 8px max(16px, env(safe-area-inset-right))
+             calc(env(safe-area-inset-bottom) + 10px) max(16px, env(safe-area-inset-left));
     background: rgba(0,0,0,0.75);
   }
 
@@ -322,7 +389,26 @@
     <div id="joinError"></div>
   </div>
 
-  <!-- 3. Camera permission -->
+  <!-- 3. How do you want to play? — the control method is now an explicit
+       first step of setup rather than something implied by the camera
+       permission prompt. Motion tracking leads into the camera/hold-phone
+       choice; controller skips setup entirely and goes straight to play. -->
+  <div id="controlChoiceScreen">
+    <h2>How do you want to play?</h2>
+    <div class="choice-sub">You can switch at any time during the game.</div>
+
+    <button class="choice-card" id="chooseMotionBtn">
+      <span class="choice-title">🏃 Move your body</span>
+      <span class="choice-desc">Motion tracking — run, jump, lean and punch for real. Uses the phone's camera, or its motion sensors if you'd rather hold it.</span>
+    </button>
+
+    <button class="choice-card" id="choosePadBtn">
+      <span class="choice-title">🎮 Use the phone as a controller</span>
+      <span class="choice-desc">On-screen buttons for lanes, jump and punch. No movement needed, no setup — good for tired legs, small spaces, or a quick go.</span>
+    </button>
+  </div>
+
+  <!-- 3b. Camera permission (motion tracking only) -->
   <div id="permScreen">
     <p id="permText">Motion Run wants to use your camera to watch your movements.</p>
     <p class="hint-strong">📱↔️ Turn your phone sideways (landscape) before propping it up, so it can see your whole body.</p>
@@ -361,6 +447,11 @@
     <div class="status-row">
       <span><span class="dot"></span>Connected — room <b id="roomLabel">····</b></span>
       <span class="status-actions">
+        <!-- Motion modes have no Jump/Punch buttons any more, so this is the
+             guaranteed way to start or retry a run without reaching for the
+             Fire TV remote. Hidden in controller mode, where the action
+             buttons already do it. -->
+        <button class="btn secondary small" id="startRunBtn">▶ Start</button>
         <button class="btn secondary small" id="calibrateBtn">Recenter</button>
         <button class="btn secondary small" id="pauseBtn">⏸</button>
         <button class="btn secondary small danger" id="exitBtn">✕ Exit</button>
@@ -370,14 +461,24 @@
     <div class="mode-tabs">
       <button class="mode-tab" id="tabCamera">📷 Camera</button>
       <button class="mode-tab" id="tabHold">📳 Hold phone</button>
+      <button class="mode-tab" id="tabPad">🎮 Buttons</button>
     </div>
 
     <!-- sensorPanel is moved in here by JS once calibration is done -->
     <div id="playSensorSlot"></div>
 
+    <!-- Controller mode only (see body.mode-pad CSS): absolute lane picking,
+         matching the absolute zone model motion tracking uses, so there's
+         never any doubt about which lane you're in. -->
+    <div class="lane-row">
+      <button class="lane-btn" id="laneLeftBtn">◀<span class="sub">left lane</span></button>
+      <button class="lane-btn" id="laneCentreBtn">●<span class="sub">centre</span></button>
+      <button class="lane-btn" id="laneRightBtn">▶<span class="sub">right lane</span></button>
+    </div>
+
     <div class="action-row">
-      <button class="action-btn" id="jumpBtn">⬆ JUMP<span class="sub">or hop in place</span></button>
-      <button class="action-btn" id="punchBtn">👊 PUNCH<span class="sub">or jab forward</span></button>
+      <button class="action-btn" id="jumpBtn">⬆ JUMP<span class="sub">clear the hurdles</span></button>
+      <button class="action-btn" id="punchBtn">👊 PUNCH<span class="sub">smash the crates</span></button>
     </div>
 
     <div class="bottom-row">
