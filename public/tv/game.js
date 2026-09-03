@@ -727,6 +727,7 @@ function renderLives() {
 renderLives();
 highScoreVal.textContent = String(Math.floor(highScore));
 
+const hudEl = document.getElementById('hud');
 const controlBadge = document.getElementById('controlBadge');
 const pausedPanel = document.getElementById('pausedPanel');
 const pausedScoreVal = document.getElementById('pausedScoreVal');
@@ -760,6 +761,12 @@ const CONTROL_BADGE_TEXT = {
 };
 function updateControlBadge(stageKey) {
   const meta = CONTROL_BADGE_TEXT[stageKey];
+  // The badge is a fixed pill near the top of the screen and the panels are
+  // vertically centred, so on a tall panel (the calibration one especially)
+  // the two used to collide — the pill sat right on top of the panel's
+  // heading. Panels get nudged down while a badge is showing; see
+  // `body.badge-visible .overlay-panel` in index.html.
+  document.body.classList.toggle('badge-visible', !!meta);
   if (!meta) { controlBadge.style.display = 'none'; return; }
   controlBadge.textContent = meta.text;
   controlBadge.className = `control-badge ${meta.cls}`;
@@ -777,6 +784,11 @@ function showPanel(which) {
 // show, until the phone signals it's done. Priority: placement > framing >
 // per-move calibration > normal phase-based panels.
 function syncPanel() {
+  // Score/lives belong to a run in progress. Leaving them up during
+  // pairing/setup showed a stale score from the *previous* run next to a
+  // "Step 1 of 4" setup prompt, which reads like the game is already going.
+  const inRun = state.phase === 'playing' || state.phase === 'paused';
+  hudEl.style.display = inRun ? 'flex' : 'none';
   if (setupStage === 'placement') { showPanel('placement'); updateControlBadge('placement'); return; }
   if (setupStage === 'framing') { showPanel('framing'); updateControlBadge('framing'); return; }
   if (calibrating) { showPanel('calibrating'); updateControlBadge('calibrating'); return; }
@@ -830,8 +842,10 @@ const FRAMING_META = {
   good: { text: 'Perfect! Hold still…', color: '#6ee7ff' },
 };
 
-function sendCalibrationControl(action) {
-  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'calibration_control', action }));
+function sendCalibrationControl(action, extra) {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'calibration_control', action, ...extra }));
+  }
 }
 
 function startPlacementUI() {
@@ -889,12 +903,32 @@ let calDone = { left: false, right: false, jump: false, punch: false };
 function renderCalDots() {
   calDots.textContent = CAL_ORDER.map((key, i) => (calDone[key] ? '✅' : i === calIndex ? '🔵' : '⚪')).join(' ');
 }
+// 2026-09-03 fix ("the 4-stage setup never asks for a punch"): the phone
+// runs ALL four detectors continuously during calibration, so before this
+// change any stray motion or pose false-positive could silently tick off a
+// move the walkthrough hadn't reached yet — most often `punch`, since a
+// hard lateral motion is the easiest one to trigger by accident while the
+// player is stepping left/right. advanceCalibrationUI() then skipped every
+// already-done step, so the PUNCH prompt was checked off in the background
+// and never actually displayed. The walkthrough now drives the phone
+// instead of merely reacting to it: every time the shown step changes, the
+// TV tells the phone which single move it is currently asking for, and the
+// phone ignores everything else (see expectedCalStep in controller.js).
+function requestCalStepOnPhone() {
+  sendCalibrationControl('step_request', {
+    step: calIndex < CAL_ORDER.length ? CAL_ORDER[calIndex] : null,
+    index: calIndex,
+    total: CAL_ORDER.length,
+    mode: calMode,
+  });
+}
 function showCalibrationStep() {
   if (calIndex >= CAL_ORDER.length) {
     calMoveIcon.textContent = '🎉';
     calMoveText.textContent = 'All set!';
     calStepCounter.textContent = 'Nice work!';
     renderCalDots();
+    requestCalStepOnPhone();
     return;
   }
   const meta = CAL_META[CAL_ORDER[calIndex]];
@@ -902,6 +936,7 @@ function showCalibrationStep() {
   calMoveText.textContent = calMode === 'hold' ? meta.textHold : meta.textCamera;
   calStepCounter.textContent = `Step ${calIndex + 1} of ${CAL_ORDER.length}`;
   renderCalDots();
+  requestCalStepOnPhone();
 }
 function startCalibrationUI(mode) {
   calibrating = true;
@@ -914,10 +949,14 @@ function startCalibrationUI(mode) {
 }
 function advanceCalibrationUI(step) {
   if (!calibrating || !(step in calDone) || calDone[step]) return;
+  // Strictly in order now. The phone is told which move we're asking for
+  // and only reports that one, so anything else arriving here is either a
+  // stale in-flight message or an out-of-date phone — either way, ignoring
+  // it is what guarantees every step (punch included) is actually shown and
+  // actually performed rather than being ticked off in the background.
+  if (calIndex >= CAL_ORDER.length || step !== CAL_ORDER[calIndex]) return;
   calDone[step] = true;
-  // Advance to the next not-yet-done step — keeps things moving forward
-  // even if the player's attempts land slightly out of the shown order.
-  while (calIndex < CAL_ORDER.length && calDone[CAL_ORDER[calIndex]]) calIndex++;
+  calIndex++;
   showCalibrationStep();
 }
 function finishCalibrationUI() {
