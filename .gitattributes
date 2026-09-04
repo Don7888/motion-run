@@ -1,0 +1,8 @@
+# Normalise line endings in the repository, and check files out with the
+# endings each platform actually wants.
+* text=auto
+
+# cmd.exe parses a batch file with Unix line endings unreliably - GOTO
+# labels and multi-line blocks are the usual casualties - so this one must
+# always land on disk with CRLF, whatever platform it is cloned on.
+*.bat text eol=crlf
