@@ -48,6 +48,23 @@ const BASE_COIN_INTERVAL = 1.5; // seconds between trails
 const PICKUP_RADIUS_Z = 1.5;  // how forgiving collection is along the track
 const PUNCH_COIN_REWARD = 3;  // coins released by smashing a crate
 
+// ---- Extra lives and the star (2026-09-04) --------------------------
+// Both are rare run-through pickups on the coin line, so a child can take
+// them without any precision — the difficulty is in them turning up at all,
+// not in catching them.
+const START_LIVES = 3;
+const MAX_LIVES = 5;          // hearts cap out; a heart at full health pays points instead
+const FULL_HEALTH_LIFE_VALUE = 150;
+const LIFE_SPAWN_MIN = 30;    // seconds between heart spawn attempts
+const LIFE_SPAWN_MAX = 48;
+
+const STAR_DURATION = 10;     // seconds of invincible super-speed
+const STAR_SPEED_MULT = 1.55;
+const STAR_SMASH_COINS = 4;   // coins scattered by each obstacle you plough through
+const STAR_SPAWN_MIN = 26;    // seconds between star spawn attempts
+const STAR_SPAWN_MAX = 42;
+const STAR_FOV_KICK = 1.13;   // camera widens while boosting — cheap, sells the speed
+
 // Countdown before every run (2026-09-03) — the game now starts on its own
 // rather than waiting for a Start press, so the player needs a moment to
 // put the phone down and get into position first.
@@ -156,7 +173,8 @@ scene.background = makeSkyTexture();
 scene.fog = new THREE.Fog(0xcdeaf7, 60, 150);
 
 const CAMERA_BASE_Y = 4.6;
-const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 200);
+const BASE_FOV = 62; // restored after the star's camera kick — see endStar()
+const camera = new THREE.PerspectiveCamera(BASE_FOV, window.innerWidth / window.innerHeight, 0.1, 200);
 camera.position.set(0, CAMERA_BASE_Y, 8.2);
 
 window.addEventListener('resize', () => {
@@ -450,6 +468,28 @@ player.add(legR);
 // throws before the scene ever renders.
 dressPlayer({ hair: 'short', hairColor: '#3b2a1a', hat: 'none', hatColor: '#ff5a5f', shirtColor: '#ff5a5f' });
 
+// Star aura — an unlit translucent shell that only appears while the star
+// is running. Deliberately a separate object rather than a tint on the
+// character's own materials: those carry the player's chosen shirt/hair
+// colours, and restoring them correctly afterwards is a bug waiting to
+// happen. depthWrite off so it never occludes the character inside it.
+// Additive, not plain transparency: a translucent box TINTS the character
+// (it looked like he was standing behind frosted glass), whereas additive
+// blending only ever adds light, so he glows instead of dimming.
+const starAura = new THREE.Mesh(
+  new THREE.BoxGeometry(1.7, 2.6, 1.6),
+  new THREE.MeshBasicMaterial({
+    color: 0xffd93d,
+    transparent: true,
+    opacity: 0.5,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  })
+);
+starAura.position.y = 1.06;
+starAura.visible = false;
+player.add(starAura);
+
 player.position.set(0, 0, 0);
 scene.add(player);
 
@@ -663,22 +703,73 @@ const coinGeo = new THREE.CylinderGeometry(0.34, 0.34, 0.07, 16);
 const coinMat = new THREE.MeshLambertMaterial({ color: 0xffc53d, emissive: 0x6b4a00 });
 const gemGeo = new THREE.OctahedronGeometry(0.42);
 const gemMat = new THREE.MeshLambertMaterial({ color: 0x6ee7ff, emissive: 0x0a5f75 });
+// Heart and star are little voxel sprites — a few boxes each, in the same
+// blocky language as everything else. Geometry is shared per-part across
+// every instance, same as the coin disc and gem octahedron above.
+const HEART_PARTS = [
+  [0.34, 0.30, 0.28, -0.18, 0.28],
+  [0.34, 0.30, 0.28, 0.18, 0.28],
+  [0.80, 0.34, 0.28, 0, 0.02],
+  [0.52, 0.22, 0.28, 0, -0.24],
+  [0.22, 0.20, 0.28, 0, -0.42],
+];
+const STAR_PARTS = [
+  [0.42, 0.42, 0.22, 0, 0.04],
+  [0.20, 0.34, 0.22, 0, 0.36],
+  [0.34, 0.20, 0.22, -0.32, 0.08],
+  [0.34, 0.20, 0.22, 0.32, 0.08],
+  [0.18, 0.30, 0.22, -0.20, -0.30],
+  [0.18, 0.30, 0.22, 0.20, -0.30],
+];
+const heartMat = new THREE.MeshLambertMaterial({ color: 0xff4d6d, emissive: 0x5c0f22 });
+const starMat = new THREE.MeshLambertMaterial({ color: 0xffd93d, emissive: 0x6b5200 });
+const heartGeos = HEART_PARTS.map(([w, h, d]) => new THREE.BoxGeometry(w, h, d));
+const starGeos = STAR_PARTS.map(([w, h, d]) => new THREE.BoxGeometry(w, h, d));
+function buildVoxelSprite(parts, geos, mat) {
+  const g = new THREE.Group();
+  parts.forEach(([, , , x, y], i) => {
+    const m = new THREE.Mesh(geos[i], mat);
+    m.position.set(x, y, 0);
+    g.add(m);
+  });
+  return g;
+}
+
 const pickups = [];
 // Only ever flipped by the test hook at the bottom of this file, so a test
 // can place one known coin and watch what happens to it without the normal
 // trail spawner dropping more into the scene mid-measurement.
 let coinSpawnEnabled = true;
 
+function makePickupMesh(kind) {
+  if (kind === 'gem') return new THREE.Mesh(gemGeo, gemMat);
+  if (kind === 'life') return buildVoxelSprite(HEART_PARTS, heartGeos, heartMat);
+  if (kind === 'star') return buildVoxelSprite(STAR_PARTS, starGeos, starMat);
+  // Coins are discs: stood upright facing back down the track so the player
+  // sees a full circle coming at them, like a ring.
+  const m = new THREE.Mesh(coinGeo, coinMat);
+  m.rotation.x = Math.PI / 2;
+  return m;
+}
+
 function addPickup(kind, lane, z) {
-  const mesh = new THREE.Mesh(kind === 'gem' ? gemGeo : coinGeo, kind === 'gem' ? gemMat : coinMat);
+  const mesh = makePickupMesh(kind);
   mesh.position.x = LANE_X[lane];
   mesh.position.y = kind === 'gem' ? GEM_Y : COIN_Y;
   mesh.position.z = z;
-  // Coins are discs: stand them upright facing back down the track so the
-  // player sees a full circle coming at them, like a ring.
-  if (kind !== 'gem') mesh.rotation.x = Math.PI / 2;
   scene.add(mesh);
   pickups.push({ kind, lane, mesh, collected: false });
+}
+
+// Hearts and stars pick a lane that isn't already occupied by an obstacle,
+// the same way a coin trail does — a rare pickup buried inside a wall would
+// be worse than no pickup at all.
+function spawnSpecial(kind) {
+  const lanes = [0, 1, 2].sort(() => Math.random() - 0.5);
+  const lane = lanes.find((l) => !laneBlocked(l, SPAWN_Z, SPAWN_Z));
+  if (lane === undefined) return false;
+  addPickup(kind, lane, SPAWN_Z);
+  return true;
 }
 
 function spawnGem(lane, z) {
@@ -790,7 +881,47 @@ const IMPACT_BURST_LIFETIME = 0.6; // seconds — was 0.5
 // (not a one-shot flag), so it naturally updates if the player changes
 // lanes and a different obstacle becomes the relevant one, and it hides
 // itself the instant nothing in-lane is within the warning window.
+// ---------------------------------------------------------------------
+// The star (2026-09-04): ten seconds of invincible super-speed. Anything
+// you touch is smashed out of the way and pays coins for it.
+// ---------------------------------------------------------------------
+function startStar() {
+  const refreshing = state.starT > 0;
+  state.starT = STAR_DURATION;
+  starAura.visible = true;
+  starTimerEl.style.display = 'block';
+  hideActionPrompt(); // timing cues are meaningless while nothing can hit you
+  popCombo(refreshing ? 'STAR REFILLED!' : '⭐ SUPER SPEED!');
+}
+
+function endStar() {
+  state.starT = 0;
+  starAura.visible = false;
+  starTimerEl.style.display = 'none';
+  camera.fov = BASE_FOV;
+  camera.updateProjectionMatrix();
+}
+
+function updateStar(dt) {
+  if (state.starT <= 0) return;
+  state.starT = Math.max(0, state.starT - dt);
+  if (state.starT === 0) { endStar(); popCombo('STAR OVER'); return; }
+  // Cycle the aura's hue and pulse it, so "invincible" is unmistakable from
+  // the sofa without touching the character's own colours.
+  const t = state.starT;
+  starAura.material.color.setHSL((performance.now() * 0.0012) % 1, 0.9, 0.6);
+  starAura.material.opacity = 0.34 + Math.abs(Math.sin(t * 9)) * 0.22;
+  // Ease the camera wider while boosting, and back on the way out.
+  const targetFov = BASE_FOV * STAR_FOV_KICK;
+  camera.fov += (targetFov - camera.fov) * Math.min(1, dt * 5);
+  camera.updateProjectionMatrix();
+  starTimerEl.textContent = `⭐ ${Math.ceil(state.starT)}`;
+}
+
 function updateActionPrompt(speed) {
+  // Nothing can hit you during a star, so a "JUMP!"/"PUNCH!" cue would be
+  // telling the player to react to something that no longer matters.
+  if (state.starT > 0) { actionPromptEl.style.display = 'none'; return; }
   let target = null;
   let bestZ = -Infinity;
   for (const o of obstacles) {
@@ -877,7 +1008,7 @@ function punchImpactBump(elapsedFrac) {
 const state = {
   phase: 'pairing', // pairing -> ready -> countdown -> playing -> gameover
   score: 0,
-  lives: 3,
+  lives: START_LIVES,
   lane: 1,
   grounded: true,
   vy: 0,
@@ -885,6 +1016,9 @@ const state = {
   punchTimer: 0,
   punchAnimTimer: 0, // cosmetic-only — see PUNCH_ANIM_DURATION above
   invulnTimer: 0,
+  starT: 0,            // seconds of star left; > 0 means invincible + boosted
+  lifeSpawnTimer: 0,   // countdown to the next heart spawn attempt
+  starSpawnTimer: 0,   // countdown to the next star spawn attempt
   spawnTimer: BASE_SPAWN_INTERVAL,
   coinTimer: 0.8,
   distance: 0,        // metres this run — drives the difficulty ramp
@@ -939,10 +1073,15 @@ const comboEl = document.getElementById('combo');
 const flashEl = document.getElementById('flash');
 const finalScoreEl = document.getElementById('finalScore');
 const actionPromptEl = document.getElementById('actionPrompt');
+const starTimerEl = document.getElementById('starTimer');
 
 function renderLives() {
   livesEl.innerHTML = '';
-  for (let i = 0; i < 3; i++) {
+  // Grows past the starting three as extra hearts are collected, rather
+  // than always drawing MAX_LIVES slots — five outlines at the start of a
+  // run would read as "you have already lost two".
+  const slots = Math.max(START_LIVES, state.lives);
+  for (let i = 0; i < slots; i++) {
     const span = document.createElement('span');
     span.className = 'heart' + (i < state.lives ? '' : ' lost');
     span.textContent = '❤️';
@@ -1251,7 +1390,7 @@ function flashHit() {
 
 function resetRun() {
   state.score = 0;
-  state.lives = 3;
+  state.lives = START_LIVES;
   state.lane = 1;
   state.grounded = true;
   state.vy = 0;
@@ -1259,6 +1398,10 @@ function resetRun() {
   state.punchTimer = 0;
   state.punchAnimTimer = 0;
   state.invulnTimer = 0;
+  state.starT = 0;
+  state.lifeSpawnTimer = LIFE_SPAWN_MIN + Math.random() * (LIFE_SPAWN_MAX - LIFE_SPAWN_MIN);
+  state.starSpawnTimer = STAR_SPAWN_MIN + Math.random() * (STAR_SPAWN_MAX - STAR_SPAWN_MIN);
+  endStar();
   state.spawnTimer = BASE_SPAWN_INTERVAL;
   state.coinTimer = 0.8;
   state.distance = 0;
@@ -1333,6 +1476,7 @@ function gameOver() {
   newHighScoreNote.style.display = state.score > highScoreAtRunStart ? 'block' : 'none';
   hideActionPrompt();
   hideCountdown();
+  endStar(); // don't leave the aura, the HUD pill or the widened FOV behind
   syncPanel();
 }
 
@@ -1566,7 +1710,10 @@ window.addEventListener('keydown', (e) => {
 let lastT = performance.now();
 
 function currentSpeed() {
-  return Math.min(MAX_SPEED, BASE_SPEED + state.distance * SPEED_RAMP);
+  const base = Math.min(MAX_SPEED, BASE_SPEED + state.distance * SPEED_RAMP);
+  // The star deliberately breaks the MAX_SPEED ceiling — going faster than
+  // the game normally allows is the whole point of it.
+  return state.starT > 0 ? base * STAR_SPEED_MULT : base;
 }
 
 function updatePlaying(dt) {
@@ -1624,6 +1771,7 @@ function updatePlaying(dt) {
   if (state.punchTimer > 0) state.punchTimer = Math.max(0, state.punchTimer - dt);
   if (state.punchAnimTimer > 0) state.punchAnimTimer = Math.max(0, state.punchAnimTimer - dt);
   if (state.invulnTimer > 0) state.invulnTimer = Math.max(0, state.invulnTimer - dt);
+  updateStar(dt);
 
   // Procedural animation
   const runT = state.distanceForTex * 1.6;
@@ -1711,6 +1859,25 @@ function updatePlaying(dt) {
     state.coinTimer = BASE_COIN_INTERVAL * (0.75 + Math.random() * 0.5);
   }
 
+  // Hearts and stars, each on their own long, independent timer. If the
+  // spawn is skipped because all three lanes are busy, retry shortly rather
+  // than waiting out another full interval — otherwise a crowded stretch of
+  // track can silently swallow a pickup the player waited a minute for.
+  state.lifeSpawnTimer -= dt;
+  if (state.lifeSpawnTimer <= 0) {
+    const placed = spawnSpecial('life');
+    state.lifeSpawnTimer = placed
+      ? LIFE_SPAWN_MIN + Math.random() * (LIFE_SPAWN_MAX - LIFE_SPAWN_MIN)
+      : 1.5;
+  }
+  state.starSpawnTimer -= dt;
+  if (state.starSpawnTimer <= 0) {
+    const placed = spawnSpecial('star');
+    state.starSpawnTimer = placed
+      ? STAR_SPAWN_MIN + Math.random() * (STAR_SPAWN_MAX - STAR_SPAWN_MIN)
+      : 1.5;
+  }
+
   // Update collectibles
   for (let i = pickups.length - 1; i >= 0; i--) {
     const p = pickups[i];
@@ -1719,6 +1886,11 @@ function updatePlaying(dt) {
     if (p.kind === 'gem') {
       p.mesh.rotation.y += dt * 2.6;
       p.mesh.position.y = GEM_Y + Math.sin(state.distanceForTex * 0.9 + p.mesh.position.x) * 0.12;
+    } else if (p.kind === 'life' || p.kind === 'star') {
+      // Rare pickups spin faster and bob, so they stand out from the
+      // constant stream of coins at a glance.
+      p.mesh.rotation.y += dt * 2.2;
+      p.mesh.position.y = COIN_Y + 0.25 + Math.sin(state.distanceForTex * 1.2) * 0.16;
     } else {
       p.mesh.rotation.y += dt * 3.4;
     }
@@ -1730,8 +1902,22 @@ function updatePlaying(dt) {
       const reachable = p.kind === 'gem' ? player.position.y >= GEM_MIN_PLAYER_Y : true;
       if (reachable) {
         p.collected = true;
-        addScore(p.kind === 'gem' ? GEM_VALUE : COIN_VALUE);
-        if (p.kind === 'gem') popCombo(`GEM +${GEM_VALUE}`);
+        if (p.kind === 'life') {
+          if (state.lives < MAX_LIVES) {
+            state.lives += 1;
+            renderLives();
+            popCombo('+1 LIFE ❤️');
+          } else {
+            // Never a wasted pickup: at full health a heart pays out instead.
+            addScore(FULL_HEALTH_LIFE_VALUE);
+            popCombo(`FULL HEALTH +${FULL_HEALTH_LIFE_VALUE}`);
+          }
+        } else if (p.kind === 'star') {
+          startStar();
+        } else {
+          addScore(p.kind === 'gem' ? GEM_VALUE : COIN_VALUE);
+          if (p.kind === 'gem') popCombo(`GEM +${GEM_VALUE}`);
+        }
         scene.remove(p.mesh);
         pickups.splice(i, 1);
         continue;
@@ -1776,7 +1962,13 @@ function updatePlaying(dt) {
         else if (o.type === 'crate') safe = state.punchTimer > 0;
         else safe = false; // wall: only lane-dodge saves you
 
-        if (safe) {
+        if (state.starT > 0) {
+          // Star: run straight through it. Walls included — this is the one
+          // thing in the game that gets you past a wall without dodging.
+          launchObstacleFlying(o, speed);
+          releaseCoins(o.mesh.position, STAR_SMASH_COINS);
+          popCombo('SMASH!');
+        } else if (safe) {
           if (o.type === 'crate') {
             // Smashing a crate scatters coins — the reward for a good punch
             // is still points, but they arrive as coins like everything else.
@@ -1881,11 +2073,25 @@ window.__mrDebug = {
   distance: () => state.distance,
   lane: () => state.lane,
   lives: () => state.lives,
+  starRemaining: () => state.starT,
+  setLives: (n) => { state.lives = n; renderLives(); },
+  spawnSpecial: (kind) => spawnSpecial(kind),
+  placeSpecial: (kind, lane, z) => addPickup(kind, lane, z),
   pickupCount: (kind) => (kind ? pickups.filter((p) => p.kind === kind).length : pickups.length),
   clearPickups: () => { pickups.splice(0).forEach((p) => scene.remove(p.mesh)); },
   placePickup: (kind, lane, z) => addPickup(kind, lane, z),
   setCoinSpawning: (on) => { coinSpawnEnabled = !!on; },
   jump: () => { if (state.grounded) { state.grounded = false; state.jumping = true; state.vy = JUMP_VELOCITY; } },
+  obstacleCount: () => obstacles.length,
+  placeObstacle: (type, lane, z) => {
+    // Same as spawnObstacle(): buildObstacleMesh already sets the right y
+    // for the type, so only lane and distance are placed here.
+    const mesh = buildObstacleMesh(type);
+    mesh.position.x = LANE_X[lane];
+    mesh.position.z = z;
+    scene.add(mesh);
+    obstacles.push({ type, lane, mesh, resolved: false, flying: false });
+  },
   endRun: () => gameOver(),
 };
 
@@ -1897,4 +2103,5 @@ window.__mrDebug = {
 // calibrating, state) has actually been initialised.
 syncPanel();
 animate();
+
 
