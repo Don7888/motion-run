@@ -46,16 +46,30 @@ dependencies).
 node server.js
 ```
 
-You'll see:
+On Windows there's no need to open a terminal at all — double-click
+**`start-lan-windows.bat`**, which does the same thing and leaves the
+window open while you play.
+
+The first run generates a self-signed HTTPS certificate for whatever LAN
+address this machine currently has (see *Why HTTPS* below) and prints the
+exact URL to open — you don't have to look your IP up:
 
 ```
-Motion Run server listening on https://0.0.0.0:3000
-  TV screen:        https://<your-LAN-ip>:3000/tv
-  Phone controller: https://<your-LAN-ip>:3000/play
+Generating a self-signed certificate for 192.168.1.42, 127.0.0.1, localhost…
+Saved to certs/ (valid until 2028-12-07).
+
+  Motion Run is running on your network.
+
+  On the TV, open:   https://192.168.1.42:3000/tv
+
+  Then scan the QR code on the TV with your phone.
+
+  Both devices will warn once that the connection isn't private —
+  that's the self-signed certificate. Choose Advanced, then proceed.
 ```
 
-Find your computer's LAN IP (e.g. `192.168.1.42`) — on Mac/Linux,
-`ipconfig getifaddr en0` or `hostname -I`; on Windows, `ipconfig`.
+Later runs reuse that certificate silently, and only regenerate it if your
+computer's LAN address has changed.
 
 1. On the Fire TV's browser (Silk Browser, or the **Downloader** app, which
    has an easier remote-friendly keyboard for typing URLs — the built-in Fire
@@ -63,12 +77,14 @@ Find your computer's LAN IP (e.g. `192.168.1.42`) — on Mac/Linux,
    installed), open `https://<your-LAN-ip>:3000/tv`. You'll hit a "connection
    isn't private" warning — that's expected, see *Why HTTPS* below; tap
    **Advanced → Proceed**. A 6-digit room code appears.
-2. On your phone (same WiFi network), open `https://<your-LAN-ip>:3000/play`
-   in a normal browser (Safari on iOS, Chrome on Android), same one-time
-   security warning click-through.
-3. **Create your character** — pick hair, a hat, and a shirt color, or tap
+2. **Point your phone's camera at the QR code on the TV** and open the link
+   it offers — that carries the room code with it, so there's nothing to
+   type. (If the phone won't scan it, open `https://<your-LAN-ip>:3000/play`
+   by hand and type the 6-digit code instead.) You'll get the same one-time
+   security warning on the phone; **Advanced → Proceed** again.
+3. The phone connects to the TV straight away.
+4. **Create your character** — pick hair, a hat, and a shirt color, or tap
    **Random**/**Standard** to skip quickly.
-4. Enter the room code and tap **Connect to TV**.
 5. Choose **Enable Camera Tracking** (prop the phone up, step back) or
    **Hold my phone instead** (the original accelerometer mode).
 6. **Quick setup**: a short calibration walkthrough appears **on the TV**,
@@ -115,10 +131,11 @@ automated from here):
    [github.com](https://github.com).
 2. Click **New repository**, give it a name (e.g. `motion-run`), leave it
    **Public** (there's nothing sensitive in it — the self-signed cert/key in
-   `certs/` shouldn't be committed at all, see below), and create it.
+   `certs/` is gitignored and never committed, see below), and create it.
 3. On the new repo's page, click **uploading an existing file** and drag in
    every file/folder from this project *except* `certs/` — `server.js`,
-   `package.json`, `lib/`, `public/`, `README.md`. Commit the upload.
+   `package.json`, `lib/`, `public/`, `README.md`, `.gitignore`. Commit the
+   upload.
 4. Send me the repository's URL (e.g. `https://github.com/yourname/motion-run`)
    and I'll create the Render web service pointed at it — build command
    `npm install`, start command `npm start`, using the free plan.
@@ -137,28 +154,32 @@ for a bug.
 Camera-based tracking uses `getUserMedia()`, which every mobile browser
 refuses to grant on a plain `http://` origin (except `localhost`) — camera
 access requires a "secure context". There's no real certificate authority
-for a private LAN IP, so `certs/` holds a **self-signed certificate**
-covering this project's current LAN IP. Every browser (laptop, Fire TV,
-phone) will show a one-time "connection isn't private" warning the first
-time it loads the site — tap **Advanced → Proceed**, it only happens once
-per browser.
+for a private LAN IP, so the server signs its own. Every browser (laptop,
+Fire TV, phone) will show a one-time "connection isn't private" warning the
+first time it loads the site — tap **Advanced → Proceed**, it only happens
+once per browser.
 
-### Regenerating the certificate
+### The certificate looks after itself
 
-The cert is only valid for the LAN IP it was generated with. If your
-computer's IP changes (new router, DHCP renewal, different network), camera
-mode will stop working until you regenerate it:
+On startup the server checks `certs/` for a certificate that is still valid
+and still covers this machine's current LAN address. If there isn't one — a
+fresh clone, a new router, a DHCP renewal, a different network — it
+generates a new one and saves it, then carries on booting. There is nothing
+to run by hand, and in particular **no `openssl`**, which matters because
+Windows doesn't ship it.
 
-```bash
-cd certs
-openssl req -x509 -newkey rsa:2048 -keyout server.key -out server.cert -days 730 -nodes \
-  -subj "/CN=motion-run.local" \
-  -addext "subjectAltName=IP:<your-new-LAN-ip>,IP:127.0.0.1,DNS:localhost"
-```
+That's `lib/selfsigned-lite.js`: it uses Node's built-in `crypto` for the
+key and the signature, and builds the X.509 structure itself, in the same
+dependency-free spirit as `lib/ws-lite.js` and `lib/qrcode-lite.js`.
 
-(Windows doesn't ship `openssl` by default — Git for Windows bundles one, or
-ask whichever Claude session you're working with to regenerate it for you
-and place the files, same as the first time.)
+`certs/` is in `.gitignore` and must stay out of the repository — it holds a
+private key, and it's specific to one machine's IP anyway. Each clone makes
+its own on first run.
+
+One consequence worth knowing: Chrome won't register a service worker on a
+self-signed origin, so LAN mode skips that (the TV page detects a bare-IP
+address and doesn't try). The game is unaffected; it only means the LAN
+address isn't installable as an app, which you'd never want anyway.
 
 ## Gameplay
 
@@ -358,11 +379,13 @@ what could be checked headlessly:
 ```
 motion-run/
 ├── server.js                   # HTTPS + WebSocket relay server (no dependencies)
-├── certs/
+├── certs/                      # generated on first run, gitignored, never committed
 │   ├── server.key               # self-signed TLS key (see "Why HTTPS")
 │   └── server.cert               # self-signed TLS cert, SAN = current LAN IP
 ├── lib/
-│   └── ws-lite.js                # minimal hand-rolled WebSocket server (RFC 6455)
+│   ├── ws-lite.js                # minimal hand-rolled WebSocket server (RFC 6455)
+│   ├── qrcode-lite.js            # minimal QR encoder for the TV's join code
+│   └── selfsigned-lite.js        # X.509 self-signed cert generator (no openssl)
 ├── package.json
 └── public/
     ├── tv/
