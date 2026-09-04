@@ -24,16 +24,16 @@
 // getUserMedia(), which every mobile browser refuses to grant on a plain
 // http:// origin (except localhost) — camera/mic access requires a
 // "secure context". There's no real certificate authority for a private
-// LAN IP, so certs/ has a self-signed cert covering this project's
-// current LAN IP (see README for how to regenerate it if that IP
-// changes). Your phone and TV browsers will show a one-time "connection
-// isn't private" warning the first time they load the site — that's
-// expected for a self-signed cert; tap through it (Advanced -> Proceed).
+// LAN IP, so this server signs its own on first run — covering whatever
+// LAN address this machine currently has — and regenerates it by itself
+// if that address later changes (see lib/selfsigned-lite.js). Your phone
+// and TV browsers will show a one-time "connection isn't private"
+// warning the first time they load the site — that's expected for a
+// self-signed cert; tap through it (Advanced -> Proceed).
 //
 // Run with:  node server.js   (no install step needed)
-// Then, on your TV and phone (same WiFi network), open:
-//   https://<this-computer's-LAN-IP>:3000/tv
-//   https://<this-computer's-LAN-IP>:3000/play
+// It prints the exact https:// URL to open on your TV, so you don't have
+// to go looking up this machine's LAN IP yourself.
 
 const http = require('http');
 const https = require('https');
@@ -41,6 +41,7 @@ const fs = require('fs');
 const path = require('path');
 const { WSServer } = require('./lib/ws-lite');
 const qrcodeLite = require('./lib/qrcode-lite');
+const selfsigned = require('./lib/selfsigned-lite');
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -179,16 +180,42 @@ if (ON_RENDER) {
   // speaking HTTPS here ourselves would just break the connection.
   server = http.createServer(requestHandler);
 } else {
-  let tlsOptions;
+  // 2026-09-04: the certificate is generated here on first run rather than
+  // by hand. It used to be a documented openssl command with your LAN IP
+  // pasted in, which failed for two reasons: `certs/` is deliberately never
+  // committed (it's per-machine and contains a private key), so a fresh
+  // clone couldn't start LAN mode at all; and Windows has no openssl, so the
+  // documented command doesn't even run there. lib/selfsigned-lite.js builds
+  // the certificate in pure Node instead.
+  //
+  // An existing cert is REUSED whenever it still covers this machine's
+  // current LAN address. That matters for more than speed: browsers remember
+  // the security exception you clicked for one specific certificate, so
+  // regenerating on every boot would mean clicking through the warning on
+  // the TV and the phone every single time you played.
+  const lanIps = selfsigned.lanAddresses();
+  const certHosts = [...lanIps, '127.0.0.1', 'localhost'];
+  const keyPath = path.join(CERT_DIR, 'server.key');
+  const certPath = path.join(CERT_DIR, 'server.cert');
+  let tlsOptions = null;
   try {
-    tlsOptions = {
-      key: fs.readFileSync(path.join(CERT_DIR, 'server.key')),
-      cert: fs.readFileSync(path.join(CERT_DIR, 'server.cert')),
+    const existing = {
+      key: fs.readFileSync(keyPath, 'utf8'),
+      cert: fs.readFileSync(certPath, 'utf8'),
     };
-  } catch (err) {
-    console.error('Could not read certs/server.key and certs/server.cert.');
-    console.error('See README.md — "Regenerating the HTTPS certificate" — to create them.');
-    process.exit(1);
+    if (selfsigned.certCovers(existing.cert, lanIps)) tlsOptions = existing;
+    else console.log('Existing certificate does not cover this machine\'s current LAN address — regenerating.');
+  } catch {
+    // No cert yet; fall through and make one.
+  }
+  if (!tlsOptions) {
+    console.log(`Generating a self-signed certificate for ${certHosts.join(', ')}…`);
+    const made = selfsigned.generate(certHosts);
+    fs.mkdirSync(CERT_DIR, { recursive: true });
+    fs.writeFileSync(keyPath, made.key, { mode: 0o600 });
+    fs.writeFileSync(certPath, made.cert);
+    tlsOptions = { key: made.key, cert: made.cert };
+    console.log(`Saved to certs/ (valid until ${made.notAfter.toISOString().slice(0, 10)}).`);
   }
   server = https.createServer(tlsOptions, requestHandler);
 }
@@ -319,9 +346,23 @@ server.listen(PORT, () => {
     console.log(`Motion Run server listening on plain HTTP :${PORT} (Render terminates TLS)`);
     console.log('  Open the Render-assigned https://...onrender.com URL, then /tv and /play.');
   } else {
-    console.log(`Motion Run server listening on https://0.0.0.0:${PORT}`);
-    console.log(`  TV screen:        https://<your-LAN-ip>:${PORT}/tv`);
-    console.log(`  Phone controller: https://<your-LAN-ip>:${PORT}/play`);
-    console.log('  (self-signed cert — your browser will warn once; tap through it)');
+    const ips = selfsigned.lanAddresses();
+    console.log('');
+    console.log('  Motion Run is running on your network.');
+    console.log('');
+    if (ips.length === 0) {
+      console.log('  No LAN address found — is this machine on WiFi/ethernet?');
+      console.log(`  Local only:  https://localhost:${PORT}/tv`);
+    } else {
+      for (const ip of ips) {
+        console.log(`  On the TV, open:   https://${ip}:${PORT}/tv`);
+      }
+      console.log('');
+      console.log('  Then scan the QR code on the TV with your phone.');
+    }
+    console.log('');
+    console.log('  Both devices will warn once that the connection isn\'t private —');
+    console.log('  that\'s the self-signed certificate. Choose Advanced, then proceed.');
+    console.log('');
   }
 });
