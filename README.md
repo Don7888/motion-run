@@ -1,10 +1,27 @@
-# Motion Run
+# MotionQuest — *Move Through Time*
 
 A "Danny Go"–style movement game: a 3D runner plays on your TV (Fire TV / any
 browser), and your phone is the controller. Two control styles are built
 in — camera-based body tracking (prop the phone up and just move) or
 hold-the-phone motion sensing — either way: step/lean left or right to
-change lanes, hop to jump over hurdles, and throw a punch to smash crates.
+change lanes, hop to jump over hurdles, duck under low bars, and throw a
+punch to smash what's in the way.
+
+You run through **four eras**, unlocked in order, oldest first:
+
+| | Era | Finish line |
+|---|---|---|
+| 🦕 | **Primeval Valley** — volcanic sky, tree ferns, bones in the dirt | 700 m |
+| 🏛️ | **Ancient Rome** — marble columns, cypresses, SPQR banners | 900 m |
+| 🏙️ | **Present Day** — the original road level | 1100 m |
+| 🛸 | **Neon Future** — night city, laser gates, glowing towers | 1300 m |
+
+The **gameplay is identical in every era** — same three lanes, same
+collision box, same four moves. Only the costume changes. That is
+deliberate: a runner that changed its rules per level would be teaching
+four games instead of one. What each era does change is its sky, fog,
+lighting, ground, roadside scenery and the shape of all four obstacle
+types.
 
 This is a **working prototype**, built and tested as far as this build
 environment allows (see *What's been tested* below). It's meant as a strong
@@ -189,14 +206,42 @@ address isn't installable as an app, which you'd never want anyway.
   threshold to enter the left/right zone, and just standing/holding
   normally again snaps you straight back to the center lane — no
   exaggerated "return" gesture needed.
-- **Hurdles** (low orange bars) — jump (hop) to clear them.
-- **Crates** (brown boxes) — punch to smash them.
-- **Walls** (grey barriers) — too tall to jump, too tough to punch; the only
-  way past is to be in a different lane already.
-- Getting hit costs a heart (3 total); a short invulnerability window follows
-  each hit. Score climbs with distance and successful hurdle/crate clears;
-  speed ramps up gradually. Lose all hearts and it's game over — jump or
-  punch again to restart.
+- **Four obstacle types, one move each.** Every era dresses these
+  differently — a crate is a Roman legionary in Ancient Rome and a hovering
+  drone in Neon Future — but they always behave the same way:
+  - **Hurdles** — jump (hop) to clear them.
+  - **Crates** — punch to smash them.
+  - **Low bars** — duck under them. Jumping does *not* save you: it puts
+    your head straight into the bar. That is the point of having a move
+    that isn't "jump".
+  - **Walls** — too tall to jump, too tough to punch; the only way past is
+    to be in a different lane already.
+- Getting hit costs a heart (3 to start, 5 maximum); a short invulnerability
+  window follows each hit. Score comes from collecting coins and gems, not
+  from distance alone. Hearts and stars appear occasionally — a star gives
+  10 seconds of invincible super-speed that ploughs straight through
+  anything, walls included. Speed ramps up gradually with distance.
+- **Each era has a finish line.** Reach it and the era is complete, your
+  best score for it is recorded, and the next era unlocks. Lose all hearts
+  first and it's game over — jump or punch to run it again, or press Back
+  on the remote to pick a different era.
+
+## The era picker
+
+Finishing setup opens the era picker rather than dropping you straight into
+a run. Four cards read left to right as a timeline. Move with **◀ ▶** on the
+Fire TV remote and press **OK**, or — without touching the remote at all —
+step left and right and jump to confirm. A locked card shakes rather than
+silently doing nothing, so it's clear the button worked and the level
+didn't.
+
+Progress (which eras are unlocked, and your best score in each) is stored in
+the TV's `localStorage` under `motionquest_progress`, for the same reason
+the high score is: a Fire TV is a shared family device, so "which eras has
+this household reached" belongs to the telly, not to whoever happened to be
+holding a phone. Different kids on different phones don't reset each other.
+If `localStorage` is unavailable the game still works — progress just lasts
+for the session.
 
 ## The character creator
 
@@ -389,8 +434,14 @@ motion-run/
 ├── package.json
 └── public/
     ├── tv/
-    │   ├── index.html            # TV screen: HUD, pairing/ready/game-over panels
-    │   └── game.js                 # Three.js 3D runner — game loop, obstacles, player, hair/hats
+    │   ├── index.html            # TV screen: HUD, pairing/era-picker/game-over panels
+    │   ├── game.js                 # Three.js 3D runner — game loop, ERAS table, obstacles, player
+    │   ├── art/                    # era card art + key art, cut down from the source artwork
+    │   ├── audio/                  # music loops + effects (MP3; sources were 41MB of WAV)
+    │   ├── audio.js                # music/effects engine — Web Audio for SFX, <audio> for music
+    │   ├── glb-lite.js             # ~100-line GLB loader (see its header for why not GLTFLoader)
+    │   ├── models/                 # the low-poly GLB asset pack
+    │   └── icons/                  # app icons (PWA install / Fire TV package)
     └── play/
         ├── index.html            # phone controller UI (character/join/perm/calibration/play)
         └── controller.js           # character creator, camera pose tracking, accelerometer mode

@@ -10,7 +10,7 @@
      env(safe-area-inset-*) becomes non-zero instead, so the controls below
      pad themselves clear of the notch while the video runs edge to edge. -->
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
-<title>Motion Run — Controller</title>
+<title>MotionQuest — Controller</title>
 <!-- Makes the controller installable to the home screen. Launched from
      there, iOS drops Safari's URL bar and tab bar entirely (that's the rest
      of the screen the camera wasn't getting) — no native app needed. -->
@@ -19,9 +19,9 @@
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<meta name="apple-mobile-web-app-title" content="Motion Run" />
+<meta name="apple-mobile-web-app-title" content="MotionQuest" />
 <link rel="apple-touch-icon" href="../tv/icons/icon-512.png" />
-<link rel="icon" type="image/svg+xml" href="../tv/icons/icon.svg" />
+<link rel="icon" type="image/png" href="../tv/icons/favicon-64.png" />
 <style>
   /* =====================================================================
      2026-09-03 "make it look like a real published game" pass — phone half.
@@ -328,6 +328,12 @@
   #jumpBtn:active { transform: translateY(6px); box-shadow: 0 2px 0 var(--gold-dk); }
   #punchBtn { background: var(--coral); color: #fff; box-shadow: 0 8px 0 var(--coral-dk); }
   #punchBtn:active { transform: translateY(6px); box-shadow: 0 2px 0 var(--coral-dk); }
+  /* Duck (2026-09-04) — the third action button. Cyan so the row reads as
+     three clearly different targets at a glance while running. */
+  #duckBtn { background: var(--cyan); color: #06303A; box-shadow: 0 8px 0 var(--cyan-dk); }
+  #duckBtn:active { transform: translateY(6px); box-shadow: 0 2px 0 var(--cyan-dk); }
+  /* Three buttons need less padding each than two did. */
+  .action-row .action-btn { font-size: 17px; padding-left: 6px; padding-right: 6px; }
   .action-btn .sub { display: block; font-size: 11px; font-weight: 700; opacity: 0.75; margin-top: 3px; }
 
   .bottom-row { display: flex; gap: 10px; margin-top: 10px; flex-shrink: 0; }
@@ -453,7 +459,7 @@
 </head>
 <body>
 <div id="app">
-  <h1>🏃 Motion Run</h1>
+  <h1>🏃 MotionQuest</h1>
   <div class="subtitle" id="subtitle">Your phone is the controller</div>
 
   <!-- 1. Join screen — shown first (2026-09-03 reorder). A player who
@@ -529,8 +535,8 @@
 
   <!-- 3b. Camera permission (motion tracking only) -->
   <div id="permScreen">
-    <p id="permText">Motion Run wants to use your camera to watch your movements.</p>
-    <p class="hint-strong">📱↕️ Stand your phone upright (portrait) before propping it up, so it can see you head to toe.</p>
+    <p id="permText">MotionQuest wants to use your camera to watch your movements.</p>
+    <p class="hint-strong">📱↔️ Turn your phone sideways (landscape) before propping it up, so it can see you head to toe.</p>
     <p>After this, look at your TV — it'll walk you through placing your phone and getting in frame. From then on you'll use your <b>Fire TV remote</b>, not your phone, until setup is done.</p>
     <button class="btn" id="grantCameraBtn">Enable Camera Tracking</button>
     <button class="btn secondary" id="skipCameraBtn">Hold my phone instead</button>
@@ -597,7 +603,8 @@
 
     <div class="action-row">
       <button class="action-btn" id="jumpBtn">⬆ JUMP<span class="sub">clear the hurdles</span></button>
-      <button class="action-btn" id="punchBtn">👊 PUNCH<span class="sub">smash the crates</span></button>
+      <button class="action-btn" id="duckBtn">⬇ DUCK<span class="sub">under low bars</span></button>
+      <button class="action-btn" id="punchBtn">👊 PUNCH<span class="sub">smash what's ahead</span></button>
     </div>
 
     <div class="bottom-row">

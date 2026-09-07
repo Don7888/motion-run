@@ -1,4 +1,4 @@
-// Motion Run — phone controller
+// MotionQuest — phone controller
 //
 // Screen flow (2026-09-03 — reordered so joining comes first): Join (room
 // code, either typed or auto-filled by scanning the TV's QR code) ->
@@ -71,17 +71,39 @@
   // how far back toward center they must return to leave it (EXIT — kept
   // smaller than ENTER so a normal stance reliably re-centers you without
   // needing an exaggerated opposite step).
-  // Deliberately NOT rescaled for the 2026-09-03 switch to a portrait
-  // phone. These are fractions of frame WIDTH, and an upright phone's frame
-  // is narrower, so the same sideways step now covers a bigger fraction of
-  // it — i.e. lane changes need a slightly smaller physical step than they
-  // did in landscape. That's the right direction for a portrait frame,
-  // which has less lateral room to leave before the player exits it. If
-  // lane changes ever feel twitchy on a real device, these are the knob.
-  const LANE_ENTER_FRAC = 0.11;
-  const LANE_EXIT_FRAC = 0.05;
+  // 2026-09-04: back to a LANDSCAPE phone, and unlike the move to portrait
+  // these DO have to be rescaled, because they are fractions of frame WIDTH
+  // and the width is what just changed. A phone sensor is 4:3, so turning it
+  // on its side takes the width from 3 units to 4 — the same physical step
+  // now covers three-quarters of the fraction it did upright. Left as they
+  // were, every lane change would have needed a step a third bigger than
+  // the one the player learned in setup.
+  //   portrait: 0.11 x 3 = 0.33 units  ->  landscape: 0.33 / 4 = 0.083
+  // If lane changes feel twitchy or sluggish on a real device, these two
+  // are the knob to turn.
+  const LANE_ENTER_FRAC = 0.083;
+  const LANE_EXIT_FRAC = 0.038;
   const JUMP_TRIGGER_TORSO_FRAC = 0.28;
   const JUMP_COOLDOWN_MS = 500;
+  // ---- Duck (2026-09-04, the era-levels round) ------------------------
+  // Detected as the mirror image of a jump: the hips DROP below their
+  // resting baseline by a good fraction of torso length. The threshold is
+  // deliberately higher than JUMP_TRIGGER_TORSO_FRAC — a jump lifts the
+  // whole body and is unmistakable, whereas hips dip a little on every
+  // running step, so the bar for "that was deliberate" has to be higher or
+  // the character would duck constantly while the player jogs on the spot.
+  const DUCK_TRIGGER_TORSO_FRAC = 0.34;
+  const DUCK_COOLDOWN_MS = 700;
+  // Landing from a jump drives the hips BELOW baseline for a moment, which
+  // looks exactly like a crouch. Ducks are therefore ignored for a beat
+  // after a jump — slightly longer than JUMP_COOLDOWN_MS, because the dip
+  // happens on touchdown, i.e. at the END of the jump, not the start.
+  const DUCK_AFTER_JUMP_LOCK_MS = 750;
+  // Calibration is more forgiving, for the same reason CAL_PUNCH_* are: a
+  // practice duck during setup carries no risk, and the player needs to
+  // see the move register at all before trusting it mid-run.
+  const CAL_DUCK_TRIGGER_TORSO_FRAC = 0.24;
+  const CAL_DUCK_COOLDOWN_MS = 450;
   // Punch was firing continuously on real-device testing (2026-09-02) —
   // ordinary running arm swing was crossing these thresholds repeatedly.
   // Raised extension/velocity requirements (a punch now needs a clearly
@@ -138,6 +160,9 @@
   const MOTION_VERTICAL_DOMINANCE = 1.05;
   const MOTION_JUMP_COOLDOWN_MS = 500;
   const MOTION_PUNCH_COOLDOWN_MS = 700;
+  // Hold-phone duck — see the sign discussion in onDeviceMotion().
+  const MOTION_DUCK_TRIGGER = 10;
+  const MOTION_DUCK_COOLDOWN_MS = 700;
   // Calibration-only hold-phone punch thresholds — same reasoning as
   // CAL_PUNCH_EXTENSION_FRAC etc. above, just for the accelerometer path.
   // Matches the original pre-tightening values.
@@ -150,15 +175,12 @@
   // off-center counts as bad framing, and how long "good" framing has to
   // be held before we tell the TV it's ready to move on.
   //
-  // 2026-09-03: setup now asks for the phone PORTRAIT (upright) rather than
-  // landscape, so the player's arms and legs get into frame more easily.
-  // The distance thresholds below are therefore measured against the
-  // frame's SHORT side rather than its height: a phone sensor is 4:3, so
-  // the short side is the "3" whichever way up the phone is propped, and
-  // normalising by it keeps these two numbers meaning the same physical
-  // distance in both orientations. Measured against height, standing the
-  // phone up would have made every player read as ~25% further away than
-  // they are, and the TV would have told them to come closer for no reason.
+  // These are measured against the frame's SHORT side, not its height. A
+  // phone sensor is 4:3, so the short side is the "3" whichever way the
+  // phone is propped, and normalising by it keeps these two numbers meaning
+  // the same physical distance in either orientation. That is why the
+  // 2026-09-04 switch back to LANDSCAPE needed no change here, while the
+  // lane thresholds above — which are fractions of WIDTH — did.
   const FRAMING_TOO_CLOSE_FRAC = 0.34; // torso height / frame SHORT side
   const FRAMING_TOO_FAR_FRAC = 0.15;
   const FRAMING_OFFCENTER_FRAC = 0.28; // |hip x offset| / frame width
@@ -238,6 +260,7 @@
   const playSensorSlot = document.getElementById('playSensorSlot');
   const jumpBtn = document.getElementById('jumpBtn');
   const punchBtn = document.getElementById('punchBtn');
+  const duckBtn = document.getElementById('duckBtn');
   const startRunBtn = document.getElementById('startRunBtn');
   const laneLeftBtn = document.getElementById('laneLeftBtn');
   const laneCentreBtn = document.getElementById('laneCentreBtn');
@@ -542,7 +565,7 @@
   // The step-by-step walkthrough itself lives on the TV (see tv/game.js) —
   // this screen just detects each move (same detectors as real play, routed
   // through calHandlers below) and tells the TV which one just happened.
-  const calState = { left: false, right: false, jump: false, punch: false };
+  const calState = { left: false, right: false, jump: false, duck: false, punch: false };
 
   // 2026-09-03 fix ("the 4-stage setup never asks for a punch"). All four
   // detectors run at once during calibration, so before this change a stray
@@ -672,6 +695,7 @@
   // =========================================================================
   let lastJumpTime = 0;
   let lastPunchTime = 0;
+  let lastDuckTime = 0;
   let lastActionTime = 0;
 
   function fireJump(opts) {
@@ -681,6 +705,16 @@
     sendInput('jump', undefined, opts);
     pulseAction(jumpBtn);
     if (navigator.vibrate) navigator.vibrate(30);
+  }
+  function fireDuck(opts) {
+    const now = performance.now();
+    lastDuckTime = now;
+    lastActionTime = now;
+    sendInput('duck', undefined, opts);
+    pulseAction(duckBtn);
+    // A short double buzz, distinct from jump's single pulse, so the two
+    // are tellable apart by feel when the phone is in a pocket.
+    if (navigator.vibrate) navigator.vibrate([15, 25, 15]);
   }
   function firePunch(opts) {
     const now = performance.now();
@@ -694,6 +728,7 @@
   // see sendInput()'s comment above.
   jumpBtn.addEventListener('click', () => fireJump({ explicit: true }));
   punchBtn.addEventListener('click', () => firePunch({ explicit: true }));
+  duckBtn.addEventListener('click', () => fireDuck({ explicit: true }));
 
   // Pause/Exit — a manual, always-reliable path to the same pause/exit
   // functionality the Fire TV remote's Back button also drives on the TV
@@ -719,6 +754,7 @@
     // same as a button tap for real gameplay jumps/punches.
     jump: () => fireJump(),
     punch: () => firePunch(),
+    duck: () => fireDuck(),
   };
   const calHandlers = {
     lane: (dir) => markCalDone(dir < 0 ? 'left' : 'right'),
@@ -728,6 +764,7 @@
     },
     jump: () => markCalDone('jump'),
     punch: () => markCalDone('punch'),
+    duck: () => markCalDone('duck'),
   };
   let actionHandlers = calHandlers;
 
@@ -1004,15 +1041,32 @@
       actionHandlers.laneZone(cameraLaneZone);
     }
 
-    // Jump (hips rise)
+    // Jump (hips rise) and duck (hips drop) share one baseline, because
+    // they are the same measurement in opposite directions. Screen y grows
+    // downward, so `rise` is positive when the player goes UP and `drop`
+    // is positive when they go DOWN.
     if (poseHipYBaseline === null) poseHipYBaseline = hipMid.y;
     const rise = poseHipYBaseline - hipMid.y;
+    const drop = hipMid.y - poseHipYBaseline;
     const now = performance.now();
+    const inCalibration = actionHandlers === calHandlers;
+    const duckTrigger = (inCalibration ? CAL_DUCK_TRIGGER_TORSO_FRAC : DUCK_TRIGGER_TORSO_FRAC) * torsoScale;
+    const duckCooldown = inCalibration ? CAL_DUCK_COOLDOWN_MS : DUCK_COOLDOWN_MS;
     if (rise > JUMP_TRIGGER_TORSO_FRAC * torsoScale && now - lastJumpTime > JUMP_COOLDOWN_MS && now - lastActionTime > CROSS_TALK_LOCK_MS) {
       lastJumpTime = now;
       lastActionTime = now;
       actionHandlers.jump();
-    } else if (now - lastJumpTime > JUMP_COOLDOWN_MS) {
+    } else if (drop > duckTrigger
+        && now - lastDuckTime > duckCooldown
+        && now - lastJumpTime > DUCK_AFTER_JUMP_LOCK_MS
+        && now - lastActionTime > CROSS_TALK_LOCK_MS) {
+      lastDuckTime = now;
+      lastActionTime = now;
+      actionHandlers.duck();
+    } else if (now - lastJumpTime > JUMP_COOLDOWN_MS && now - lastDuckTime > duckCooldown) {
+      // The baseline only re-settles when neither move is in progress —
+      // otherwise a held crouch would drag the baseline down with it and
+      // the player would have to duck further and further each time.
       poseHipYBaseline = poseHipYBaseline * 0.94 + hipMid.y * 0.06;
     }
 
@@ -1341,6 +1395,26 @@
         actionHandlers.jump();
         return;
       }
+    }
+    // Duck, hold-phone mode (2026-09-04). A jump and a duck are both
+    // vertical-dominant, so magnitude alone can't tell them apart — the
+    // SIGN is what separates them. `ay` is acceleration along the phone's
+    // long axis with gravity removed, so a sharp negative spike is the
+    // phone being driven downward: the player dropping into a crouch.
+    // Held to a lower trigger than a jump because crouching with a phone
+    // in hand is a gentler movement than leaving the ground.
+    //
+    // Caveat, same as every other threshold in this file: these numbers
+    // have not been validated against real handset accelerometer data, and
+    // hold-phone mode is the secondary control scheme. Camera mode above
+    // is the one to trust, and the on-screen DUCK button is always exact.
+    if (ay < -MOTION_DUCK_TRIGGER
+        && looksVertical
+        && now - lastDuckTime > MOTION_DUCK_COOLDOWN_MS
+        && now - lastJumpTime > DUCK_AFTER_JUMP_LOCK_MS) {
+      lastDuckTime = now; lastActionTime = now;
+      actionHandlers.duck();
+      return;
     }
     // Calibration practice punches use the original, more forgiving
     // trigger/cooldown — see the CAL_PUNCH_*/CAL_MOTION_PUNCH_* comments

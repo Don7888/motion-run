@@ -1,4 +1,4 @@
-// Motion Run — relay server (zero external dependencies)
+// MotionQuest — relay server (zero external dependencies)
 //
 // Serves two web pages:
 //   /tv    — the big-screen 3D runner game (open this on the Fire TV browser)
@@ -343,12 +343,12 @@ wss.on('connection', (ws) => {
 
 server.listen(PORT, () => {
   if (ON_RENDER) {
-    console.log(`Motion Run server listening on plain HTTP :${PORT} (Render terminates TLS)`);
+    console.log(`MotionQuest server listening on plain HTTP :${PORT} (Render terminates TLS)`);
     console.log('  Open the Render-assigned https://...onrender.com URL, then /tv and /play.');
   } else {
     const ips = selfsigned.lanAddresses();
     console.log('');
-    console.log('  Motion Run is running on your network.');
+    console.log('  MotionQuest is running on your network.');
     console.log('');
     if (ips.length === 0) {
       console.log('  No LAN address found — is this machine on WiFi/ethernet?');

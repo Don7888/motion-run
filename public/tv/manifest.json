@@ -1,17 +1,31 @@
 {
-  "name": "Motion Run",
-  "short_name": "Motion Run",
-  "description": "Move to run, jump, and punch through a 3D runner - controlled by your phone.",
+  "name": "MotionQuest",
+  "short_name": "MotionQuest",
+  "description": "Move Through Time - run, jump, duck and punch through four eras, controlled by your phone.",
   "start_url": "./",
   "scope": "./",
   "display": "fullscreen",
   "orientation": "landscape",
-  "background_color": "#0b1220",
-  "theme_color": "#0b1220",
+  "background_color": "#0B1046",
+  "theme_color": "#0B1046",
   "icons": [
-    { "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
-    { "src": "icons/icon-maskable.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" },
-    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
-    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
   ]
 }

@@ -1,7 +1,7 @@
 {
-  "name": "motion-run",
+  "name": "motionquest",
   "version": "0.1.0",
-  "description": "Phone-controlled 3D movement runner for Fire TV (Danny-Go style prototype)",
+  "description": "MotionQuest - Move Through Time. Phone-controlled 3D movement game for the TV.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"

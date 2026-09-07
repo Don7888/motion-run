@@ -1,10 +1,12 @@
-// Motion Run — TV game (Three.js third-person runner)
+// MotionQuest — TV game (Three.js third-person runner)
 //
 // Player is controlled entirely by messages relayed from the phone
 // controller over WebSocket: {type:'input', action:'lane', value:-1|1},
 // {type:'input', action:'jump'}, {type:'input', action:'punch'}.
 
 import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+import { loadModel } from './glb-lite.js';
+import * as audio from './audio.js';
 
 // ---------------------------------------------------------------------
 // Constants / tuning
@@ -91,7 +93,27 @@ const PUNCH_SNAP_FRAC = 0.3;    // fraction spent snapping forward (with oversho
 const PUNCH_WINDUP_PULL = 0.85; // radians the arm pulls back before throwing the punch
 const PUNCH_MAX_EXTEND = -2.95; // radians of forward extension at full reach (~169°) — big and cartoonish
 
-const OBSTACLE_TYPES = ['hurdle', 'crate', 'wall'];
+const OBSTACLE_TYPES = ['hurdle', 'crate', 'wall', 'lowbar'];
+
+// ---- Ducking (2026-09-04) -------------------------------------------
+// The fourth move, added with the era levels — the key art's "DUCK UNDER
+// OBSTACLES". A duck is a timed window rather than a held pose: the phone
+// reports a crouch once (see detectDuck() in play/controller.js) and the
+// character stays low for DUCK_DURATION. Held poses are miserable over a
+// network — a dropped "stood back up" packet would leave the character
+// crouching forever — whereas a fixed window always resolves itself.
+//
+// The window is a touch longer than the punch window because a crouch is a
+// slower movement to make than a jab, and the player is reacting to
+// something coming at them at speed.
+// 0.7s, not the 0.55 first tried: at full speed an obstacle is inside the
+// collision zone for under a tenth of a second, so the window is really a
+// budget for how far out the player's timing can be. Half a second of slack
+// either side is about right for a child reacting to an on-screen cue.
+const DUCK_DURATION = 0.7;    // seconds the character stays low (gameplay window)
+const DUCK_SCALE_Y = 0.52;    // how far the body compresses at full crouch
+const DUCK_IN_FRAC = 0.22;    // fraction of the window spent dropping down
+const DUCK_OUT_FRAC = 0.3;    // fraction spent standing back up
 
 // On-screen action prompt (added 2026-09-02, "prompt telling the player
 // when to punch/jump so they can time it" feedback) — see
@@ -100,6 +122,7 @@ const ACTION_PROMPT_META = {
   hurdle: { icon: '⬆️', text: 'JUMP!' },
   crate: { icon: '👊', text: 'PUNCH!' },
   wall: { icon: '↔️', text: 'MOVE!' },
+  lowbar: { icon: '⬇️', text: 'DUCK!' },
 };
 const PROMPT_LEAD_TIME = 0.85; // seconds of warning shown before the obstacle reaches the collision zone
 
@@ -142,22 +165,29 @@ const scene = new THREE.Scene();
 // real atmosphere. Fog color is sampled from the gradient's horizon band
 // so distant obstacles/scenery fade into the sky instead of into a
 // mismatched flat tone.
-function makeSkyTexture() {
+// 2026-09-04 MotionQuest: parameterised so each era can supply its own sky.
+// `stops` is four colours from zenith to horizon; `glow` is the colour of
+// the soft light bloom near the horizon (a sun for daylight eras, a neon
+// haze for the future city, a volcanic glare for the dinosaur valley).
+const DEFAULT_SKY = ['#2f6fd8', '#6fb3ea', '#bfe3f5', '#e9f6ea'];
+function makeSkyTexture(stops, glow) {
+  const s = stops || DEFAULT_SKY;
   const c = document.createElement('canvas');
   c.width = 2; c.height = 512;
   const ctx = c.getContext('2d');
   const grad = ctx.createLinearGradient(0, 0, 0, 512);
-  grad.addColorStop(0, '#2f6fd8');
-  grad.addColorStop(0.45, '#6fb3ea');
-  grad.addColorStop(0.72, '#bfe3f5');
-  grad.addColorStop(1, '#e9f6ea');
+  grad.addColorStop(0, s[0]);
+  grad.addColorStop(0.45, s[1]);
+  grad.addColorStop(0.72, s[2]);
+  grad.addColorStop(1, s[3]);
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, 2, 512);
   // Soft sun glow near the horizon, off to one side, matching the
   // directional "sun" light's rough position below.
+  const glowColor = glow || 'rgba(255,250,225,0.9)';
   const sun = ctx.createRadialGradient(1.4, 300, 0, 1.4, 300, 220);
-  sun.addColorStop(0, 'rgba(255,250,225,0.9)');
-  sun.addColorStop(1, 'rgba(255,250,225,0)');
+  sun.addColorStop(0, glowColor);
+  sun.addColorStop(1, glowColor.replace(/[\d.]+\)$/, '0)'));
   ctx.fillStyle = sun;
   ctx.fillRect(0, 0, 2, 512);
   const tex = new THREE.CanvasTexture(c);
@@ -198,7 +228,11 @@ window.addEventListener('resize', () => {
 //   2. The sun sat at +z — in FRONT of the character, i.e. lighting the one
 //      side the player never sees. The camera is behind the runner, so it
 //      now sits behind and above, lighting the faces actually on screen.
-scene.add(new THREE.HemisphereLight(0xd6ecff, 0x6b7a8c, 0.6));
+// Named (2026-09-04) so applyEra() can retune all three lights per era —
+// the dinosaur valley is lit by a low volcanic sun, the neon city barely at
+// all. Lighting does more than palette to make an era feel different.
+const hemiLight = new THREE.HemisphereLight(0xd6ecff, 0x6b7a8c, 0.6);
+scene.add(hemiLight);
 const sun = new THREE.DirectionalLight(0xfff6e2, 1.35);
 sun.position.set(-5, 8, -11);
 scene.add(sun);
@@ -209,7 +243,18 @@ scene.add(rimLight);
 // ---------------------------------------------------------------------
 // Ground (scrolling texture, no geometry recycling needed)
 // ---------------------------------------------------------------------
-function makeRoadTexture() {
+// 2026-09-04 MotionQuest: `pal` lets each era repaint the ground without
+// changing the banding logic, which is what sells the sense of speed.
+//   verge  two alternating tones for the ground either side of the track
+//   kerb   the strip separating verge from track
+//   path   two alternating tones for the track itself
+//   dash   the lane markings (set to null for eras with no road markings)
+const DEFAULT_GROUND = {
+  verge: ['#6cbe4a', '#63b243'], kerb: '#d8dbe0',
+  path: ['#585c6b', '#545867'], dash: '#f2f4f8',
+};
+function makeRoadTexture(pal) {
+  const p = pal || DEFAULT_GROUND;
   const c = document.createElement('canvas');
   c.width = 256; c.height = 512;
   const ctx = c.getContext('2d');
@@ -222,23 +267,34 @@ function makeRoadTexture() {
   // is free extra sense of speed.
   const BAND = 64;
   for (let y = 0; y < 512; y += BAND) {
-    ctx.fillStyle = (y / BAND) % 2 === 0 ? '#6cbe4a' : '#63b243';
+    ctx.fillStyle = (y / BAND) % 2 === 0 ? p.verge[0] : p.verge[1];
     ctx.fillRect(0, y, 256, BAND);
   }
   // Kerb strip either side of the path.
-  ctx.fillStyle = '#d8dbe0';
+  ctx.fillStyle = p.kerb;
   ctx.fillRect(42, 0, 6, 512);
   ctx.fillRect(208, 0, 6, 512);
   // Path: one flat tone, banded the same way so it scrolls with the grass.
   for (let y = 0; y < 512; y += BAND) {
-    ctx.fillStyle = (y / BAND) % 2 === 0 ? '#585c6b' : '#545867';
+    ctx.fillStyle = (y / BAND) % 2 === 0 ? p.path[0] : p.path[1];
     ctx.fillRect(48, y, 160, BAND);
   }
-  // Crisp lane dashes.
-  ctx.fillStyle = '#f2f4f8';
-  for (let y = 8; y < 512; y += 56) {
-    ctx.fillRect(128 - 56, y, 7, 30);
-    ctx.fillRect(128 + 49, y, 7, 30);
+  // Crisp lane dashes. Some eras (paved Rome, the primeval valley) have no
+  // painted lane markings, so `dash: null` skips them entirely.
+  if (p.dash) {
+    ctx.fillStyle = p.dash;
+    for (let y = 8; y < 512; y += 56) {
+      ctx.fillRect(128 - 56, y, 7, 30);
+      ctx.fillRect(128 + 49, y, 7, 30);
+    }
+  }
+  // Optional paving grid — Rome's flagstones and the future city's tile
+  // seams both read as "constructed surface" rather than open road.
+  if (p.slabs) {
+    ctx.strokeStyle = p.slabs;
+    ctx.lineWidth = 2;
+    for (let y = 0; y <= 512; y += 32) { ctx.beginPath(); ctx.moveTo(48, y); ctx.lineTo(208, y); ctx.stroke(); }
+    for (let x = 48; x <= 208; x += 40) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, 512); ctx.stroke(); }
   }
   const tex = new THREE.CanvasTexture(c);
   // Canvas pixels are sRGB. Without this three treats them as linear and
@@ -250,7 +306,7 @@ function makeRoadTexture() {
   tex.repeat.set(1, 60);
   return tex;
 }
-const roadTexture = makeRoadTexture();
+let roadTexture = makeRoadTexture();
 const ground = new THREE.Mesh(
   new THREE.PlaneGeometry(14, 500),
   new THREE.MeshLambertMaterial({ map: roadTexture })
@@ -567,15 +623,195 @@ function makeRock() {
   }
   return g;
 }
-const SCENERY_MAKERS = [makeTree, makeTree, makeTree, makeBush, makeRock];
-for (let i = 0; i < 26; i++) {
-  const make = SCENERY_MAKERS[Math.floor(Math.random() * SCENERY_MAKERS.length)];
-  const t = make();
-  const side = i % 2 === 0 ? -1 : 1;
-  t.position.set(side * (5.5 + Math.random() * 3.5), 0, -i * 7.5 - Math.random() * 6);
-  scene.add(t);
-  sceneryPool.push(t);
+// ---- Era-specific scenery (2026-09-04 MotionQuest) -------------------
+// Same rule as everything else: axis-aligned boxes only. What separates a
+// cypress from a palm from a neon tower is proportion and colour, not
+// geometry — which is exactly why four visually distinct eras cost almost
+// nothing extra to draw.
+
+// Primeval valley: tall bare-trunked tree ferns with a wide frond crown.
+function makePalm() {
+  const g = new THREE.Group();
+  const scale = 0.9 + Math.random() * 0.5;
+  const trunk = boxMesh(0.3, 2.6 * scale, 0.3, jitterColor(0x7a5a3a, 0.08));
+  trunk.position.y = 1.3 * scale;
+  g.add(trunk);
+  // Fronds splayed from the crown. Each is a long slab hung off a pivot at
+  // the trunk top, so rotating the pivot swings the whole frond outward and
+  // down — rotating the slab itself would spin it about its own middle and
+  // give you a propeller, which is exactly what the first attempt looked
+  // like. Five, not four, so the crown never reads as a flat cross when
+  // seen from directly behind.
+  const crownY = 2.6 * scale;
+  for (let i = 0; i < 5; i++) {
+    const pivot = new THREE.Group();
+    pivot.position.y = crownY;
+    pivot.rotation.y = (i / 5) * Math.PI * 2 + Math.random() * 0.2;
+    pivot.rotation.z = -0.42 - Math.random() * 0.18; // droop
+    const frond = boxMesh(1.5, 0.14, 0.44, jitterColor(0x3f9c52, 0.12));
+    frond.position.x = 0.75; // hangs out from the pivot, not centred on it
+    pivot.add(frond);
+    g.add(pivot);
+  }
+  // A stubby cluster at the very top hides the join where the fronds meet.
+  const crown = boxMesh(0.42, 0.3, 0.42, 0x4f7a3a);
+  crown.position.y = crownY + 0.08;
+  g.add(crown);
+  return g;
 }
+// A fern clump — low, wide, and a colder green than the canopy above.
+function makeFern() {
+  const g = new THREE.Group();
+  for (let i = 0; i < 3; i++) {
+    const blade = boxMesh(0.24, 0.9 + Math.random() * 0.5, 0.24, jitterColor(0x2f7d45, 0.12));
+    blade.position.set((Math.random() - 0.5) * 0.7, 0.5, (Math.random() - 0.5) * 0.5);
+    blade.rotation.z = (Math.random() - 0.5) * 0.5;
+    g.add(blade);
+  }
+  return g;
+}
+// Bones sticking out of the ground — cheap, and instantly says "dinosaur".
+function makeBones() {
+  const m = modelInstance('dinosaur_bone');
+  if (m) { m.rotation.y = Math.random() * Math.PI; return m; }
+  const g = new THREE.Group();
+  const n = 3 + Math.floor(Math.random() * 3);
+  for (let i = 0; i < n; i++) {
+    const rib = boxMesh(0.14, 0.9 + Math.random() * 0.6, 0.14, 0xe8e2d0);
+    rib.position.set(-0.5 + i * 0.28, 0.5, (Math.random() - 0.5) * 0.3);
+    rib.rotation.z = 0.3 + Math.random() * 0.2;
+    g.add(rib);
+  }
+  return g;
+}
+
+// Ancient Rome: cypress trees — narrow, very tall, near-black green.
+function makeCypress() {
+  const g = new THREE.Group();
+  const scale = 1.0 + Math.random() * 0.5;
+  const trunk = boxMesh(0.22, 0.5, 0.22, 0x6b4a30);
+  trunk.position.y = 0.25;
+  const body = boxMesh(0.85, 3.2 * scale, 0.85, jitterColor(0x2c5e37, 0.08));
+  body.position.y = 0.5 + 1.6 * scale;
+  const tip = boxMesh(0.5, 0.7 * scale, 0.5, jitterColor(0x336b3f, 0.08));
+  tip.position.y = 0.5 + 3.2 * scale + 0.35 * scale;
+  g.add(trunk, body, tip);
+  return g;
+}
+// A fluted marble column, sometimes broken off partway up.
+function makeColumn() {
+  const m = modelInstance('roman_column');
+  if (m) { m.scale.multiplyScalar(0.9 + Math.random() * 0.5); return m; }
+  const g = new THREE.Group();
+  const broken = Math.random() < 0.3;
+  const h = broken ? 1.4 + Math.random() * 0.8 : 3.4 + Math.random() * 0.8;
+  const base = boxMesh(0.9, 0.22, 0.9, 0xdcd3bd);
+  base.position.y = 0.11;
+  const shaft = boxMesh(0.62, h, 0.62, jitterColor(0xeee6d2, 0.04));
+  shaft.position.y = 0.22 + h / 2;
+  g.add(base, shaft);
+  if (!broken) {
+    const cap = boxMesh(0.9, 0.26, 0.9, 0xdcd3bd);
+    cap.position.y = 0.22 + h + 0.13;
+    g.add(cap);
+  }
+  return g;
+}
+// The red-and-gold banner from the key art, hanging from a pole.
+// The pack's arch is a better roadside landmark than a banner pole, so Rome
+// alternates the two: an arch where a model is available, the banner
+// otherwise. Both together read as a street rather than a colonnade.
+function makeArchOrBanner() {
+  const m = modelInstance('roman_arch');
+  if (m) { m.rotation.y = (Math.random() - 0.5) * 0.4; return m; }
+  return makeBanner();
+}
+function makeBanner() {
+  const g = new THREE.Group();
+  const pole = boxMesh(0.14, 3.6, 0.14, 0x8a6a3a);
+  pole.position.y = 1.8;
+  const cloth = boxMesh(0.9, 1.7, 0.08, 0xa8202a);
+  cloth.position.set(0.45, 2.5, 0);
+  const laurel = boxMesh(0.34, 0.34, 0.1, 0xd9b04a);
+  laurel.position.set(0.45, 2.7, 0.06);
+  g.add(pole, cloth, laurel);
+  return g;
+}
+
+// Future city: neon towers of stacked slabs with lit window bands.
+function makeTower() {
+  const g = new THREE.Group();
+  const h = 6 + Math.random() * 12;
+  const w = 1.6 + Math.random() * 1.4;
+  const body = boxMesh(w, h, w, 0x1b2340);
+  body.position.y = h / 2;
+  g.add(body);
+  // Emissive window bands — MeshBasicMaterial so they glow flatly at full
+  // brightness regardless of the scene lighting, which is what reads as
+  // "lit from inside" rather than "a pale stripe".
+  const neon = [0x36e0ff, 0xff4fd8, 0x9b6bff][Math.floor(Math.random() * 3)];
+  const bandCount = Math.floor(h / 1.8);
+  for (let i = 0; i < bandCount; i++) {
+    const band = new THREE.Mesh(
+      new THREE.BoxGeometry(w * 1.02, 0.16, w * 1.02),
+      new THREE.MeshBasicMaterial({ color: neon })
+    );
+    band.position.y = 1.2 + i * 1.8;
+    g.add(band);
+  }
+  return g;
+}
+// A short holographic advert pylon at ground level.
+function makeHoloSign() {
+  // Half the future's "signs" are now the pack's drone, hung in the air
+  // where a flying machine belongs — the key art has them above the street.
+  if (Math.random() < 0.5) {
+    const d = modelInstance('future_drone');
+    if (d) {
+      d.position.y = 3.2 + Math.random() * 2.2;
+      d.rotation.y = (Math.random() - 0.5) * 0.6;
+      return d;
+    }
+  }
+  const g = new THREE.Group();
+  const post = boxMesh(0.16, 2.2, 0.16, 0x2a3350);
+  post.position.y = 1.1;
+  const neon = [0x36e0ff, 0xff4fd8, 0xffe14f][Math.floor(Math.random() * 3)];
+  const panel = new THREE.Mesh(
+    new THREE.BoxGeometry(1.3, 0.9, 0.08),
+    new THREE.MeshBasicMaterial({ color: neon, transparent: true, opacity: 0.75 })
+  );
+  panel.position.y = 2.5;
+  g.add(post, panel);
+  return g;
+}
+
+const SCENERY_MAKERS = {
+  tree: makeTree, bush: makeBush, rock: makeRock,
+  palm: makePalm, fern: makeFern, bones: makeBones,
+  cypress: makeCypress, column: makeColumn, banner: makeArchOrBanner,
+  tower: makeTower, holo: makeHoloSign,
+};
+
+// Rebuilds the roadside scenery for an era. Old props are removed and their
+// geometry/materials disposed — without that, switching eras a few times
+// would leak GPU memory on a device that has very little of it.
+function buildScenery(names) {
+  while (sceneryPool.length) {
+    const prop = sceneryPool.pop();
+    scene.remove(prop);
+    prop.traverse((n) => { n.geometry?.dispose(); n.material?.dispose(); });
+  }
+  for (let i = 0; i < 26; i++) {
+    const make = SCENERY_MAKERS[names[Math.floor(Math.random() * names.length)]] || makeTree;
+    const t = make();
+    const side = i % 2 === 0 ? -1 : 1;
+    t.position.set(side * (5.5 + Math.random() * 3.5), 0, -i * 7.5 - Math.random() * 6);
+    scene.add(t);
+    sceneryPool.push(t);
+  }
+}
+buildScenery(['tree', 'tree', 'tree', 'bush', 'rock']);
 
 // ---------------------------------------------------------------------
 // Obstacles
@@ -658,30 +894,343 @@ const crateTexture = makeCrateTexture();
 const hazardTexture = makeHazardTexture();
 const brickTexture = makeBrickTexture();
 
-function buildObstacleMesh(type) {
-  if (type === 'hurdle') {
-    const g = new THREE.Group();
-    const bar = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.18, 0.18), new THREE.MeshLambertMaterial({ map: hazardTexture }));
-    bar.position.y = 0.55;
-    const legA = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.55, 0.1), new THREE.MeshLambertMaterial({ color: 0xd98a00 }));
-    legA.position.set(-0.65, 0.275, 0);
-    const legB = legA.clone(); legB.position.x = 0.65;
-    g.add(bar, legA, legB);
-    return g;
-  }
-  if (type === 'crate') {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(1.3, 1.1, 1.0), new THREE.MeshLambertMaterial({ map: crateTexture }));
-    m.position.y = 0.55;
-    return m;
-  }
-  // wall
+// =====================================================================
+// Obstacle shapes, per era (2026-09-04 MotionQuest)
+//
+// Four obstacle types, each tied to one move the player has to make:
+//   hurdle  JUMP    crate   PUNCH    wall  MOVE (dodge)    lowbar  DUCK
+//
+// Every era supplies its own mesh for all four. The GAMEPLAY is identical
+// across eras — same lanes, same collision box, same timing — so a player
+// who has learned Present Day can read a Roman street immediately. Only
+// the costume changes. That is deliberate: a runner that changed its rules
+// per level would be teaching four games instead of one.
+//
+// LOW BAR GEOMETRY (the new duck obstacle): the beam sits with its
+// underside at y=1.35 and its top around y=2.6. A standing player is about
+// 2.0 tall, so they walk straight into it; ducking (see DUCK_HEIGHT in
+// updatePlaying) drops them under it. Jumping does NOT save you — it puts
+// your head squarely into the beam, which is the point of having a move
+// that isn't "jump".
+// =====================================================================
+const LOWBAR_UNDERSIDE = 1.35;
+
+// --- Present Day -----------------------------------------------------
+function obPresentHurdle() {
+  const g = new THREE.Group();
+  const bar = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.18, 0.18), new THREE.MeshLambertMaterial({ map: hazardTexture }));
+  bar.position.y = 0.55;
+  const legA = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.55, 0.1), new THREE.MeshLambertMaterial({ color: 0xd98a00 }));
+  legA.position.set(-0.65, 0.275, 0);
+  const legB = legA.clone(); legB.position.x = 0.65;
+  g.add(bar, legA, legB);
+  return g;
+}
+function obPresentCrate() {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(1.3, 1.1, 1.0), new THREE.MeshLambertMaterial({ map: crateTexture }));
+  m.position.y = 0.55;
+  return m;
+}
+function obPresentWall() {
   const m = new THREE.Mesh(new THREE.BoxGeometry(1.8, 2.6, 0.6), new THREE.MeshLambertMaterial({ map: brickTexture }));
   m.position.y = 1.3;
   return m;
 }
+function obPresentLowbar() {
+  return modelOr('duck_barrier', obPresentLowbarBoxes);
+}
+function obPresentLowbarBoxes() {
+  const g = new THREE.Group();
+  const beam = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.34, 0.3), new THREE.MeshLambertMaterial({ map: hazardTexture }));
+  beam.position.y = LOWBAR_UNDERSIDE + 0.17;
+  const postA = boxMesh(0.16, LOWBAR_UNDERSIDE + 0.34, 0.16, 0x8c9099);
+  postA.position.set(-0.95, (LOWBAR_UNDERSIDE + 0.34) / 2, 0);
+  const postB = postA.clone(); postB.position.x = 0.95;
+  g.add(beam, postA, postB);
+  return g;
+}
+
+// --- Primeval Valley (dinosaurs) -------------------------------------
+function obDinoHurdle() {
+  const g = new THREE.Group();
+  const log = boxMesh(2.0, 0.5, 0.5, 0x6b4a2f);
+  log.position.y = 0.28;
+  const knot = boxMesh(0.3, 0.3, 0.56, 0x54381f);
+  knot.position.set(0.35, 0.3, 0);
+  const moss = boxMesh(1.9, 0.1, 0.52, 0x4c8f45);
+  moss.position.y = 0.53;
+  g.add(log, knot, moss);
+  return g;
+}
+function obDinoCrate() {
+  // Punching a small T-rex beats punching a nest of eggs, and the pack has
+  // one. Eggs remain the fallback.
+  return modelOr('dinosaur_trex', obDinoCrateBoxes);
+}
+function obDinoCrateBoxes() {
+  const g = new THREE.Group();
+  const nest = boxMesh(1.35, 0.34, 1.05, 0x7a5c34);
+  nest.position.y = 0.17;
+  g.add(nest);
+  for (let i = 0; i < 3; i++) {
+    const egg = boxMesh(0.36, 0.5, 0.36, 0xf0e4c8);
+    egg.position.set(-0.36 + i * 0.36, 0.55, (i % 2) * 0.16 - 0.08);
+    g.add(egg);
+  }
+  return g;
+}
+function obDinoWall() {
+  const g = new THREE.Group();
+  const rock = boxMesh(1.8, 2.4, 0.7, 0x6f6659);
+  rock.position.y = 1.2;
+  const cap = boxMesh(1.4, 0.5, 0.6, 0x827868);
+  cap.position.y = 2.55;
+  g.add(rock, cap);
+  return g;
+}
+function obDinoLowbar() {
+  return modelOr('duck_barrier', obDinoLowbarBoxes);
+}
+function obDinoLowbarBoxes() {
+  // A fallen branch slung across the trail with vines hanging off it.
+  const g = new THREE.Group();
+  const branch = boxMesh(2.2, 0.32, 0.32, 0x5e4128);
+  branch.position.y = LOWBAR_UNDERSIDE + 0.16;
+  g.add(branch);
+  for (let i = 0; i < 5; i++) {
+    const vine = boxMesh(0.1, 0.5 + Math.random() * 0.45, 0.1, 0x3f8c4a);
+    vine.position.set(-0.85 + i * 0.42, LOWBAR_UNDERSIDE + 0.3 + 0.28, 0);
+    g.add(vine);
+  }
+  const trunkA = boxMesh(0.26, LOWBAR_UNDERSIDE + 0.32, 0.26, 0x6b4a2f);
+  trunkA.position.set(-1.05, (LOWBAR_UNDERSIDE + 0.32) / 2, 0);
+  const trunkB = trunkA.clone(); trunkB.position.x = 1.05;
+  g.add(trunkA, trunkB);
+  return g;
+}
+
+// --- Ancient Rome ----------------------------------------------------
+function obRomeHurdle() {
+  const g = new THREE.Group();
+  const step = boxMesh(1.9, 0.5, 0.7, 0xe3dac2);
+  step.position.y = 0.25;
+  const top = boxMesh(2.0, 0.12, 0.8, 0xf2ead8);
+  top.position.y = 0.56;
+  g.add(step, top);
+  return g;
+}
+function obRomeCrate() {
+  // "PUNCH ROMANS", straight off the key art. Don's roman_soldier model is
+  // this exact thing and carries far more shape than the boxes below, which
+  // stay as the fallback if the model can't be loaded.
+  return modelOr('roman_soldier', obRomeCrateBoxes);
+}
+function obRomeCrateBoxes() {
+  const g = new THREE.Group();
+  const legs = boxMesh(0.5, 0.5, 0.34, 0x8a6a4a);
+  legs.position.y = 0.25;
+  const skirt = boxMesh(0.68, 0.34, 0.42, 0xa8202a);
+  skirt.position.y = 0.66;
+  const torso = boxMesh(0.72, 0.6, 0.46, 0x9aa3ad);
+  torso.position.y = 1.12;
+  const head = boxMesh(0.46, 0.44, 0.44, 0xffc08a);
+  head.position.y = 1.62;
+  const helmet = boxMesh(0.54, 0.3, 0.52, 0x8f98a3);
+  helmet.position.y = 1.82;
+  const crest = boxMesh(0.12, 0.26, 0.54, 0xc9303a);
+  crest.position.y = 2.06;
+  const shield = boxMesh(0.14, 0.9, 0.6, 0xa8202a);
+  shield.position.set(-0.44, 1.0, 0.12);
+  const boss = boxMesh(0.06, 0.26, 0.26, 0xd9b04a);
+  boss.position.set(-0.52, 1.0, 0.12);
+  g.add(legs, skirt, torso, head, helmet, crest, shield, boss);
+  return g;
+}
+function obRomeWall() {
+  // The "AVOID PILLARS" panel.
+  return modelOr('roman_column', obRomeWallBoxes);
+}
+function obRomeWallBoxes() {
+  const g = new THREE.Group();
+  const base = boxMesh(1.5, 0.3, 1.0, 0xd8cfb6);
+  base.position.y = 0.15;
+  const shaft = boxMesh(1.1, 2.2, 0.8, 0xefe7d4);
+  shaft.position.y = 1.4;
+  const cap = boxMesh(1.5, 0.32, 1.0, 0xd8cfb6);
+  cap.position.y = 2.66;
+  g.add(base, shaft, cap);
+  return g;
+}
+function obRomeLowbar() {
+  return modelOr('duck_barrier', obRomeLowbarBoxes);
+}
+function obRomeLowbarBoxes() {
+  // The rope-slung timber with a red SPQR banner from the art.
+  const g = new THREE.Group();
+  const beam = boxMesh(2.3, 0.3, 0.34, 0x7a5a35);
+  beam.position.y = LOWBAR_UNDERSIDE + 0.15;
+  const cloth = boxMesh(1.5, 0.62, 0.08, 0xa8202a);
+  cloth.position.set(0, LOWBAR_UNDERSIDE + 0.62, 0.2);
+  const laurel = boxMesh(0.3, 0.3, 0.1, 0xd9b04a);
+  laurel.position.set(0, LOWBAR_UNDERSIDE + 0.62, 0.26);
+  const postA = boxMesh(0.22, LOWBAR_UNDERSIDE + 0.3, 0.22, 0x8a6a3a);
+  postA.position.set(-1.1, (LOWBAR_UNDERSIDE + 0.3) / 2, 0);
+  const postB = postA.clone(); postB.position.x = 1.1;
+  g.add(beam, cloth, laurel, postA, postB);
+  return g;
+}
+
+// --- Neon Future -----------------------------------------------------
+// The glowing parts use MeshBasicMaterial so they stay at full brightness
+// under the era's deliberately dim lighting — that contrast is what makes
+// a night city read as neon rather than just dark.
+function neonBox(w, h, d, color, opacity) {
+  return new THREE.Mesh(
+    new THREE.BoxGeometry(w, h, d),
+    new THREE.MeshBasicMaterial({ color, transparent: opacity !== undefined, opacity: opacity === undefined ? 1 : opacity })
+  );
+}
+function obFutureHurdle() {
+  const g = new THREE.Group();
+  const bar = neonBox(1.8, 0.22, 0.22, 0x36e0ff);
+  bar.position.y = 0.55;
+  const postA = boxMesh(0.14, 0.55, 0.14, 0x2a3350);
+  postA.position.set(-0.85, 0.275, 0);
+  const postB = postA.clone(); postB.position.x = 0.85;
+  g.add(bar, postA, postB);
+  return g;
+}
+function obFutureCrate() {
+  // The punchable one. future_robot stands at player height, which reads as
+  // something to hit; the drone model is long and flat and works better as
+  // scenery overhead.
+  return modelOr('future_robot', obFutureCrateBoxes);
+}
+function obFutureCrateBoxes() {
+  const g = new THREE.Group();
+  const body = boxMesh(1.0, 0.7, 0.8, 0x39456b);
+  body.position.y = 0.9;
+  const eye = neonBox(0.4, 0.24, 0.06, 0xff4fd8);
+  eye.position.set(0, 0.98, 0.42);
+  const fin = neonBox(1.3, 0.08, 0.1, 0x36e0ff);
+  fin.position.y = 0.52;
+  const skirt = boxMesh(0.5, 0.3, 0.5, 0x2a3350);
+  skirt.position.y = 0.4;
+  g.add(body, eye, fin, skirt);
+  return g;
+}
+function obFutureWall() {
+  const g = new THREE.Group();
+  const frame = boxMesh(1.9, 2.6, 0.24, 0x2a3350);
+  frame.position.y = 1.3;
+  const field = neonBox(1.6, 2.3, 0.1, 0x9b6bff, 0.55);
+  field.position.y = 1.3;
+  g.add(frame, field);
+  return g;
+}
+function obFutureLowbar() {
+  // A laser gate: solid emitters, glowing beam between them.
+  const g = new THREE.Group();
+  const beam = neonBox(2.2, 0.26, 0.18, 0xff4fd8);
+  beam.position.y = LOWBAR_UNDERSIDE + 0.13;
+  const glow = neonBox(2.2, 0.6, 0.06, 0xff4fd8, 0.28);
+  glow.position.y = LOWBAR_UNDERSIDE + 0.3;
+  const emitterA = boxMesh(0.28, LOWBAR_UNDERSIDE + 0.26, 0.28, 0x2a3350);
+  emitterA.position.set(-1.1, (LOWBAR_UNDERSIDE + 0.26) / 2, 0);
+  const emitterB = emitterA.clone(); emitterB.position.x = 1.1;
+  g.add(beam, glow, emitterA, emitterB);
+  return g;
+}
+
+// =====================================================================
+// MODEL PACK (2026-09-04) — Don's motionquest_3d_asset_pack
+//
+// Thirteen low-poly GLB models, 1,344 triangles between them, no textures
+// and no animation. That budget is nothing on this hardware, which is why
+// they are worth using: they carry far more shape than a stack of boxes for
+// no meaningful cost.
+//
+// THE CONTRACT: every model is optional. They load asynchronously after the
+// page is already running, and any that fails — missing file, a format this
+// parser doesn't handle, a bad fetch — simply leaves the hand-built box
+// version in place. modelOr() is the whole mechanism: ask for a model, get
+// the boxes back if it isn't there. Nothing in the game waits on a model and
+// nothing breaks without one. The game shipped and was tested without these;
+// they are an upgrade layered on top, not a dependency.
+//
+// `height` normalises every model to game units (the player is ~2.0 tall),
+// because the pack is authored at its own scale and a Roman soldier three
+// times the player's height would be a very different game.
+// =====================================================================
+// Sizes were set by rendering every model next to a player-height reference
+// box, not by reading the numbers — which is how the flat ones (portal, road
+// gap, drone) were caught: scaled by height they came out tens of units
+// across. Those are normalised by width instead.
+const MODEL_SPECS = {
+  roman_soldier: { height: 2.0 },      // punchable, so player-sized
+  roman_column: { height: 3.2 },       // a wall you must dodge — taller than you
+  roman_arch: { height: 4.2 },         // scenery, overhead
+  magic_potion: { height: 0.85 },      // "COLLECT MAGIC POTIONS", from the Rome art
+  dinosaur_trex: { height: 2.3 },      // punchable, so kept near player height
+  dinosaur_bone: { height: 0.8 },
+  duck_barrier: { height: 1.75 },      // see the note in the lowbar builders
+  future_robot: { height: 1.9 },
+  future_energy_cell: { height: 0.75 },
+  future_drone: { width: 2.2 },        // long and flat — width is its real size
+  road_gap: { width: 2.4 },            // one lane wide
+  time_portal: { width: 7.0 },         // a gateway you run through
+};
+const models = new Map();   // name -> loaded THREE.Group (the template)
+
+async function loadModelPack() {
+  await Promise.all(Object.entries(MODEL_SPECS).map(async ([name, spec]) => {
+    try {
+      models.set(name, await loadModel(`./models/${name}.glb`, spec));
+    } catch (err) {
+      // Deliberately a warning, not an error: a missing model is a downgrade
+      // in looks, not a broken game, and the box fallback covers it.
+      console.warn(`[models] ${name} unavailable, using built-in shape:`, err.message);
+    }
+  }));
+  // Everything already in the scene was built from boxes. Re-apply the era so
+  // the static parts (scenery, horizon) pick the models up rather than waiting
+  // for the next era switch. Obstacles already on their way to the player are
+  // left alone — swapping one out mid-approach would be worse than a late
+  // upgrade.
+  applyEra(currentEraId);
+}
+
+/**
+ * A fresh instance of `name`, or null if that model isn't available.
+ * clone() shares geometry and materials with the template, so a hundred
+ * Roman soldiers cost one soldier's worth of GPU memory.
+ */
+function modelInstance(name) {
+  const template = models.get(name);
+  return template ? template.clone() : null;
+}
+
+/** A model if we have it, otherwise whatever `fallback()` builds. */
+function modelOr(name, fallback) {
+  return modelInstance(name) || fallback();
+}
+
+const ERA_OBSTACLES = {
+  present: { hurdle: obPresentHurdle, crate: obPresentCrate, wall: obPresentWall, lowbar: obPresentLowbar },
+  dino: { hurdle: obDinoHurdle, crate: obDinoCrate, wall: obDinoWall, lowbar: obDinoLowbar },
+  rome: { hurdle: obRomeHurdle, crate: obRomeCrate, wall: obRomeWall, lowbar: obRomeLowbar },
+  future: { hurdle: obFutureHurdle, crate: obFutureCrate, wall: obFutureWall, lowbar: obFutureLowbar },
+};
+
+function buildObstacleMesh(type) {
+  const set = ERA_OBSTACLES[currentEraId] || ERA_OBSTACLES.present;
+  const make = set[type] || set.hurdle;
+  return make();
+}
 
 function spawnObstacle() {
-  const type = OBSTACLE_TYPES[Math.floor(Math.random() * OBSTACLE_TYPES.length)];
+  const types = currentEra().obstacleTypes;
+  const type = types[Math.floor(Math.random() * types.length)];
   const lane = Math.floor(Math.random() * 3);
   const mesh = buildObstacleMesh(type);
   mesh.position.x = LANE_X[lane];
@@ -691,6 +1240,256 @@ function spawnObstacle() {
   // A hurdle is the one obstacle you clear by going UP, so it's the natural
   // place to hang a gem: the jump you already have to make is what earns it.
   if (type === 'hurdle') spawnGem(lane, SPAWN_Z);
+}
+
+// =====================================================================
+// THE ERAS (2026-09-04 — "MotionQuest: Move Through Time")
+//
+// Ordered chronologically, which is also the unlock order: you start in the
+// primeval valley and work forward to the neon city. That ordering is the
+// whole premise of the game, so the level select reads left-to-right as a
+// timeline rather than an arbitrary menu.
+//
+// Each era is pure data — palette, lighting, scenery mix, obstacle set and
+// a finish line. Nothing here changes how the game PLAYS; see the note on
+// ERA_OBSTACLES above for why that is deliberate.
+//
+// `goal` is the distance in metres that completes the level and unlocks the
+// next one. Until this round the game was endless; a runner with no finish
+// line has nothing to unlock, so each era now has an end you can actually
+// reach. They step up gently rather than doubling, because the difficulty
+// already ramps with distance inside a single run.
+// =====================================================================
+const ERAS = [
+  {
+    id: 'dino', name: 'Primeval Valley', sub: 'Mind the teeth', icon: '🦕',
+    goal: 700,
+    sky: ['#3a1f4d', '#8c3b2f', '#d9743a', '#f2c078'],
+    glow: 'rgba(255,180,90,0.95)',
+    fog: 0xd98f52, fogNear: 58, fogFar: 215,
+    // Brighter fill than the first pass (0.62 / near-black ground bounce):
+    // the volcanic sun is warm but low, and it was leaving the character a
+    // near-silhouette against a bright sky — a runner you can't read is
+    // worse than an era that's a shade less moody.
+    hemi: [0xffe0b8, 0x7a5c42, 0.85], sun: [0xffc07a, 1.5, [-6, 7, -10]], rim: [0xff8f5a, 0.34],
+    ground: { verge: ['#5f8f3c', '#557f36'], kerb: '#7a6a45', path: ['#7d6a4e', '#776449'], dash: null },
+    scenery: ['palm', 'palm', 'fern', 'fern', 'bones', 'rock'],
+    obstacleTypes: ['hurdle', 'crate', 'wall', 'lowbar'],
+    coin: [0xffb03d, 0x6b3a00], gem: [0x6ee7ff, 0x0a5f75],
+  },
+  {
+    id: 'rome', name: 'Ancient Rome', sub: 'Glory awaits', icon: '🏛️',
+    goal: 900,
+    sky: ['#1f68c9', '#5aa6e8', '#bfe0f2', '#f6efd9'],
+    glow: 'rgba(255,248,220,0.95)',
+    fog: 0xe6ddc2, fogNear: 62, fogFar: 225,
+    hemi: [0xfff0d0, 0x7a6a52, 0.66], sun: [0xfff4dc, 1.4, [-5, 8, -11]], rim: [0xffd9a0, 0.3],
+    ground: { verge: ['#6f9b45', '#66913e'], kerb: '#cfc3a4', path: ['#ded3b8', '#d6cbaf'], dash: null, slabs: 'rgba(120,105,75,0.35)' },
+    scenery: ['cypress', 'cypress', 'column', 'banner', 'column'],
+    obstacleTypes: ['hurdle', 'crate', 'wall', 'lowbar'],
+    coin: [0x4fa8ff, 0x0a3a75], gem: [0xc77dff, 0x3a1060],
+  },
+  {
+    id: 'present', name: 'Present Day', sub: 'Where you started', icon: '🏙️',
+    goal: 1100,
+    sky: DEFAULT_SKY,
+    glow: 'rgba(255,250,225,0.9)',
+    fog: 0xcdeaf7, fogNear: 62, fogFar: 220,
+    hemi: [0xd6ecff, 0x6b7a8c, 0.6], sun: [0xfff6e2, 1.35, [-5, 8, -11]], rim: [0x9fc4ff, 0.32],
+    ground: DEFAULT_GROUND,
+    scenery: ['tree', 'tree', 'tree', 'bush', 'rock'],
+    obstacleTypes: ['hurdle', 'crate', 'wall', 'lowbar'],
+    coin: [0xffc53d, 0x6b4a00], gem: [0x6ee7ff, 0x0a5f75],
+  },
+  {
+    id: 'future', name: 'Neon Future', sub: 'Systems online', icon: '🛸',
+    goal: 1300,
+    sky: ['#080b1f', '#1a1547', '#3d2170', '#6b2f8a'],
+    glow: 'rgba(90,220,255,0.55)',
+    fog: 0x2a1c4d, fogNear: 55, fogFar: 210,
+    // Deliberately dim: the neon materials are MeshBasicMaterial and stay at
+    // full brightness regardless, so lowering everything else is what makes
+    // them pop instead of sitting flat against an evenly-lit scene.
+    hemi: [0x4a5cff, 0x0d0a1f, 0.42], sun: [0x9fd8ff, 0.75, [-4, 7, -10]], rim: [0xff4fd8, 0.45],
+    ground: { verge: ['#141a33', '#11162c'], kerb: '#36e0ff', path: ['#1d2340', '#1a2039'], dash: '#36e0ff', slabs: 'rgba(54,224,255,0.10)' },
+    scenery: ['tower', 'tower', 'holo', 'tower', 'holo'],
+    obstacleTypes: ['hurdle', 'crate', 'wall', 'lowbar'],
+    coin: [0x36e0ff, 0x08616b], gem: [0xff4fd8, 0x6b0a52],
+  },
+];
+// =====================================================================
+// HORIZON LANDMARKS (2026-09-04, from Don's key art)
+//
+// The single biggest difference between the uploaded artwork and the game
+// was not colour or detail — it was that every piece of art has something
+// ON THE HORIZON. The Rome mockup has the Colosseum behind the street; the
+// dinosaur vignette has an erupting volcano; the future one has a city
+// skyline. Without that, a runner reads as a corridor: you are travelling
+// but never somewhere.
+//
+// These sit far down the track at HORIZON_Z and DO NOT SCROLL. That is the
+// point — a landmark that slid past would be a prop, whereas one that stays
+// put on the horizon is a place you are running towards. They are deep
+// enough into the fog to be hazy, which is what sells the distance and also
+// means they can be very coarse geometry without anyone noticing.
+//
+// Cost: a few dozen static boxes, built once per era switch, never updated
+// per frame. Cheaper than one of the scenery props that actually moves.
+// =====================================================================
+const HORIZON_Z = -118;
+let horizonGroup = null;
+
+function horizonBox(g, w, h, d, x, y, z, color, basic) {
+  const mat = basic
+    ? new THREE.MeshBasicMaterial({ color })
+    : new THREE.MeshLambertMaterial({ color });
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+  m.position.set(x, y, z);
+  g.add(m);
+  return m;
+}
+
+// Primeval Valley: a stepped volcano with a lava cap and a glow, flanked by
+// ridges. The lava uses MeshBasicMaterial so it stays hot against the dim,
+// heavily-fogged distance instead of going grey with everything else.
+function horizonDino(g) {
+  const steps = [[34, 7, -1], [26, 9, 6], [18, 8, 15], [11, 6, 22]];
+  for (const [w, d, y] of steps) horizonBox(g, w, 10, d, -6, y, 0, 0x5c4636);
+  horizonBox(g, 9, 3, 6, -6, 27, 0, 0xff5a1e, true);      // crater
+  horizonBox(g, 3.5, 9, 3.5, -4, 32, 0, 0xff8a3d, true);  // plume of lava
+  horizonBox(g, 14, 7, 8, -13, 3.5, 6, 0x4c4030);         // shoulder
+  // Ash cloud above it.
+  horizonBox(g, 12, 6, 8, -5, 38, -3, 0x6b5a52);
+  horizonBox(g, 8, 5, 6, 0, 44, -3, 0x7a6960);
+  horizonBox(g, 5, 4, 5, 4, 49, -3, 0x8a7a70);
+  // Far ridges either side. Stepped rather than one slab each: a single
+  // wide box at this distance reads as a plank hanging over the horizon,
+  // because a hard-edged rectangle floating in fog has nothing to say it is
+  // a hill. Overlapping blocks of differing heights give it a skyline.
+  const ridge = (baseX, dir) => {
+    for (let i = 0; i < 6; i++) {
+      const w = 9 + (i % 3) * 4;
+      const h = 13 - i * 1.6 + (i % 2) * 3;
+      horizonBox(g, w, h, 11, baseX + dir * i * 7, h / 2, 10 + (i % 2) * 4,
+        i % 2 ? 0x4a5a3c : 0x415030);
+    }
+  };
+  ridge(20, 1);
+  ridge(-22, -1);
+}
+
+// Ancient Rome: the Colosseum, a triumphal arch and a temple portico —
+// the three landmarks in the uploaded Rome mockup. The Colosseum is an
+// approximated ring: an outer band of segments with a darker inner band
+// behind it, which reads as an amphitheatre at this distance far more
+// cheaply than modelling arches would.
+function horizonRome(g) {
+  const CX = -14, STONE = 0xd8c3a0, STONE_DK = 0xa8906c;
+  const R = 15;
+  for (let i = 0; i < 14; i++) {
+    const a = (i / 14) * Math.PI * 2;
+    const x = CX + Math.cos(a) * R;
+    const z = Math.sin(a) * R * 0.5;
+    // The back half sits lower, so the ring reads as an open bowl rather
+    // than a solid drum.
+    const h = z < 0 ? 12 : 17;
+    horizonBox(g, 5.2, h, 4, x, h / 2, z, i % 2 ? STONE : STONE_DK);
+  }
+  horizonBox(g, 26, 3, 14, CX, 18.5, 0, STONE);  // top cornice
+  // Triumphal arch to the right of the track.
+  horizonBox(g, 5, 16, 5, 24, 8, 4, STONE);
+  horizonBox(g, 5, 16, 5, 36, 8, 4, STONE);
+  horizonBox(g, 17, 5, 6, 30, 18, 4, STONE);
+  horizonBox(g, 11, 3, 7, 30, 22, 4, 0xd9b04a);  // gilded top
+  // Temple portico further right.
+  for (let i = 0; i < 5; i++) horizonBox(g, 1.8, 11, 1.8, 48 + i * 3.4, 5.5, 8, STONE);
+  horizonBox(g, 20, 3, 6, 54.8, 12.5, 8, STONE_DK);
+  // Distant cypress line.
+  for (let i = 0; i < 9; i++) horizonBox(g, 2.6, 9 + (i % 3) * 2, 2.6, -60 + i * 5, 5, 14, 0x2f5c38);
+}
+
+// Present Day: a modest town skyline — enough to say the road goes
+// somewhere, without competing with the era it belongs to.
+function horizonPresent(g) {
+  const blocks = [[10, 16, -34], [8, 22, -22], [12, 13, -10], [9, 19, 12], [11, 15, 24], [8, 24, 36]];
+  for (const [w, h, x] of blocks) horizonBox(g, w, h, 9, x, h / 2, 0, 0x8494a8);
+  for (let i = 0; i < 7; i++) horizonBox(g, 5, 6 + (i % 3) * 2, 6, -55 + i * 16, 3, 12, 0x6f8060);
+}
+
+// Neon Future: a dense skyline of towers with lit bands, the tallest
+// clustered behind the track so you run into the middle of the city.
+function horizonFuture(g) {
+  const neon = [0x36e0ff, 0xff4fd8, 0x9b6bff];
+  for (let i = 0; i < 16; i++) {
+    const x = -60 + i * 8 + (i % 3);
+    const h = 18 + ((i * 37) % 26) - Math.abs(x) * 0.16;
+    const w = 5 + (i % 3);
+    horizonBox(g, w, h, 7, x, h / 2, (i % 2) * 6, 0x141a33);
+    const c = neon[i % 3];
+    for (let b = 1; b < Math.floor(h / 5); b++) {
+      horizonBox(g, w * 1.04, 0.5, 7.1, x, b * 5, (i % 2) * 6, c, true);
+    }
+    horizonBox(g, 1.2, 2.4, 1.2, x, h + 1.2, (i % 2) * 6, c, true); // aerial light
+  }
+}
+
+const ERA_HORIZONS = {
+  dino: horizonDino, rome: horizonRome, present: horizonPresent, future: horizonFuture,
+};
+
+function buildHorizon(id) {
+  if (horizonGroup) {
+    scene.remove(horizonGroup);
+    horizonGroup.traverse((n) => { n.geometry?.dispose(); n.material?.dispose(); });
+    horizonGroup = null;
+  }
+  const make = ERA_HORIZONS[id];
+  if (!make) return;
+  horizonGroup = new THREE.Group();
+  horizonGroup.position.z = HORIZON_Z;
+  make(horizonGroup);
+  scene.add(horizonGroup);
+}
+
+const ERA_BY_ID = Object.fromEntries(ERAS.map((e) => [e.id, e]));
+let currentEraId = 'present';
+function currentEra() { return ERA_BY_ID[currentEraId] || ERA_BY_ID.present; }
+
+// Swaps the whole world over to an era: sky, fog, the three lights, the
+// ground texture, the roadside scenery and the collectible colours. Called
+// once when a level is chosen, never per frame.
+function applyEra(id) {
+  const era = ERA_BY_ID[id] ? id : 'present';
+  currentEraId = era;
+  const e = ERA_BY_ID[era];
+
+  scene.background?.dispose?.();
+  scene.background = makeSkyTexture(e.sky, e.glow);
+  scene.fog = new THREE.Fog(e.fog, e.fogNear, e.fogFar);
+
+  hemiLight.color.set(e.hemi[0]);
+  hemiLight.groundColor.set(e.hemi[1]);
+  hemiLight.intensity = e.hemi[2];
+  sun.color.set(e.sun[0]);
+  sun.intensity = e.sun[1];
+  sun.position.set(e.sun[2][0], e.sun[2][1], e.sun[2][2]);
+  rimLight.color.set(e.rim[0]);
+  rimLight.intensity = e.rim[1];
+
+  const oldTex = roadTexture;
+  roadTexture = makeRoadTexture(e.ground);
+  ground.material.map = roadTexture;
+  ground.material.needsUpdate = true;
+  oldTex?.dispose();
+
+  buildScenery(e.scenery);
+  buildHorizon(era);
+  audio.playMusic(era);
+
+  coinMat.color.set(e.coin[0]);
+  coinMat.emissive.set(e.coin[1]);
+  gemMat.color.set(e.gem[0]);
+  gemMat.emissive.set(e.gem[1]);
 }
 
 // ---------------------------------------------------------------------
@@ -741,8 +1540,24 @@ const pickups = [];
 // trail spawner dropping more into the scene mid-measurement.
 let coinSpawnEnabled = true;
 
+// Per-era collectible models. The Rome panel in Don's artwork literally
+// says "COLLECT MAGIC POTIONS", and the pack contains that potion; the
+// future era gets its energy cell. Anywhere without a model kept the coin
+// disc, which is why coins are still the fallback rather than being removed.
+const ERA_COIN_MODEL = { rome: 'magic_potion', future: 'future_energy_cell' };
+
 function makePickupMesh(kind) {
   if (kind === 'gem') return new THREE.Mesh(gemGeo, gemMat);
+  if (kind === 'coin') {
+    const modelName = ERA_COIN_MODEL[currentEraId];
+    if (modelName) {
+      const m = modelInstance(modelName);
+      // Centred on the pickup's own origin: addPickup() positions these at
+      // chest height, so a model sitting on its base would hang below the
+      // point the player actually collects.
+      if (m) { m.position.y = -0.4; const wrap = new THREE.Group(); wrap.add(m); return wrap; }
+    }
+  }
   if (kind === 'life') return buildVoxelSprite(HEART_PARTS, heartGeos, heartMat);
   if (kind === 'star') return buildVoxelSprite(STAR_PARTS, starGeos, starMat);
   // Coins are discs: stood upright facing back down the track so the player
@@ -1015,6 +1830,7 @@ const state = {
   jumping: false,
   punchTimer: 0,
   punchAnimTimer: 0, // cosmetic-only — see PUNCH_ANIM_DURATION above
+  duckTimer: 0,      // seconds of duck left; > 0 clears a low bar
   invulnTimer: 0,
   starT: 0,            // seconds of star left; > 0 means invincible + boosted
   lifeSpawnTimer: 0,   // countdown to the next heart spawn attempt
@@ -1022,6 +1838,9 @@ const state = {
   spawnTimer: BASE_SPAWN_INTERVAL,
   coinTimer: 0.8,
   distance: 0,        // metres this run — drives the difficulty ramp
+  runTime: 0,         // seconds of actual running, for the results breakdown
+  coinsTaken: 0,      // collectibles picked up this run
+  clears: 0,          // obstacles jumped, ducked or punched rather than hit
   distanceForTex: 0,
   countdownT: 0,      // seconds left on the pre-run countdown
   gameOverT: 0,       // seconds spent on the Run Over screen (auto-restart)
@@ -1099,6 +1918,18 @@ const pausedPanel = document.getElementById('pausedPanel');
 const pausedScoreVal = document.getElementById('pausedScoreVal');
 const newHighScoreNote = document.getElementById('newHighScoreNote');
 
+const levelSelectPanel = document.getElementById('levelSelectPanel');
+const levelGridEl = document.getElementById('levelGrid');
+const levelCompletePanel = document.getElementById('levelCompletePanel');
+const levelCompleteTitle = document.getElementById('levelCompleteTitle');
+const levelCompleteScore = document.getElementById('levelCompleteScore');
+const levelCompleteUnlock = document.getElementById('levelCompleteUnlock');
+const levelCompleteStars = document.getElementById('levelCompleteStars');
+const levelCompleteStats = document.getElementById('levelCompleteStats');
+const eraBadge = document.getElementById('eraBadge');
+const progressFill = document.getElementById('progressFill');
+const progressLabel = document.getElementById('progressLabel');
+
 const PANELS = {
   pairing: pairingPanel,
   ready: readyPanel,
@@ -1107,6 +1938,8 @@ const PANELS = {
   calibrating: calibrationPanel,
   placement: placementPanel,
   framing: framingPanel,
+  levelSelect: levelSelectPanel,
+  levelComplete: levelCompletePanel,
 };
 
 // ---------------------------------------------------------------------
@@ -1123,7 +1956,9 @@ const CONTROL_BADGE_TEXT = {
   framing: { text: '🎮 Use your Fire TV remote', cls: 'remote' },
   calibrating: { text: '📱 Copy the moves · 🎮 OK to start', cls: 'phone' },
   paused: { text: '🎮 Remote OK to resume, Back to exit', cls: 'remote' },
-  gameover: { text: '🎮 Remote OK, or 📱 jump/punch, to retry', cls: 'remote' },
+  gameover: { text: '🎮 Remote OK to retry · Back for levels', cls: 'remote' },
+  levelSelect: { text: '🎮 ◀ ▶ to choose · OK to travel', cls: 'remote' },
+  levelComplete: { text: '🎮 Remote OK to continue', cls: 'remote' },
 };
 function updateControlBadge(stageKey) {
   const meta = CONTROL_BADGE_TEXT[stageKey];
@@ -1161,6 +1996,8 @@ function syncPanel() {
   if (setupStage === 'framing') { showPanel('framing'); updateControlBadge('framing'); return; }
   if (calibrating) { showPanel('calibrating'); updateControlBadge('calibrating'); return; }
   if (state.phase === 'pairing') { showPanel('pairing'); updateControlBadge('pairing'); }
+  else if (state.phase === 'levelSelect') { showPanel('levelSelect'); updateControlBadge('levelSelect'); }
+  else if (state.phase === 'levelComplete') { showPanel('levelComplete'); updateControlBadge('levelComplete'); }
   else if (state.phase === 'ready') { showPanel('ready'); updateControlBadge('ready'); }
   else if (state.phase === 'paused') { showPanel('paused'); updateControlBadge('paused'); }
   else if (state.phase === 'gameover') { showPanel('gameover'); updateControlBadge('gameover'); }
@@ -1256,11 +2093,16 @@ function confirmMovesStart() {
 // and reports progress over WebSocket. See README "The guided calibration
 // screen" for the full flow.
 // =========================================================================
-const CAL_ORDER = ['left', 'right', 'jump', 'punch'];
+// Duck joins the guided setup (2026-09-04) rather than being sprung on the
+// player mid-run: it's the move whose detection is easiest to get wrong in
+// an unfamiliar room, so it's worth confirming it reads at all before the
+// first low bar arrives at speed.
+const CAL_ORDER = ['left', 'right', 'jump', 'duck', 'punch'];
 const CAL_META = {
   left: { icon: '⬅️', textCamera: 'Step LEFT', textHold: 'Lean LEFT' },
   right: { icon: '➡️', textCamera: 'Step RIGHT', textHold: 'Lean RIGHT' },
   jump: { icon: '⬆️', textCamera: 'JUMP', textHold: 'JUMP' },
+  duck: { icon: '⬇️', textCamera: 'DUCK down', textHold: 'DUCK down' },
   punch: { icon: '👊', textCamera: 'PUNCH', textHold: 'PUNCH' },
 };
 // Decays after every landing to drive the touchdown squash — see the
@@ -1273,7 +2115,9 @@ let calAutoFinishT = 0;
 const CAL_AUTO_FINISH_DELAY = 1.6; // seconds of "All set!" before starting
 let calMode = 'camera';
 let calIndex = 0;
-let calDone = { left: false, right: false, jump: false, punch: false };
+// Derived from CAL_ORDER, never written out separately — see the note on
+// the reset in startCalibrationUI() for what a hand-maintained copy costs.
+let calDone = Object.fromEntries(CAL_ORDER.map((k) => [k, false]));
 
 // 2026-09-03 styling pass: chunky numbered tiles rather than three
 // near-identical emoji circles, so "done", "doing now" and "still to come"
@@ -1328,7 +2172,11 @@ function startCalibrationUI(mode) {
   setupStage = 'none'; // placement/framing are done — the per-move panel takes over
   calMode = mode || 'camera';
   calIndex = 0;
-  calDone = { left: false, right: false, jump: false, punch: false };
+  // Built from CAL_ORDER rather than written out again. This literal was
+  // missed when duck was added to CAL_ORDER, and since advanceCalibrationUI()
+  // bails on `!(step in calDone)`, setup silently stuck on the duck step with
+  // no way past it. Deriving it makes that class of drift impossible.
+  calDone = Object.fromEntries(CAL_ORDER.map((k) => [k, false]));
   showCalibrationStep();
   syncPanel();
 }
@@ -1367,12 +2215,225 @@ function finishCalibrationUI() {
   calAutoFinishT = 0;
   setupStage = 'none'; // covers the "Skip setup" escape hatch firing mid-placement/framing
   // 2026-09-03 ("you still need to press start on the phone"): finishing
-  // setup IS the start signal. Nothing further is required from the player
-  // — the countdown gives them time to put the phone down and get set.
+  // setup IS the start signal. Nothing further is required from the player.
+  // 2026-09-04: it now opens the era picker rather than launching straight
+  // into a run — with four levels there is a genuine choice to make, and
+  // the countdown still gives them time to put the phone down once they've
+  // made it. One button press, not a menu to wade through.
   if (state.phase === 'ready' || state.phase === 'pairing') {
-    startCountdown();
+    openLevelSelect();
     return;
   }
+  syncPanel();
+}
+
+// =========================================================================
+// LEVEL SELECT AND PROGRESSION (2026-09-04)
+//
+// Stored on the TV, not the phone, and for the same reason the high score
+// is (see HIGH_SCORE_KEY): a Fire TV is a shared family device and "which
+// eras has this household reached" belongs to the telly, not to whoever
+// happened to be holding a phone. Different kids can play on different
+// phones without resetting each other's progress.
+//
+// Only the first era is unlocked on a fresh install; finishing one unlocks
+// the next. Everything degrades to "just the first era, no memory" if
+// localStorage is unavailable rather than breaking the menu.
+// =========================================================================
+const PROGRESS_KEY = 'motionquest_progress';
+let progressCache = null;
+
+function loadProgress() {
+  if (progressCache) return progressCache;
+  let data = null;
+  try {
+    data = JSON.parse(localStorage.getItem(PROGRESS_KEY) || 'null');
+  } catch { data = null; }
+  const known = ERAS.map((e) => e.id);
+  const unlocked = Array.isArray(data?.unlocked)
+    ? data.unlocked.filter((id) => known.includes(id))
+    : [];
+  // The first era is always available — otherwise a corrupted save would
+  // leave the player staring at four locked tiles and no way in.
+  if (!unlocked.includes(ERAS[0].id)) unlocked.unshift(ERAS[0].id);
+  progressCache = { unlocked, best: (data && typeof data.best === 'object' && data.best) || {} };
+  return progressCache;
+}
+
+function saveProgress(p) {
+  progressCache = p;
+  try { localStorage.setItem(PROGRESS_KEY, JSON.stringify(p)); } catch { /* private mode — session only */ }
+}
+
+function isUnlocked(id) { return loadProgress().unlocked.includes(id); }
+
+// Unlocks whatever comes after `id` in the timeline. Returns the era that
+// was newly opened, or null if there was nothing new (last era, or already
+// unlocked from a previous playthrough).
+function unlockNextAfter(id) {
+  const idx = ERAS.findIndex((e) => e.id === id);
+  const next = ERAS[idx + 1];
+  if (!next) return null;
+  const p = loadProgress();
+  if (p.unlocked.includes(next.id)) return null;
+  p.unlocked.push(next.id);
+  saveProgress(p);
+  return next;
+}
+
+function recordBest(id, score) {
+  const p = loadProgress();
+  if (!p.best[id] || score > p.best[id]) {
+    p.best[id] = Math.floor(score);
+    saveProgress(p);
+  }
+}
+
+let levelSelectIndex = 0;
+
+function renderLevelSelect() {
+  if (!levelGridEl) return;
+  const p = loadProgress();
+  levelGridEl.innerHTML = '';
+  ERAS.forEach((era, i) => {
+    const locked = !p.unlocked.includes(era.id);
+    const card = document.createElement('div');
+    card.className = 'level-card'
+      + (i === levelSelectIndex ? ' selected' : '')
+      + (locked ? ' locked' : '');
+    card.dataset.era = era.id;
+    const best = p.best[era.id];
+    card.innerHTML = `
+      <div class="level-icon">${locked ? '🔒' : era.icon}</div>
+      <div class="level-name">${era.name}</div>
+      <div class="level-sub">${locked ? 'Finish the era before' : era.sub}</div>
+      <div class="level-meta">${locked ? '' : `${era.goal} m${best ? ` · best ${best}` : ''}`}</div>
+    `;
+    levelGridEl.appendChild(card);
+  });
+}
+
+function openLevelSelect() {
+  const p = loadProgress();
+  // Land the cursor on the furthest era they can actually play — after
+  // finishing Rome, the menu should be offering Present Day, not making
+  // them scroll past two they've already beaten.
+  let idx = 0;
+  ERAS.forEach((e, i) => { if (p.unlocked.includes(e.id)) idx = i; });
+  levelSelectIndex = idx;
+  state.phase = 'levelSelect';
+  hideCountdown();
+  hideActionPrompt();
+  renderLevelSelect();
+  syncPanel();
+}
+
+function moveLevelSelection(dir) {
+  if (state.phase !== 'levelSelect') return;
+  levelSelectIndex = Math.max(0, Math.min(ERAS.length - 1, levelSelectIndex + dir));
+  renderLevelSelect();
+}
+
+function chooseLevel() {
+  if (state.phase !== 'levelSelect') return;
+  const era = ERAS[levelSelectIndex];
+  if (!era || !isUnlocked(era.id)) {
+    // Shake the locked card rather than silently doing nothing, so it's
+    // clear the button worked and the level didn't.
+    const card = levelGridEl?.children[levelSelectIndex];
+    if (card) { card.classList.remove('shake'); void card.offsetWidth; card.classList.add('shake'); }
+    return;
+  }
+  applyEra(era.id);
+  updateEraBadge();
+  startCountdown();
+}
+
+const muteBtn = document.getElementById('muteBtn');
+
+function setMuted(isMuted) {
+  if (!muteBtn) return;
+  muteBtn.textContent = isMuted ? '🔇' : '🔊';
+  muteBtn.classList.toggle('muted', isMuted);
+}
+if (muteBtn) {
+  setMuted(audio.isMuted());
+  muteBtn.addEventListener('click', () => { audio.unlock(); setMuted(audio.toggleMute()); });
+}
+
+function updateEraBadge() {
+  if (!eraBadge) return;
+  const e = currentEra();
+  eraBadge.textContent = `${e.icon} ${e.name}`;
+}
+
+// The distance bar in the HUD — without a visible finish line, a level with
+// an end feels exactly like the endless mode it replaced.
+function updateProgressBar() {
+  if (!progressFill) return;
+  const goal = currentEra().goal;
+  const pct = Math.max(0, Math.min(1, state.distance / goal));
+  progressFill.style.width = `${(pct * 100).toFixed(1)}%`;
+  if (progressLabel) {
+    progressLabel.textContent = `${Math.floor(state.distance)} / ${goal} m`;
+  }
+}
+
+// Star rating, borrowed from the results mockup in Don's UI pack. The pack's
+// version is a flat PNG with the numbers painted on, so the idea is worth
+// taking and the image is not — this is the same design driven by what
+// actually happened in the run.
+//
+// Three stars is deliberately not "finish the level": everyone who sees this
+// screen has already done that. It asks for finishing it WELL — without
+// losing hearts, and collecting as you go — so there is a reason to replay
+// an era you have already beaten.
+function starRating() {
+  let stars = 1;                                  // you finished, that's one
+  if (state.lives >= START_LIVES) stars += 1;     // without losing a heart
+  if (state.coinsTaken >= 40) stars += 1;         // and you collected properly
+  return Math.min(3, stars);
+}
+
+function formatTime(seconds) {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function levelComplete() {
+  audio.sfx('star');
+  const era = currentEra();
+  state.phase = 'levelComplete';
+  commitHighScore();
+  recordBest(era.id, state.score);
+  const opened = unlockNextAfter(era.id);
+  if (levelCompleteTitle) levelCompleteTitle.textContent = `${era.icon} ${era.name} complete!`;
+  if (levelCompleteScore) levelCompleteScore.textContent = String(Math.floor(state.score));
+  const stars = starRating();
+  if (levelCompleteStars) {
+    levelCompleteStars.innerHTML = [0, 1, 2]
+      .map((i) => `<span class="rating-star${i < stars ? '' : ' empty'}">${i < stars ? '★' : '☆'}</span>`)
+      .join('');
+  }
+  if (levelCompleteStats) {
+    levelCompleteStats.innerHTML = `
+      <div><span>Time</span><b>${formatTime(state.runTime)}</b></div>
+      <div><span>Collected</span><b>${state.coinsTaken}</b></div>
+      <div><span>Cleared</span><b>${state.clears}</b></div>
+      <div><span>Hearts left</span><b>${state.lives}</b></div>
+    `;
+  }
+  if (levelCompleteUnlock) {
+    levelCompleteUnlock.textContent = opened
+      ? `🔓 ${opened.icon} ${opened.name} unlocked`
+      : 'Every era beaten — go for a better score';
+  }
+  hideActionPrompt();
+  hideCountdown();
+  endStar();
+  clearFinishPortal();
+  renderLevelSelect();
   syncPanel();
 }
 
@@ -1388,6 +2449,58 @@ function flashHit() {
   setTimeout(() => (flashEl.style.opacity = '0'), 120);
 }
 
+// =====================================================================
+// THE FINISH LINE (2026-09-04)
+//
+// Until the model pack arrived, reaching an era's goal simply switched the
+// screen — the finish existed as a number on a progress bar and nothing
+// else. Don's time_portal model gives it a physical presence: it appears
+// down the track once you are close, grows as you approach, and you run
+// through it. That is also the game's title doing some work — you are not
+// finishing a level, you are stepping through time to the next era.
+//
+// Positioned by the same maths the obstacles use, so it approaches at
+// exactly the run's speed and lines up with the goal distance rather than
+// merely being nearby.
+// =====================================================================
+const PORTAL_LEAD_DISTANCE = 55; // metres before the goal that it appears
+let finishPortal = null;
+let portalSpin = 0;
+
+function clearFinishPortal() {
+  if (!finishPortal) return;
+  scene.remove(finishPortal);
+  finishPortal = null;
+}
+
+function updateFinishPortal(dt) {
+  const goal = currentEra().goal;
+  const remaining = goal - state.distance;
+  if (remaining > PORTAL_LEAD_DISTANCE || remaining < -4) {
+    if (remaining > PORTAL_LEAD_DISTANCE) clearFinishPortal();
+    return;
+  }
+  if (!finishPortal) {
+    finishPortal = modelInstance('time_portal') || null;
+    if (!finishPortal) return;      // no model: the progress bar still ends the run
+    // The portal is authored as a flat disc lying in its own XY plane. In a
+    // Z-up file that is a disc on the FLOOR, and the loader's Z-up -> Y-up
+    // rotation faithfully kept it horizontal — so it arrived as a puddle
+    // rather than a gateway. Rotating the wrapper back by +90° cancels that
+    // and stands it upright facing straight down the track at the player.
+    finishPortal.rotation.x = Math.PI / 2;
+    finishPortal.position.set(0, 2.8, SPAWN_Z);
+    scene.add(finishPortal);
+  }
+  // Sits exactly `remaining` metres up the track, so it arrives on the
+  // metre the era ends rather than drifting against the progress bar.
+  finishPortal.position.z = -remaining;
+  portalSpin += dt * 1.6;
+  // Spun about its own normal (local z), so it turns in its own plane like a
+  // gateway rather than tumbling.
+  finishPortal.rotation.z = portalSpin;
+}
+
 function resetRun() {
   state.score = 0;
   state.lives = START_LIVES;
@@ -1397,6 +2510,7 @@ function resetRun() {
   state.jumping = false;
   state.punchTimer = 0;
   state.punchAnimTimer = 0;
+  state.duckTimer = 0;
   state.invulnTimer = 0;
   state.starT = 0;
   state.lifeSpawnTimer = LIFE_SPAWN_MIN + Math.random() * (LIFE_SPAWN_MAX - LIFE_SPAWN_MIN);
@@ -1405,13 +2519,18 @@ function resetRun() {
   state.spawnTimer = BASE_SPAWN_INTERVAL;
   state.coinTimer = 0.8;
   state.distance = 0;
+  state.runTime = 0;
+  state.coinsTaken = 0;
+  state.clears = 0;
   obstacles.splice(0).forEach((o) => scene.remove(o.mesh));
   pickups.splice(0).forEach((p) => scene.remove(p.mesh));
+  clearFinishPortal();
   impactBursts.splice(0).forEach((b) => scene.remove(b.group));
   player.position.set(0, 0, 0);
   player.rotation.y = 0;
   player.scale.set(1, 1, 1);
   upper.position.y = 0;
+  upper.rotation.x = 0;
   landSquash = 0;
   torso.scale.set(1, 1, 1);
   renderLives();
@@ -1469,6 +2588,8 @@ function startPlaying() {
 }
 
 function gameOver() {
+  // Pitched well down, so finishing badly sounds different from finishing.
+  audio.sfx('star', { rate: 0.5 });
   state.phase = 'gameover';
   state.gameOverT = 0;
   finalScoreEl.textContent = Math.floor(state.score);
@@ -1503,6 +2624,7 @@ function commitHighScore() {
 }
 
 function pauseGame() {
+  audio.pauseMusic();
   if (state.phase !== 'playing') return;
   state.phase = 'paused';
   pausedScoreVal.textContent = String(Math.floor(state.score));
@@ -1511,6 +2633,7 @@ function pauseGame() {
 }
 
 function resumeGame() {
+  audio.resumeMusic();
   if (state.phase !== 'paused') return;
   state.phase = 'playing';
   lastT = performance.now(); // avoid a huge dt jump on the first frame back
@@ -1581,7 +2704,14 @@ ws.addEventListener('close', () => {
   pairingHint.textContent = 'Connection lost — refresh this page to reconnect.';
 });
 
+// Remembers the last absolute body position seen on the era picker so a
+// player standing to one side doesn't scroll the menu continuously.
+let lastSelectLaneValue = 0;
+
 function handleInput(msg) {
+  // Browsers only allow audio to start from a genuine user gesture. A phone
+  // message is one, and so is the remote keydown handler below.
+  audio.unlock();
   // Pause/Exit can arrive while playing OR already paused (toggling back
   // and forth), so handle them before the general "must be playing" guard
   // below — everything else (lane/jump/punch) only makes sense mid-run.
@@ -1607,6 +2737,29 @@ function handleInput(msg) {
   // start still works, it just skips ahead to "3, 2, 1, GO!" instead of
   // dropping the player straight into a moving track. On the game-over
   // screen it also short-circuits the automatic restart timer.
+  // The era picker is drivable from the phone as well as the remote, so a
+  // player who never picks the remote up isn't stuck. Lane gestures browse
+  // the timeline; a deliberate jump/punch confirms — same "explicit only"
+  // rule as starting a run, so a noisy gesture reading can't pick a level.
+  if (state.phase === 'levelSelect') {
+    if (msg.action === 'lane') { moveLevelSelection(msg.value > 0 ? 1 : -1); return; }
+    if (msg.action === 'lane_set' && typeof msg.value === 'number') {
+      // Absolute body position: stepping left/right of centre nudges the
+      // selection once per change rather than repeating while they stand there.
+      if (msg.value !== lastSelectLaneValue) {
+        if (msg.value !== 0) moveLevelSelection(msg.value > 0 ? 1 : -1);
+        lastSelectLaneValue = msg.value;
+      }
+      return;
+    }
+    if ((msg.action === 'jump' || msg.action === 'punch') && msg.explicit) { chooseLevel(); return; }
+    return;
+  }
+  if (state.phase === 'levelComplete'
+      && (msg.action === 'jump' || msg.action === 'punch') && msg.explicit) {
+    openLevelSelect();
+    return;
+  }
   if ((state.phase === 'ready' || state.phase === 'gameover')
       && (msg.action === 'jump' || msg.action === 'punch') && msg.explicit) {
     startCountdown();
@@ -1630,7 +2783,19 @@ function handleInput(msg) {
       state.grounded = false;
       state.jumping = true;
       state.vy = JUMP_VELOCITY;
+      audio.sfx('jump');
     }
+  } else if (msg.action === 'duck') {
+    // The pack has no duck sound. Rather than leave the move silent — it is
+    // the one move with no other feedback, since you don't leave the ground
+    // — the jump sample is played back slow, which reads as a downward
+    // version of the same action. A standard trick, not a bodge.
+    if (state.grounded && state.duckTimer <= 0) audio.sfx('jump', { rate: 0.62 });
+    // Only from the ground: ducking mid-air would be a second way to clear
+    // a hurdle and would make the jump/duck distinction meaningless. Also
+    // ignored while a duck is already running, so a burst of crouch
+    // readings can't hold the character down indefinitely.
+    if (state.grounded && state.duckTimer <= 0) state.duckTimer = DUCK_DURATION;
   } else if (msg.action === 'punch') {
     // Ignore a new punch while the last one's big cosmetic animation is
     // still playing. Without this, a burst of punch messages (e.g. an
@@ -1641,6 +2806,7 @@ function handleInput(msg) {
     // full animation before the next one can begin — a natural rate limit
     // on top of the phone-side cooldown/threshold tightening.
     if (state.punchAnimTimer > 0) return;
+    audio.sfx('punch');
     state.punchTimer = PUNCH_DURATION;
     state.punchAnimTimer = PUNCH_ANIM_DURATION;
   }
@@ -1653,6 +2819,10 @@ function handleInput(msg) {
 // remote maps differently on your specific device. This is what drives the
 // player through the placement and framing setup stages from the couch,
 // once the phone itself is out of their hands.
+// M mutes, for testing from a keyboard; the on-screen button below is the
+// route a player actually has, since a Fire TV remote has no M key.
+function isMutePress(e) { return e.code === 'KeyM'; }
+
 function isSelectPress(e) {
   return e.key === 'Enter' || e.code === 'Enter' || e.code === 'NumpadEnter' || e.code === 'Space';
 }
@@ -1667,6 +2837,10 @@ function isBackPress(e) {
 }
 
 window.addEventListener('keydown', (e) => {
+  // Any remote press is a genuine user gesture, which is what browsers
+  // require before audio may start.
+  audio.unlock();
+  if (isMutePress(e)) { setMuted(audio.toggleMute()); return; }
   if (setupStage === 'placement' && isSelectPress(e)) {
     sendCalibrationControl('placement_ack');
     return;
@@ -1682,6 +2856,26 @@ window.addEventListener('keydown', (e) => {
   if (isBackPress(e)) {
     if (state.phase === 'playing') { pauseGame(); return; }
     if (state.phase === 'paused') { exitToMenu(); return; }
+    // From the results screens, Back goes to the era picker rather than
+    // straight back into the same level again.
+    if (state.phase === 'gameover' || state.phase === 'levelComplete' || state.phase === 'ready') {
+      openLevelSelect();
+      return;
+    }
+  }
+
+  // Era picker: left/right to browse the timeline, OK to travel there.
+  if (state.phase === 'levelSelect') {
+    if (e.code === 'ArrowLeft' || e.code === 'KeyA') { moveLevelSelection(-1); return; }
+    if (e.code === 'ArrowRight' || e.code === 'KeyD') { moveLevelSelection(1); return; }
+    if (isSelectPress(e) || e.code === 'KeyF') { chooseLevel(); return; }
+    return;
+  }
+  // Finishing a level: OK goes on to the picker, where the era just
+  // unlocked is already highlighted.
+  if (state.phase === 'levelComplete' && (isSelectPress(e) || e.code === 'KeyF')) {
+    openLevelSelect();
+    return;
   }
   if (state.phase === 'paused' && isSelectPress(e)) { resumeGame(); return; }
 
@@ -1722,6 +2916,13 @@ function updatePlaying(dt) {
   // more (2026-09-03): points come only from collecting coins and gems, via
   // addScore() — see the collectibles section above.
   state.distance += speed * dt;
+  state.runTime += dt;
+  updateProgressBar();
+  updateFinishPortal(dt);
+  // The finish line. Checked before anything else this frame can spawn or
+  // collide, so the run ends cleanly on the metre rather than a hazard
+  // landing in the same frame as the win.
+  if (state.distance >= currentEra().goal) { levelComplete(); return; }
 
   // Ground scroll
   state.distanceForTex += speed * dt;
@@ -1770,6 +2971,7 @@ function updatePlaying(dt) {
   // the big comment above punchArmRotation() for why they're separate.
   if (state.punchTimer > 0) state.punchTimer = Math.max(0, state.punchTimer - dt);
   if (state.punchAnimTimer > 0) state.punchAnimTimer = Math.max(0, state.punchAnimTimer - dt);
+  if (state.duckTimer > 0) state.duckTimer = Math.max(0, state.duckTimer - dt);
   if (state.invulnTimer > 0) state.invulnTimer = Math.max(0, state.invulnTimer - dt);
   updateStar(dt);
 
@@ -1793,7 +2995,32 @@ function updatePlaying(dt) {
   if (landSquash > 0) landSquash = Math.max(0, landSquash - dt * 5.5);
   const stretch = state.grounded ? 0 : THREE.MathUtils.clamp(state.vy / JUMP_VELOCITY, -1, 1) * 0.16;
   const squash = landSquash * 0.26;
-  player.scale.set(1 - stretch * 0.55 + squash * 0.7, 1 + stretch - squash, 1 - stretch * 0.55 + squash * 0.7);
+
+  // Duck (2026-09-04). Drops fast, holds, springs back up — the drop is
+  // quicker than the recovery because getting UNDER the bar is the urgent
+  // half, and a slow rise reads as effort rather than a rubber band. The
+  // character is anchored at the feet, so compressing y alone plants it
+  // convincingly; widening x/z a little is the squash that stops it looking
+  // like the model simply got shorter.
+  let duckAmt = 0;
+  if (state.duckTimer > 0) {
+    const frac = 1 - state.duckTimer / DUCK_DURATION; // 0 at start, 1 at end
+    if (frac < DUCK_IN_FRAC) duckAmt = frac / DUCK_IN_FRAC;
+    else if (frac > 1 - DUCK_OUT_FRAC) duckAmt = (1 - frac) / DUCK_OUT_FRAC;
+    else duckAmt = 1;
+    duckAmt = THREE.MathUtils.clamp(duckAmt, 0, 1);
+  }
+  const duckY = 1 - duckAmt * (1 - DUCK_SCALE_Y);
+  const duckXZ = 1 + duckAmt * 0.16;
+
+  player.scale.set(
+    (1 - stretch * 0.55 + squash * 0.7) * duckXZ,
+    (1 + stretch - squash) * duckY,
+    (1 - stretch * 0.55 + squash * 0.7) * duckXZ
+  );
+  // Lean the upper body forward into the crouch rather than just shrinking
+  // straight down — a duck is a movement, not a resize.
+  upper.rotation.x = duckAmt * 0.5;
 
   if (propellerBlade) propellerBlade.rotation.y += dt * 14;
 
@@ -1902,6 +3129,11 @@ function updatePlaying(dt) {
       const reachable = p.kind === 'gem' ? player.position.y >= GEM_MIN_PLAYER_Y : true;
       if (reachable) {
         p.collected = true;
+        state.coinsTaken += 1;
+        if (p.kind === 'coin') audio.sfx('coin');
+        else if (p.kind === 'gem') audio.sfx('gem');
+        else if (p.kind === 'life') audio.sfx('heart');
+        else if (p.kind === 'star') audio.sfx('star');
         if (p.kind === 'life') {
           if (state.lives < MAX_LIVES) {
             state.lives += 1;
@@ -1960,6 +3192,10 @@ function updatePlaying(dt) {
         let safe = false;
         if (o.type === 'hurdle') safe = !state.grounded;
         else if (o.type === 'crate') safe = state.punchTimer > 0;
+        // A low bar is cleared by ducking and ONLY by ducking. Jumping into
+        // one puts your head straight through it, which is what stops the
+        // new obstacle from collapsing back into "another hurdle".
+        else if (o.type === 'lowbar') safe = state.duckTimer > 0 && state.grounded;
         else safe = false; // wall: only lane-dodge saves you
 
         if (state.starT > 0) {
@@ -1969,7 +3205,10 @@ function updatePlaying(dt) {
           releaseCoins(o.mesh.position, STAR_SMASH_COINS);
           popCombo('SMASH!');
         } else if (safe) {
-          if (o.type === 'crate') {
+          state.clears += 1;
+          if (o.type === 'lowbar') {
+            popCombo('DUCK!');
+          } else if (o.type === 'crate') {
             // Smashing a crate scatters coins — the reward for a good punch
             // is still points, but they arrive as coins like everything else.
             launchObstacleFlying(o, speed);
@@ -1978,6 +3217,7 @@ function updatePlaying(dt) {
             popCombo('JUMP!');
           }
         } else if (state.invulnTimer <= 0) {
+          audio.sfx('punch', { rate: 0.45, gain: 0.9 });
           state.lives -= 1;
           state.invulnTimer = HIT_INVULN_TIME;
           renderLives();
@@ -2067,6 +3307,24 @@ function animate() {
 // only observable by watching the screen, which is exactly the kind of thing
 // that has slipped through unnoticed on this project before. Nothing here is
 // used by the game, and nothing the player can reach calls it.
+
+// A read-only window onto the scene's current look, so a test can assert
+// that switching era actually REPAINTS THE WORLD rather than just changing
+// the label on the HUD — the failure mode where four "levels" turn out to
+// be one level with four names. `groundKey` is a cheap fingerprint of the
+// ground palette: two eras painted the same would produce the same string.
+window.__mrScene = {
+  get fog() { return scene.fog; },
+  get hemi() { return hemiLight; },
+  get sun() { return sun; },
+  get rim() { return rimLight; },
+  get groundKey() {
+    const g = currentEra().ground;
+    return [g.verge.join('/'), g.kerb, g.path.join('/'), g.dash || '-', g.slabs || '-'].join('|');
+  },
+  get sceneryKinds() { return [...new Set(currentEra().scenery)]; },
+};
+
 window.__mrDebug = {
   phase: () => state.phase,
   score: () => Math.floor(state.score),
@@ -2082,6 +3340,20 @@ window.__mrDebug = {
   placePickup: (kind, lane, z) => addPickup(kind, lane, z),
   setCoinSpawning: (on) => { coinSpawnEnabled = !!on; },
   jump: () => { if (state.grounded) { state.grounded = false; state.jumping = true; state.vy = JUMP_VELOCITY; } },
+  duck: () => { if (state.grounded && state.duckTimer <= 0) state.duckTimer = DUCK_DURATION; },
+  duckRemaining: () => state.duckTimer,
+  punch: () => { if (state.punchAnimTimer <= 0) { state.punchTimer = PUNCH_DURATION; state.punchAnimTimer = PUNCH_ANIM_DURATION; } },
+  era: () => currentEraId,
+  music: () => audio.musicState(),
+  muted: () => audio.isMuted(),
+  grounded: () => state.grounded,
+  eraGoal: () => currentEra().goal,
+  eraList: () => ERAS.map((e) => e.id),
+  applyEra: (id) => applyEra(id),
+  setDistance: (m) => { state.distance = m; },
+  unlocked: () => loadProgress().unlocked.slice(),
+  setUnlocked: (ids) => { const p = loadProgress(); p.unlocked = ids.slice(); saveProgress(p); renderLevelSelect(); },
+  selectIndex: () => levelSelectIndex,
   obstacleCount: () => obstacles.length,
   placeObstacle: (type, lane, z) => {
     // Same as spawnObstacle(): buildObstacleMesh already sets the right y
@@ -2101,6 +3373,19 @@ window.__mrDebug = {
 // stayed visible over the pairing panel until the first phone message
 // arrived. Deliberately down here, after every `let` it reads (setupStage,
 // calibrating, state) has actually been initialised.
+// Paint the starting era's world (Present Day's palette is the file's
+// built-in default, so this is what makes a *different* saved era show its
+// own sky on the pairing screen rather than the default one).
+applyEra(currentEraId);
+// Deliberately not awaited. The game is fully playable on its built-in box
+// shapes; the model pack upgrades what it can, whenever it arrives, and a
+// slow or failed fetch never delays the pairing screen.
+loadModelPack();
+// Effects are decoded up front so the first coin doesn't arrive late. Music
+// streams instead (see audio.js), and neither starts until unlock().
+audio.preloadSfx();
+updateEraBadge();
+renderLevelSelect();
 syncPanel();
 animate();
 
