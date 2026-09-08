@@ -250,6 +250,30 @@ function cleanupEmptyRoom(code) {
   if (room && !room.tv && room.controllers.size === 0) rooms.delete(code);
 }
 
+// Multiplayer (2026-09-08): up to 4 phones can join one room, one per
+// player. Each gets a stable 1-4 id — the lowest one not currently in
+// use — assigned once at connect time and never renumbered while it's
+// still connected, so the TV can track "whose turn is it" by id across a
+// whole multiplayer game without the phones needing to agree on anything
+// among themselves. A 5th join is turned away rather than silently
+// bumping someone, since there's no fair way to pick who loses a slot.
+const MAX_PLAYERS = 4;
+function assignPlayerId(room) {
+  const used = new Set(Array.from(room.controllers, (c) => c.playerId));
+  for (let id = 1; id <= MAX_PLAYERS; id++) if (!used.has(id)) return id;
+  return null;
+}
+
+// Tells the TV exactly who's connected, by id — the roster the multiplayer
+// join/turn-order UI is built from (see renderRoster()/beginMultiplayerIfNeeded()
+// in tv/game.js). Sent in addition to the older controller_connected count,
+// which nothing else here needed to change.
+function broadcastRoster(room) {
+  if (!room.tv) return;
+  const ids = Array.from(room.controllers, (c) => c.playerId).sort((a, b) => a - b);
+  send(room.tv, { type: 'roster', ids });
+}
+
 wss.on('connection', (ws) => {
   ws.role = null;
   ws.roomCode = null;
@@ -276,19 +300,29 @@ wss.on('connection', (ws) => {
           send(ws, { type: 'error', message: 'Room not found. Check the code on the TV screen.' });
           return;
         }
+        const playerId = assignPlayerId(room);
+        if (playerId === null) {
+          send(ws, { type: 'error', message: 'Room is full — up to 4 players can join.' });
+          return;
+        }
         ws.role = 'controller';
         ws.roomCode = code;
+        ws.playerId = playerId;
         room.controllers.add(ws);
-        send(ws, { type: 'paired', code });
+        send(ws, { type: 'paired', code, playerId });
         send(room.tv, { type: 'controller_connected', count: room.controllers.size });
+        broadcastRoster(room);
       }
       return;
     }
 
     // Motion/input events from a controller are relayed straight to its TV.
+    // Stamped with the sender's playerId so the TV can tell whose turn it
+    // actually is in a multiplayer game — see the msg.playerId check in
+    // tv/game.js's handleInput(). Harmless in solo play, where nothing reads it.
     if (msg.type === 'input' && ws.role === 'controller' && ws.roomCode) {
       const room = rooms.get(ws.roomCode);
-      if (room && room.tv) send(room.tv, msg);
+      if (room && room.tv) send(room.tv, { ...msg, playerId: ws.playerId });
       return;
     }
 
@@ -296,7 +330,7 @@ wss.on('connection', (ws) => {
     // relayed to the TV so it can dress the player model.
     if (msg.type === 'character' && ws.role === 'controller' && ws.roomCode) {
       const room = rooms.get(ws.roomCode);
-      if (room && room.tv) send(room.tv, msg);
+      if (room && room.tv) send(room.tv, { ...msg, playerId: ws.playerId });
       return;
     }
 
@@ -305,7 +339,7 @@ wss.on('connection', (ws) => {
     // itself is displayed on the TV, so every event gets relayed there.
     if (msg.type === 'calibration' && ws.role === 'controller' && ws.roomCode) {
       const room = rooms.get(ws.roomCode);
-      if (room && room.tv) send(room.tv, msg);
+      if (room && room.tv) send(room.tv, { ...msg, playerId: ws.playerId });
       return;
     }
 
@@ -336,6 +370,7 @@ wss.on('connection', (ws) => {
     } else if (ws.role === 'controller') {
       room.controllers.delete(ws);
       if (room.tv) send(room.tv, { type: 'controller_connected', count: room.controllers.size });
+      broadcastRoster(room);
     }
     cleanupEmptyRoom(ws.roomCode);
   });

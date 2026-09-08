@@ -243,6 +243,63 @@ holding a phone. Different kids on different phones don't reset each other.
 If `localStorage` is unavailable the game still works — progress just lasts
 for the session.
 
+## Multiplayer (up to 4 players, take turns)
+
+Any number of phones (1–4) can join the same room before a run starts. With
+just one phone, nothing changes — the game plays exactly as always. The
+moment a **second** phone joins, choosing an era on the ready screen no
+longer starts a run immediately: it becomes a **time trial**. Every joined
+player races the same level, one after another, in join order:
+
+- The TV shows a **"Player N's turn"** card naming whoever's up next, then
+  runs their turn exactly like a normal solo run — same track, same
+  obstacles, same countdown.
+- **Only that player's phone controls the character.** Every other phone's
+  input is ignored for the duration of the turn (`server.js` stamps each
+  phone with a stable `playerId` on join and relays it with every message;
+  `game.js` drops any input whose `playerId` doesn't match whoever's turn it
+  is). There's no way for player 2 to nudge player 1's run.
+- Finishing the level or running out of hearts ends that player's turn and
+  automatically advances to the next player's turn-intro card — nobody has
+  to press anything to hand off.
+- Once everyone has gone, a **leaderboard** ranks finishers by finish time
+  (fastest first), with anyone who didn't finish (DNF) listed below,
+  ordered by how far they got. Continuing from the leaderboard returns to
+  the era picker with the room ready for another round.
+- A 5th phone trying to join a full room gets a plain "Room is full" message
+  instead of connecting.
+
+This is a bookkeeping layer on top of the existing single-player run, not a
+parallel game mode — `resetRun()`, `startCountdown()`, `levelComplete()` and
+`gameOver()` are all exactly the same functions a solo player hits, just
+called once per turn with a bit of state (`multiplayer.*` in `game.js`)
+tracking whose turn it is and what everyone's scored so far.
+
+## Auto-terrain: turns, hills & dips (Primeval Valley & Ancient Rome)
+
+Danny-Go/Temple-Run-style automatic terrain has been added to the two eras
+released so far. The path itself bends left and right and rolls over hills
+and dips as you run — **no new input required**. The character and camera
+simply follow the bend automatically, exactly like Temple Run's auto-turns;
+you still only run, jump, duck, punch and change lanes.
+
+- **Scoped to Primeval Valley and Ancient Rome only**, by design — Present
+  Day and Neon Future are untouched and still run dead straight and flat.
+- **Gets wilder the deeper into a level you get.** Both the turns and the
+  hills start gentle near the beginning of a run and grow sharper, taller,
+  and more chaotic (a second, faster wave layers in on top of the first)
+  the closer you get to the finish line — increasing difficulty and chaos
+  over the course of a single run, not just across eras.
+- It's a **purely cosmetic layer** on top of the existing straight,
+  lane-based simulation (see the `AUTO-TERRAIN` comment block above
+  `terrainActive()` in `game.js`): collision is still decided by lane index
+  plus a distance window, exactly as before, so bending the track sideways
+  or rolling it vertically can never desync a hit, a jump, or a pickup — it
+  only changes where things are *drawn*. The ground plane, the character,
+  the camera, obstacles, roadside scenery and pickups all pick up the same
+  `curveOffset()`/`hillOffset()` for their own position along the track, so
+  everything bends and rolls together.
+
 ## The character creator
 
 The first screen on `/play` lets you pick a hairstyle + color, a hat + color
@@ -454,8 +511,12 @@ motion-run/
 - Package the TV page as an actual Fire TV app (a WebView-wrapped APK, or
   using Amazon's web-app packaging tools) so it can launch from the Fire TV
   home screen instead of needing a sideloaded browser.
-- Add more obstacle variety, power-ups, multiple levels/environments, and
-  music/SFX.
+- Add more obstacle variety and power-ups.
+- Bring auto-terrain (turns/hills/dips) to Present Day and Neon Future too,
+  now that Primeval Valley and Ancient Rome have proven the approach.
+- Let multiplayer turns be simultaneous (everyone racing at once, split-
+  screen or ghost runners) instead of one-at-a-time, if a group wants a
+  faster round than a full turn order.
 - Add a simple on-screen countdown ("3, 2, 1, GO!") between pairing and the
   run actually starting, and post-run stats (best combo, longest streak).
 - More hair/hat styles, and a matching 3D preview on the character screen
