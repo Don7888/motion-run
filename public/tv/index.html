@@ -7,6 +7,15 @@
 <link rel="manifest" href="./manifest.json" />
 <link rel="icon" type="image/png" href="./icons/favicon-64.png" />
 <meta name="theme-color" content="#0B1046" />
+<!-- Self-hosted (2026-09-08): the Join screen redesign below is the one
+     screen in the game that leans on real display type instead of the
+     system-font stack the rest of the CSS deliberately sticks to (see the
+     "NO WEB FONT" note further down). Self-hosting keeps that a same-origin,
+     no-third-party-CDN fetch — and these two files are variable fonts (one
+     file covers every weight actually used), so it's one small request per
+     family, cached by the existing service worker after the first load. -->
+<link rel="preload" href="./fonts/Fredoka-Variable.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="./fonts/Nunito-Variable.woff2" as="font" type="font/woff2" crossorigin>
 <style>
   /* =====================================================================
      2026-09-03 "make it look like a real published TV game" pass.
@@ -725,6 +734,117 @@
     .rating .rating-star { font-size: 32px; }
     .score-big { font-size: 48px; margin: 4px 0 10px; }
   }
+
+  /* =====================================================================
+     2026-09-08 — Join screen redesign
+     Matches the "MotionQuest visual design system" mockup: a full-bleed
+     illustrated world instead of a centred card, self-hosted display type
+     (see the <link rel="preload"> pair in <head> and the "NO WEB FONT"
+     note way up at the top of this stylesheet — this screen is the one
+     deliberate exception), and copy reframed around the body as the
+     controller rather than the phone.
+
+     Appended at the end of the stylesheet on purpose: every rule below
+     targets #pairingPanel or a "pq-" prefixed class found ONLY in this
+     screen, so it can freely win the cascade over the older, more
+     generic #pairingPanel/.overlay-panel rules earlier in this file
+     without deleting or renegotiating them — nothing else in the game
+     shares these selectors.
+     ===================================================================== */
+  @font-face {
+    font-family: 'Fredoka';
+    src: url('./fonts/Fredoka-Variable.woff2') format('woff2-variations'), url('./fonts/Fredoka-Variable.woff2') format('woff2');
+    font-weight: 400 700;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: 'Nunito';
+    src: url('./fonts/Nunito-Variable.woff2') format('woff2-variations'), url('./fonts/Nunito-Variable.woff2') format('woff2');
+    font-weight: 400 900;
+    font-display: swap;
+  }
+
+  #pairingPanel {
+    position: fixed; inset: 0; z-index: 5;
+    width: 100%; height: 100%;
+    max-width: none; max-height: none;
+    margin: 0; padding: 0; border: none; border-radius: 0;
+    background: linear-gradient(180deg,#1c1140 0%,#2a1a52 38%,#241548 62%,#170f30 100%);
+    box-shadow: none; overflow: hidden;
+    animation: pqFadeIn 0.4s ease both;
+  }
+  @keyframes pqFadeIn { from { opacity: 0; } to { opacity: 1; } }
+  #pqBgSvg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+
+  .pq-content {
+    position: relative; width: 100%; height: 100%;
+    display: flex; flex-direction: column; align-items: center;
+    padding: clamp(18px, 3.2vh, 40px) clamp(20px, 4vw, 56px);
+    box-sizing: border-box;
+  }
+  /* The control badge ("Use your phone to join") sits fixed near the top
+     of every pre-game screen; nudge our own header down to clear it
+     rather than let the two collide, same idea as body.badge-visible
+     .overlay-panel elsewhere in this file. */
+  body.badge-visible .pq-content { padding-top: clamp(46px, 8vh, 78px); }
+
+  .pq-header { display: flex; align-items: center; gap: 10px; align-self: flex-start; }
+  .pq-logo-text { font-family: 'Fredoka', sans-serif; font-weight: 700; font-size: clamp(16px, 2.4vh, 22px); line-height: 1; letter-spacing: 0.3px; }
+  .pq-logo-motion { color: #fff; text-shadow: 0 2px 0 #1a1030; }
+  .pq-logo-quest { color: #ffd166; text-shadow: 0 2px 0 #1a1030; }
+
+  .pq-hero { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 8px; margin-top: clamp(6px, 1.6vh, 16px); max-width: 720px; }
+  .pq-hero h1 {
+    font-family: 'Fredoka', sans-serif; font-weight: 700;
+    font-size: clamp(22px, 4.4vh, 36px); color: #fff; margin: 0;
+    text-shadow: 0 3px 0 rgba(20,12,40,0.6); line-height: 1.1;
+  }
+  .pq-hero p {
+    font-family: 'Nunito', sans-serif; font-weight: 700;
+    font-size: clamp(13px, 1.9vh, 16px); color: #c9b8f0; margin: 0;
+  }
+
+  .pq-join-card {
+    display: flex; flex-direction: row; align-items: stretch;
+    background: #241548; border: 2px solid rgba(255,255,255,0.1);
+    border-radius: 22px; box-shadow: 0 8px 0 rgba(10,6,24,0.5);
+    margin-top: clamp(10px, 2.4vh, 24px); overflow: hidden;
+  }
+  .pq-join-col { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: clamp(14px, 2.4vh, 26px) clamp(18px, 2.8vw, 32px); }
+  .pq-join-label { font-family: 'Nunito', sans-serif; font-weight: 800; font-size: clamp(10px, 1.5vh, 13px); letter-spacing: 1px; color: #e9defc; text-transform: uppercase; }
+  .pq-play-url { font-family: 'Fredoka', sans-serif; font-weight: 600; font-size: clamp(14px, 2.2vh, 19px); color: #ffd166; }
+  .pq-join-divider { display: flex; align-items: center; justify-content: center; padding: 0 4px; position: relative; }
+  .pq-join-divider::before, .pq-join-divider::after { content: ''; position: absolute; left: 50%; width: 2px; background: rgba(196,181,253,0.18); }
+  .pq-join-divider::before { top: 0; height: 38%; }
+  .pq-join-divider::after { bottom: 0; height: 38%; }
+  .pq-join-divider span { font-family: 'Fredoka', sans-serif; font-weight: 600; font-size: 12px; color: #8b7fb0; background: #241548; padding: 4px 0; z-index: 1; }
+
+  .pq-join-card .qr-card {
+    width: clamp(132px, 15vh, 150px); height: clamp(132px, 15vh, 150px);
+    margin: 0; background: #f4f0ff; border-radius: 14px; padding: 8px;
+    box-shadow: 0 6px 0 rgba(10,6,24,0.35);
+  }
+
+  .pq-code-row { display: flex; flex-direction: row; gap: 6px; }
+  .pq-tile {
+    width: clamp(26px, 4vh, 40px); height: clamp(34px, 5.2vh, 52px);
+    border-radius: 9px; background: #2f2058; border: 2px solid rgba(255,255,255,0.14);
+    display: flex; align-items: center; justify-content: center;
+    font-family: 'Fredoka', sans-serif; font-weight: 700; color: #fff;
+    font-size: clamp(16px, 2.8vh, 26px);
+    box-shadow: 0 4px 0 rgba(10,6,24,0.4);
+  }
+
+  .pq-capacity { display: flex; flex-direction: row; align-items: center; gap: clamp(8px, 1.6vw, 16px); margin-top: clamp(10px, 2.2vh, 20px); }
+  .pq-slot { width: clamp(14px, 2vh, 20px); height: clamp(14px, 2vh, 20px); border-radius: 50%; border: 2px dashed rgba(196,181,253,0.4); background: rgba(255,255,255,0.04); }
+  .pq-capacity-label { font-family: 'Nunito', sans-serif; font-weight: 800; font-size: clamp(10px, 1.5vh, 12px); letter-spacing: 1px; color: #8b7fb0; text-transform: uppercase; margin-left: 4px; }
+
+  #pairingHint {
+    font-family: 'Nunito', sans-serif; font-weight: 800;
+    font-size: clamp(13px, 1.9vh, 16px); color: #e9defc;
+    background: rgba(18,12,36,0.6); border: 2px solid rgba(196,181,253,0.25);
+    border-radius: 999px; padding: 10px 22px; margin-top: auto;
+  }
 </style>
 </head>
 <body>
@@ -762,27 +882,99 @@
 
   <div id="combo"></div>
 
-  <div id="pairingPanel" class="overlay-panel">
-    <h1 class="wordmark">
-      <span class="wm-row wm-motion">MOTION</span>
-      <span class="wm-row wm-quest">QUEST</span>
-      <span class="wm-tagline">Move Through Time</span>
-    </h1>
-    <div class="join-split">
-      <div class="join-col scan">
-        <p>📱 Scan to join</p>
-        <div class="qr-card"><img id="joinQr" alt="Scan with your phone's camera to join" /></div>
+  <div id="pairingPanel">
+    <svg id="pqBgSvg" viewBox="0 0 1280 720" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+      <defs>
+        <linearGradient id="pqSkyFar" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#3a2566"/>
+          <stop offset="100%" stop-color="#1c1140" stop-opacity="0"/>
+        </linearGradient>
+        <radialGradient id="pqLavaGlow" cx="50%" cy="30%" r="70%">
+          <stop offset="0%" stop-color="#ffb347" stop-opacity="0.85"/>
+          <stop offset="55%" stop-color="#ff7a3d" stop-opacity="0.35"/>
+          <stop offset="100%" stop-color="#ff7a3d" stop-opacity="0"/>
+        </radialGradient>
+        <linearGradient id="pqMtnBack" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#4b3480"/>
+          <stop offset="100%" stop-color="#382a63"/>
+        </linearGradient>
+        <linearGradient id="pqMtnFront" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#2e2054"/>
+          <stop offset="100%" stop-color="#211840"/>
+        </linearGradient>
+        <linearGradient id="pqGroundGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#241a48"/>
+          <stop offset="100%" stop-color="#140c2b"/>
+        </linearGradient>
+      </defs>
+      <rect x="0" y="0" width="1280" height="720" fill="#170f30"/>
+      <rect x="0" y="0" width="1280" height="460" fill="url(#pqSkyFar)"/>
+      <g fill="#e9defc" opacity="0.55">
+        <circle cx="90" cy="70" r="2"/><circle cx="180" cy="40" r="1.6"/><circle cx="260" cy="95" r="2.2"/>
+        <circle cx="1020" cy="55" r="2"/><circle cx="1110" cy="90" r="1.6"/><circle cx="1180" cy="50" r="2.2"/>
+        <circle cx="980" cy="120" r="1.4"/><circle cx="140" cy="130" r="1.4"/>
+      </g>
+      <g opacity="0.5">
+        <g fill="#8a76c2"><rect x="60" y="110" width="120" height="26" rx="13"/><rect x="90" y="96" width="70" height="26" rx="13"/></g>
+        <g fill="#9683c9"><rect x="1040" y="150" width="140" height="28" rx="14"/><rect x="1075" y="134" width="80" height="28" rx="14"/></g>
+      </g>
+      <g>
+        <circle cx="1150" cy="330" r="150" fill="url(#pqLavaGlow)"/>
+        <polygon points="1050,470 1150,270 1250,470" fill="url(#pqMtnBack)"/>
+        <polygon points="1120,320 1150,270 1180,320 1160,300 1140,300" fill="#ffb14d"/>
+        <rect x="1143" y="292" width="14" height="30" fill="#ff9142"/>
+      </g>
+      <polygon points="0,460 140,330 260,410 400,300 560,420 700,340 860,430 1000,360 1150,440 1280,380 1280,460 0,460" fill="url(#pqMtnBack)"/>
+      <polygon points="0,470 180,380 340,450 520,360 680,460 880,390 1060,470 1280,410 1280,470 0,470" fill="url(#pqMtnFront)"/>
+      <rect x="0" y="460" width="1280" height="260" fill="url(#pqGroundGrad)"/>
+      <g opacity="0.55" fill="#33255e">
+        <rect x="0" y="460" width="62" height="34"/><rect x="66" y="460" width="62" height="34"/>
+        <rect x="200" y="460" width="62" height="34"/><rect x="330" y="460" width="62" height="34"/>
+        <rect x="520" y="460" width="62" height="34"/><rect x="720" y="460" width="62" height="34"/>
+        <rect x="900" y="460" width="62" height="34"/><rect x="1080" y="460" width="62" height="34"/>
+        <rect x="1210" y="460" width="70" height="34"/>
+      </g>
+      <g fill="#2b1f52"><rect x="30" y="392" width="20" height="72"/><rect x="18" y="356" width="44" height="42" rx="4"/><rect x="10" y="326" width="60" height="36" rx="4"/></g>
+      <g fill="#251a48"><rect x="1198" y="404" width="18" height="60"/><rect x="1186" y="372" width="42" height="38" rx="4"/></g>
+    </svg>
+
+    <div class="pq-content">
+      <div class="pq-header">
+        <svg class="pq-logo" width="34" height="34" viewBox="0 0 40 40" aria-hidden="true">
+          <rect x="14" y="4" width="10" height="10" rx="2" fill="#ffb347"/>
+          <rect x="10" y="16" width="18" height="12" rx="2" fill="#ff8a3d"/>
+          <rect x="8" y="28" width="9" height="10" rx="2" fill="#3b82f6"/>
+          <rect x="22" y="26" width="9" height="12" rx="2" fill="#2563eb"/>
+        </svg>
+        <div class="pq-logo-text"><span class="pq-logo-motion">Motion</span><span class="pq-logo-quest">Quest</span></div>
       </div>
-      <div class="join-or">or</div>
-      <div class="join-col">
-        <p>Open on your phone:</p>
-        <p style="font-size:22px; font-weight:900;" id="playUrl">…/play</p>
-        <p>and enter this code:</p>
-        <div class="room-code" id="roomCode">······</div>
+
+      <div class="pq-hero">
+        <h1>Your Body Is the Controller</h1>
+        <p>Grab your phone just to connect the room — you won't need your Fire TV remote until it's time to pick an era. Once you're in, running, jumping and punching are all you.</p>
       </div>
+
+      <div class="pq-join-card">
+        <div class="pq-join-col">
+          <span class="pq-join-label">Scan to join</span>
+          <div class="qr-card"><img id="joinQr" alt="Scan with your phone's camera to join" /></div>
+        </div>
+        <div class="pq-join-divider"><span>or</span></div>
+        <div class="pq-join-col">
+          <span class="pq-join-label">Open on your phone</span>
+          <span class="pq-play-url" id="playUrl">…/play</span>
+          <span class="pq-join-label" style="margin-top:10px;">Enter this code</span>
+          <div class="pq-code-row" id="roomCode"><span class="pq-tile">·</span><span class="pq-tile">·</span><span class="pq-tile">·</span><span class="pq-tile">·</span><span class="pq-tile">·</span><span class="pq-tile">·</span></div>
+        </div>
+      </div>
+
+      <div class="pq-capacity">
+        <span class="pq-slot"></span><span class="pq-slot"></span><span class="pq-slot"></span><span class="pq-slot"></span>
+        <span class="pq-capacity-label">Up to 4 explorers can join</span>
+      </div>
+
+      <p class="pulse" id="pairingHint">Waiting for your phone to connect…</p>
     </div>
-    <p class="hint pulse" id="pairingHint">Waiting for your phone to connect…</p>
-    <p class="hint">📱 Just your phone for now, no remote needed — up to 4 can join</p>
   </div>
 
   <div id="readyPanel" class="overlay-panel" style="display:none;">

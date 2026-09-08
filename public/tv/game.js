@@ -2976,7 +2976,12 @@ ws.addEventListener('message', (ev) => {
   try { msg = JSON.parse(ev.data); } catch { return; }
 
   if (msg.type === 'room') {
-    roomCodeEl.textContent = msg.code;
+    // The Join screen (2026-09-08 redesign) shows the code as a row of
+    // individual voxel-style tiles rather than one plain string — built
+    // with no whitespace between the <span>s so .textContent (what the
+    // test suite and roomCodeMiniEl's copy both rely on) still reads back
+    // as exactly the 6-digit code.
+    roomCodeEl.innerHTML = String(msg.code).split('').map((d) => `<span class="pq-tile">${d}</span>`).join('');
     if (roomCodeMiniEl) roomCodeMiniEl.textContent = msg.code;
     // Scan-to-join (2026-09-03): the server generates this SVG itself (see
     // server.js's /qr/<code>.svg route + lib/qrcode-lite.js) so no library
