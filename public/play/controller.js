@@ -245,6 +245,7 @@
   const grantCameraBtn = document.getElementById('grantCameraBtn');
   const skipCameraBtn = document.getElementById('skipCameraBtn');
   const roomLabel = document.getElementById('roomLabel');
+  const playerBadge = document.getElementById('playerBadge');
   const calibrateBtn = document.getElementById('calibrateBtn');
 
   const calRecenterBtn = document.getElementById('calRecenterBtn');
@@ -423,6 +424,11 @@
       if (msg.type === 'paired') {
         roomCode = msg.code;
         roomLabel.textContent = roomCode;
+        // Multiplayer: the server assigns a stable 1-4 id on join (see
+        // server.js's assignPlayerId()) purely so the TV can tell whose turn
+        // it is — this phone doesn't need to do anything differently, just
+        // show the player which colour/number they ended up as.
+        if (playerBadge && msg.playerId) playerBadge.textContent = ` · P${msg.playerId}`;
         // 2026-09-03: character creation now happens straight after a
         // successful connection rather than before it (see the header
         // comment) — sendCharacter() moves to characterContinueBtn's click

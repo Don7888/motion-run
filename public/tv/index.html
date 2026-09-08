@@ -320,6 +320,66 @@
   }
 
   /* ---------------------------------------------------------------
+     Moves-at-a-glance strip — replaces a sentence of prose on the Ready
+     screen with four small icon tiles, one per move. Built from CAL_META
+     in game.js (renderMovesStrip()) so the icons never drift out of sync
+     with the ones the guided setup itself uses.
+     --------------------------------------------------------------- */
+  .moves-strip { display: flex; justify-content: center; gap: 10px; margin: 12px 0; }
+  .moves-strip .move-tile {
+    background: var(--grape-900); border: 3px solid var(--violet);
+    border-radius: 16px; padding: 8px 10px 6px; min-width: 64px;
+    box-shadow: 0 5px 0 rgba(11,4,26,0.55);
+  }
+  .moves-strip .move-icon { font-size: 30px; line-height: 1; }
+  .moves-strip .move-label {
+    display: block; margin-top: 4px; font-size: 11px; font-weight: 900;
+    text-transform: uppercase; letter-spacing: 0.5px; color: #C7B8F5;
+  }
+
+  /* ---------------------------------------------------------------
+     Multiplayer roster — up to 4 small slots, filled in as phones join.
+     Deliberately tiny: this sits on the tallest screens in the game (the
+     ready panel), so it earns its place in one compact row rather than a
+     full list. --------------------------------------------------------- */
+  .roster-row { display: flex; justify-content: center; gap: 8px; margin: 4px 0 14px; }
+  .roster-slot {
+    width: 40px; height: 40px; border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 17px; font-weight: 900; color: #fff;
+    background: var(--grape-900); border: 3px solid #5B4B8A;
+    box-shadow: 0 4px 0 rgba(11,4,26,0.5);
+    opacity: 0.4;
+  }
+  .roster-slot.filled { opacity: 1; border-color: var(--slot-color, var(--cyan)); }
+  .overlay-panel p.hint#readyJoinHint { font-size: 15px !important; }
+
+  .turn-swatch {
+    width: 46px; height: 46px; border-radius: 14px; margin: 8px auto 4px;
+    background: var(--slot-color, var(--cyan)); border: 3px solid #fff;
+    box-shadow: 0 5px 0 rgba(11,4,26,0.5);
+  }
+
+  /* ---------------------------------------------------------------
+     Leaderboard — ranked rows, gold for the winner. Times/DNF come from
+     game.js's formatTime()/multiplayer.results, same source as the
+     single-player result stats.
+     --------------------------------------------------------------- */
+  .leaderboard-list { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; min-width: 340px; }
+  .leaderboard-row {
+    display: flex; align-items: center; gap: 12px;
+    background: var(--grape-900); border: 3px solid var(--violet);
+    border-radius: 16px; padding: 8px 16px;
+    box-shadow: 0 4px 0 rgba(11,4,26,0.5);
+  }
+  .leaderboard-row.winner { border-color: var(--gold); box-shadow: 0 4px 0 var(--gold-dk); }
+  .leaderboard-rank { font-size: 20px; font-weight: 900; color: var(--gold); width: 28px; }
+  .leaderboard-swatch { width: 20px; height: 20px; border-radius: 6px; background: var(--slot-color, var(--cyan)); flex-shrink: 0; }
+  .leaderboard-name { flex: 1; text-align: left; font-weight: 900; font-size: 17px; }
+  .leaderboard-time { font-weight: 900; font-size: 17px; color: var(--cyan); }
+  .leaderboard-time.dnf { color: #C7B8F5; font-size: 13px; }
+
+  /* ---------------------------------------------------------------
      "What do I use right now?" badge — see updateControlBadge()
      --------------------------------------------------------------- */
   .control-badge {
@@ -640,6 +700,31 @@
     .level-grid { gap: 10px; }
     .progress-track { width: 52vw; height: 28px; }
   }
+
+  /* ---------------------------------------------------------------
+     Short-screen safety net. Every panel is built to fit without this —
+     the fix for "had to scroll" was shortening the copy, not shrinking
+     type — but a Fire TV Stick genuinely cannot scroll a panel, so this
+     is a second line of defence on the shortest real screens (720p and
+     the odd oversized-UI TV) rather than something to rely on instead.
+     --------------------------------------------------------------- */
+  @media (max-height: 740px) {
+    .overlay-panel { padding: 22px 40px 26px; max-height: 94vh; }
+    body.badge-visible .overlay-panel { max-height: 88vh; }
+    .overlay-panel h1 { font-size: 26px; padding: 9px 22px 11px; margin-bottom: 12px; }
+    .overlay-panel p { font-size: 16px; margin: 7px 0; }
+    .setup-icon { font-size: 54px; margin: 0 0 6px; }
+    .silhouette-wrap svg { width: 84px; height: 140px; }
+    .cal-move-icon { font-size: 58px; margin: 2px 0 0; }
+    .cal-move-text { font-size: 32px; margin: 0 0 6px; }
+    .roster-row { margin: 2px 0 10px; }
+    .roster-slot { width: 34px; height: 34px; font-size: 15px; }
+    .moves-strip .move-tile { padding: 6px 8px 5px; min-width: 54px; }
+    .moves-strip .move-icon { font-size: 24px; }
+    .result-stats > div { padding: 4px 9px 6px; min-width: 72px; }
+    .rating .rating-star { font-size: 32px; }
+    .score-big { font-size: 48px; margin: 4px 0 10px; }
+  }
 </style>
 </head>
 <body>
@@ -697,13 +782,15 @@
       </div>
     </div>
     <p class="hint pulse" id="pairingHint">Waiting for your phone to connect…</p>
-    <p class="hint">🎮 You won't need your Fire TV remote until setup starts — just your phone for now.</p>
+    <p class="hint">📱 Just your phone for now, no remote needed — up to 4 can join</p>
   </div>
 
   <div id="readyPanel" class="overlay-panel" style="display:none;">
     <h1>Player connected! 🎉</h1>
-    <p>Get some space to move. Step left and right to change lanes, jump over hurdles, duck under low bars, and punch what's in the way.</p>
-    <p class="hint pulse">🎮 Press OK on your remote (or tap Jump/Punch on your phone) to choose an era…</p>
+    <div class="roster-row" id="rosterRow"></div>
+    <div class="moves-strip" id="movesStrip"></div>
+    <p class="hint" id="readyJoinHint">👥 More can join — code <b id="roomCodeMini">······</b></p>
+    <p class="hint pulse">🎮 Press OK on your remote (or tap Jump/Punch on your phone) to start</p>
   </div>
 
   <!-- The era picker. Four cards side by side, read left to right as a
@@ -711,8 +798,7 @@
   <div id="levelSelectPanel" class="overlay-panel" style="display:none;">
     <h1>Choose Your Era</h1>
     <div id="levelGrid" class="level-grid"></div>
-    <p class="hint pulse">🎮 ◀ ▶ on your remote to choose · OK to travel there</p>
-    <p class="hint">📱 Or step left/right and jump to pick, without touching the remote</p>
+    <p class="hint pulse">🎮 ◀ ▶ + OK · 📱 step + jump — either picks a level</p>
   </div>
 
   <div id="levelCompletePanel" class="overlay-panel" style="display:none;">
@@ -721,16 +807,32 @@
     <div class="score-big"><span id="levelCompleteScore">0</span> pts</div>
     <div class="result-stats" id="levelCompleteStats"></div>
     <div class="unlock-banner" id="levelCompleteUnlock">🔓 Next era unlocked</div>
+    <p class="hint pulse" id="levelCompleteHint">🎮 Press OK on your remote (or tap Jump/Punch on your phone) to continue</p>
+  </div>
+
+  <!-- Multiplayer: shown for a moment between turns, then the countdown
+       starts on its own — see TURN_INTRO_DELAY in game.js. No button press
+       needed, since the phone that needs to see this is whichever one is
+       about to play, not necessarily the one anyone is holding. -->
+  <div id="turnIntroPanel" class="overlay-panel" style="display:none;">
+    <h1 id="turnIntroTitle">Player 2's turn</h1>
+    <div class="turn-swatch" id="turnIntroSwatch"></div>
+    <p class="setup-callout" id="turnIntroCallout">Get ready!</p>
+    <p class="hint">Same level, racing the clock — starting…</p>
+  </div>
+
+  <!-- Multiplayer: final ranking once every player has had their turn. -->
+  <div id="leaderboardPanel" class="overlay-panel" style="display:none;">
+    <h1>🏁 Results</h1>
+    <div class="leaderboard-list" id="leaderboardList"></div>
     <p class="hint pulse">🎮 Press OK on your remote (or tap Jump/Punch on your phone) to continue</p>
   </div>
 
   <div id="placementPanel" class="overlay-panel" style="display:none;">
     <h1>Set Up Your Phone</h1>
     <div class="setup-icon">📱📺</div>
-    <p>Place your phone under the TV, screen facing you, propped up against something solid so it can't topple over.</p>
-    <p class="setup-callout">📱↔️ Turn it sideways (landscape) so it can see you head to toe</p>
-    <p class="hint">Then step back to your play space.</p>
-    <p class="hint pulse">🎮 Press OK on your remote when it's in place</p>
+    <p class="setup-callout">📱↔️ Prop it up sideways (landscape), facing you</p>
+    <p class="hint pulse">🎮 Step back, then press OK</p>
   </div>
 
   <div id="framingPanel" class="overlay-panel" style="display:none;">
@@ -742,8 +844,7 @@
       </svg>
     </div>
     <p class="setup-status-text" id="framingStatusText">Step into frame</p>
-    <p class="hint">Stand about 2–3 metres (7–10 ft) back so your head to hips fit in the outline</p>
-    <p class="hint" id="framingSubHint">🎮 Press OK once you're set, or hold still and we'll continue automatically</p>
+    <p class="hint" id="framingSubHint">Stand 2–3m back to fit the outline</p>
   </div>
 
   <div id="calibrationPanel" class="overlay-panel" style="display:none;">
@@ -751,8 +852,7 @@
     <p class="cal-step-counter" id="calStepCounter">Step 1 of 4</p>
     <div class="cal-move-icon" id="calMoveIcon">⬅️</div>
     <div class="cal-move-text" id="calMoveText">Step LEFT</div>
-    <p class="hint">📱 Copy the move shown here to check it off</p>
-    <p class="hint">🎮 The run starts on its own when you're done — or press OK to start now</p>
+    <p class="hint">📱 Copy the move · 🎮 Press OK to skip ahead</p>
     <div class="cal-dots" id="calDots"></div>
   </div>
 
@@ -764,11 +864,11 @@
   </div>
 
   <div id="gameOverPanel" class="overlay-panel" style="display:none;">
-    <h1>Run Over!</h1>
+    <h1 id="gameOverTitle">Run Over!</h1>
     <div class="score-big"><span id="finalScore">0</span> pts</div>
     <p class="new-high-score" id="newHighScoreNote" style="display:none;">🏆 New High Score!</p>
-    <p class="hint pulse">🎮 Press OK on your remote (or tap Jump/Punch on your phone) to run again</p>
-    <p class="hint">🎮 Press Back to pick a different era</p>
+    <p class="hint pulse" id="gameOverHint">🎮 Press OK on your remote (or tap Jump/Punch on your phone) to run again</p>
+    <p class="hint" id="gameOverSubHint">🎮 Press Back to pick a different era</p>
   </div>
 
   <script type="module" src="./game.js"></script>

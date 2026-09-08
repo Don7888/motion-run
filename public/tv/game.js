@@ -807,6 +807,11 @@ function buildScenery(names) {
     const t = make();
     const side = i % 2 === 0 ? -1 : 1;
     t.position.set(side * (5.5 + Math.random() * 3.5), 0, -i * 7.5 - Math.random() * 6);
+    // Auto-terrain (dino/rome) redraws x/y from these each frame instead of
+    // the roadside props staying planted on a flat, straight verge while the
+    // road itself visibly curves and rolls underneath them.
+    t.userData.baseX = t.position.x;
+    t.userData.baseY = t.position.y;
     scene.add(t);
     sceneryPool.push(t);
   }
@@ -1236,7 +1241,11 @@ function spawnObstacle() {
   mesh.position.x = LANE_X[lane];
   mesh.position.z = SPAWN_Z;
   scene.add(mesh);
-  obstacles.push({ type, lane, mesh, resolved: false, flying: false });
+  // baseY: whatever height the builder itself anchored the mesh at (usually
+  // 0) — auto-terrain adds hillOffset() on top of this each frame rather
+  // than overwriting it, so an obstacle with its own vertical anchor still
+  // keeps it.
+  obstacles.push({ type, lane, mesh, resolved: false, flying: false, baseY: mesh.position.y });
   // A hurdle is the one obstacle you clear by going UP, so it's the natural
   // place to hang a gem: the jump you already have to make is what earns it.
   if (type === 'hurdle') spawnGem(lane, SPAWN_Z);
@@ -1454,6 +1463,77 @@ function buildHorizon(id) {
 const ERA_BY_ID = Object.fromEntries(ERAS.map((e) => [e.id, e]));
 let currentEraId = 'present';
 function currentEra() { return ERA_BY_ID[currentEraId] || ERA_BY_ID.present; }
+
+// =====================================================================
+// AUTO-TERRAIN — turns, hills & dips (2026-09-08)
+//
+// Danny-Go/Temple-Run-style automatic terrain, scoped to the two eras Don
+// asked to start with: the path itself curves and rolls, but nothing
+// requires a new player action — the character and camera simply follow
+// the bend. This is a purely COSMETIC layer on top of the existing
+// straight, lane-based simulation: collision is still decided by lane
+// index plus a z window (see the obstacle-collision block further down),
+// and pickups are still gated by lane + z, so bending the visuals
+// sideways/vertically can never desync a hit or a pickup — it only moves
+// where things are drawn, never what "lane 0/1/2" or "how far along"
+// means underneath. Both functions return exactly 0 for every other era,
+// so nothing about them changes how those eras look or play.
+//
+// Difficulty/chaos ramps with how far into the LEVEL a given point sits
+// (terrainRamp), not how far the player has personally run — so a hazard
+// spawned ahead of the player is already bending/rolling by the amount
+// appropriate to where the player will actually meet it, and a run gets
+// visibly wilder the deeper into it you get, per Don's "increasing
+// difficulty and chaos" ask.
+// =====================================================================
+const TERRAIN_ERA_IDS = new Set(['dino', 'rome']);
+function terrainActive() { return TERRAIN_ERA_IDS.has(currentEraId); }
+
+// 0 at the start of a level, 1 at the finish line.
+function terrainRamp(distanceAlong) {
+  const goal = currentEra().goal || 1;
+  return THREE.MathUtils.clamp(distanceAlong / goal, 0, 1);
+}
+
+// Lateral offset (metres) of the track's centre-line at a point along it —
+// one slow, wide bend from the very start, with a second faster, choppier
+// wave layered in only once a run is deep enough to have earned "chaotic".
+function curveOffset(distanceAlong) {
+  if (!terrainActive()) return 0;
+  const ramp = terrainRamp(distanceAlong);
+  const amp = THREE.MathUtils.lerp(0.9, 3.4, ramp);
+  const chaos = Math.max(0, ramp - 0.45) * (1 / 0.55);
+  return (
+    Math.sin(distanceAlong * THREE.MathUtils.lerp(0.018, 0.048, ramp)) * amp +
+    Math.sin(distanceAlong * 0.135 + 1.7) * chaos * 1.2
+  );
+}
+
+// Vertical offset (metres) of the ground at a point along it — hills and
+// dips, same escalating shape as curveOffset but on its own phase so the
+// two don't crest in lockstep on every pass.
+function hillOffset(distanceAlong) {
+  if (!terrainActive()) return 0;
+  const ramp = terrainRamp(distanceAlong);
+  const amp = THREE.MathUtils.lerp(0.3, 1.3, ramp);
+  const chaos = Math.max(0, ramp - 0.35) * (1 / 0.65);
+  return (
+    Math.sin(distanceAlong * THREE.MathUtils.lerp(0.013, 0.03, ramp) + 0.6) * amp +
+    Math.sin(distanceAlong * 0.075 + 2.4) * chaos * 0.55
+  );
+}
+
+// Local slope via finite difference. Banking the ground/camera INTO a turn
+// or hill (rather than just translating them sideways/up) is what actually
+// reads as "the path is turning" instead of "the path is sliding".
+function curveSlope(distanceAlong) {
+  const h = 3;
+  return (curveOffset(distanceAlong + h) - curveOffset(distanceAlong - h)) / (2 * h);
+}
+function hillSlope(distanceAlong) {
+  const h = 3;
+  return (hillOffset(distanceAlong + h) - hillOffset(distanceAlong - h)) / (2 * h);
+}
 
 // Swaps the whole world over to an era: sky, fog, the three lights, the
 // ground texture, the roadside scenery and the collectible colours. Called
@@ -1828,6 +1908,12 @@ const state = {
   grounded: true,
   vy: 0,
   jumping: false,
+  // Height above the LOCAL terrain, i.e. the pure jump arc with auto-terrain's
+  // hill/dip offset never mixed in — player.position.y is derived from this
+  // (see the bottom of updatePlaying), never the other way around, so a
+  // grounded character can't silently accumulate the hill offset frame after
+  // frame just because nothing resets player.position.y itself while grounded.
+  jumpY: 0,
   punchTimer: 0,
   punchAnimTimer: 0, // cosmetic-only — see PUNCH_ANIM_DURATION above
   duckTimer: 0,      // seconds of duck left; > 0 clears a low bar
@@ -1844,7 +1930,141 @@ const state = {
   distanceForTex: 0,
   countdownT: 0,      // seconds left on the pre-run countdown
   gameOverT: 0,       // seconds spent on the Run Over screen (auto-restart)
+  turnEndT: 0,        // seconds spent on a multiplayer turn's result screen
+  turnIntroT: 0,       // seconds spent on the "Player N's turn" screen
 };
+
+// =========================================================================
+// MULTIPLAYER — up to 4 players, one phone each, taking turns at a time
+// trial on the same level. Deliberately built as a thin layer on top of the
+// existing single-player flow rather than a parallel mode: the level, the
+// countdown, resetRun(), levelComplete() and gameOver() are all exactly the
+// same code a solo player uses — a "turn" is just one ordinary run, with
+// bookkeeping before and after it to say whose run it was and what to do
+// when it ends. Single-player is `roster.length <= 1`, in which case none
+// of this engages and the game behaves exactly as it always has.
+// =========================================================================
+const PLAYER_META = [
+  { name: 'Player 1', color: '#FF2D95' }, // magenta
+  { name: 'Player 2', color: '#22D3EE' }, // cyan
+  { name: 'Player 3', color: '#4ADE80' }, // mint
+  { name: 'Player 4', color: '#FFD93D' }, // gold
+];
+function playerLabel(id) { return PLAYER_META[((id - 1) % 4 + 4) % 4] || PLAYER_META[0]; }
+
+// Player ids (1-4) of every phone currently connected, kept in sync by the
+// server's `roster` broadcasts (see server.js) — NOT the same as
+// `controller_connected`'s count, which this still exists alongside since
+// nothing else reads it.
+let roster = [];
+
+const TURN_INTRO_DELAY = 1.8;   // seconds shown on "Player N's turn" before the countdown
+const TURN_END_AUTO_DELAY = 3.2; // seconds a per-turn result screen waits before auto-advancing
+
+const multiplayer = {
+  active: false,
+  order: [],     // player ids, in turn order, fixed for the whole game
+  index: 0,      // whose turn is current — order[index]
+  results: [],   // {id, name, color, finished, time, distance, score}
+};
+
+function resetMultiplayer() {
+  multiplayer.active = false;
+  multiplayer.order = [];
+  multiplayer.index = 0;
+  multiplayer.results = [];
+}
+
+// Called once, at the moment a level is actually chosen — the natural point
+// a "game" begins, whether that's one player or four. Locks in the turn
+// order for the whole session; players who join mid-game join the NEXT one.
+function beginMultiplayerIfNeeded() {
+  if (roster.length >= 2) {
+    multiplayer.active = true;
+    multiplayer.order = roster.slice().sort((a, b) => a - b);
+    multiplayer.index = 0;
+    multiplayer.results = [];
+  } else {
+    resetMultiplayer();
+  }
+}
+
+function activePlayerId() {
+  return multiplayer.active ? multiplayer.order[multiplayer.index] : null;
+}
+
+function recordTurnResult(finished) {
+  const id = activePlayerId();
+  if (id == null) return;
+  const label = playerLabel(id);
+  multiplayer.results.push({
+    id, name: label.name, color: label.color,
+    finished, time: finished ? state.runTime : null,
+    distance: Math.floor(state.distance), score: Math.floor(state.score),
+  });
+}
+
+// Ranks finishers by time (fastest first), then anyone who didn't finish by
+// how far they got — a DNF still has a placing, it's just not a time.
+function rankedResults() {
+  return multiplayer.results.slice().sort((a, b) => {
+    if (a.finished && b.finished) return a.time - b.time;
+    if (a.finished !== b.finished) return a.finished ? -1 : 1;
+    return b.distance - a.distance;
+  });
+}
+
+function showTurnIntro() {
+  state.phase = 'turnIntro';
+  state.turnIntroT = 0;
+  const id = activePlayerId();
+  const label = playerLabel(id);
+  if (turnIntroTitle) turnIntroTitle.textContent = `${label.name}'s turn`;
+  if (turnIntroCallout) turnIntroCallout.textContent = `Turn ${multiplayer.index + 1} of ${multiplayer.order.length} — get ready!`;
+  if (turnIntroSwatch) turnIntroSwatch.style.setProperty('--slot-color', label.color);
+  hideActionPrompt();
+  hideCountdown();
+  syncPanel();
+}
+
+function showLeaderboard() {
+  state.phase = 'leaderboard';
+  if (leaderboardList) {
+    const ranked = rankedResults();
+    leaderboardList.innerHTML = ranked.map((r, i) => `
+      <div class="leaderboard-row${i === 0 ? ' winner' : ''}">
+        <span class="leaderboard-rank">${i + 1}</span>
+        <span class="leaderboard-swatch" style="--slot-color:${r.color}"></span>
+        <span class="leaderboard-name">${r.name}</span>
+        <span class="leaderboard-time${r.finished ? '' : ' dnf'}">${r.finished ? formatTime(r.time) : `${r.distance} m`}</span>
+      </div>
+    `).join('');
+  }
+  hideActionPrompt();
+  hideCountdown();
+  syncPanel();
+}
+
+// Called once a turn's result screen (levelComplete or gameover) is done —
+// either the timer ran out or someone pressed the button early. Moves to
+// the next player, or to the leaderboard if that was the last one.
+function advanceMultiplayerTurn() {
+  if (!multiplayer.active) return;
+  multiplayer.index += 1;
+  if (multiplayer.index >= multiplayer.order.length) {
+    showLeaderboard();
+  } else {
+    showTurnIntro();
+  }
+}
+
+// Leaving the leaderboard (or cancelling mid-game via Back) always returns
+// to the era picker — a new game means picking again, even if it'll just be
+// the same era and the same players.
+function endMultiplayer() {
+  resetMultiplayer();
+  openLevelSelect();
+}
 
 // ---------------------------------------------------------------------
 // High score — persisted in this browser's localStorage. There's no
@@ -1885,9 +2105,19 @@ const framingSilhouette = document.getElementById('framingSilhouette');
 const framingStatusText = document.getElementById('framingStatusText');
 const framingSubHint = document.getElementById('framingSubHint');
 const roomCodeEl = document.getElementById('roomCode');
+const roomCodeMiniEl = document.getElementById('roomCodeMini');
 const playUrlEl = document.getElementById('playUrl');
 const joinQrEl = document.getElementById('joinQr');
 const pairingHint = document.getElementById('pairingHint');
+const rosterRowEl = document.getElementById('rosterRow');
+const movesStripEl = document.getElementById('movesStrip');
+const readyJoinHintEl = document.getElementById('readyJoinHint');
+const turnIntroPanel = document.getElementById('turnIntroPanel');
+const turnIntroTitle = document.getElementById('turnIntroTitle');
+const turnIntroCallout = document.getElementById('turnIntroCallout');
+const turnIntroSwatch = document.getElementById('turnIntroSwatch');
+const leaderboardPanel = document.getElementById('leaderboardPanel');
+const leaderboardList = document.getElementById('leaderboardList');
 const comboEl = document.getElementById('combo');
 const flashEl = document.getElementById('flash');
 const finalScoreEl = document.getElementById('finalScore');
@@ -1940,6 +2170,8 @@ const PANELS = {
   framing: framingPanel,
   levelSelect: levelSelectPanel,
   levelComplete: levelCompletePanel,
+  turnIntro: turnIntroPanel,
+  leaderboard: leaderboardPanel,
 };
 
 // ---------------------------------------------------------------------
@@ -1959,6 +2191,8 @@ const CONTROL_BADGE_TEXT = {
   gameover: { text: '🎮 Remote OK to retry · Back for levels', cls: 'remote' },
   levelSelect: { text: '🎮 ◀ ▶ to choose · OK to travel', cls: 'remote' },
   levelComplete: { text: '🎮 Remote OK to continue', cls: 'remote' },
+  turnIntro: null, // no input needed — see TURN_INTRO_DELAY
+  leaderboard: { text: '🎮 Remote OK to continue', cls: 'remote' },
 };
 function updateControlBadge(stageKey) {
   const meta = CONTROL_BADGE_TEXT[stageKey];
@@ -2001,7 +2235,41 @@ function syncPanel() {
   else if (state.phase === 'ready') { showPanel('ready'); updateControlBadge('ready'); }
   else if (state.phase === 'paused') { showPanel('paused'); updateControlBadge('paused'); }
   else if (state.phase === 'gameover') { showPanel('gameover'); updateControlBadge('gameover'); }
+  else if (state.phase === 'turnIntro') { showPanel('turnIntro'); updateControlBadge('turnIntro'); }
+  else if (state.phase === 'leaderboard') { showPanel('leaderboard'); updateControlBadge('leaderboard'); }
   else { showPanel(null); updateControlBadge(null); }
+}
+
+// Four slots, filled in join order — this is the only place the game shows
+// "who's connected" before a run starts. Re-rendered on every `roster`
+// message from the server (see the WebSocket handler below).
+function renderRoster() {
+  if (!rosterRowEl) return;
+  rosterRowEl.innerHTML = PLAYER_META.map((meta, i) => {
+    const id = i + 1;
+    const filled = roster.includes(id);
+    return `<span class="roster-slot${filled ? ' filled' : ''}" style="--slot-color:${meta.color}">${filled ? id : ''}</span>`;
+  }).join('');
+  if (readyJoinHintEl) {
+    readyJoinHintEl.style.display = roster.length >= 4 ? 'none' : 'block';
+  }
+}
+
+// Replaces the old "step left/right, jump, duck, punch" sentence on the
+// Ready screen with one tile per move, built from the same CAL_META the
+// guided setup uses — left/right share a tile since they're one skill
+// ("move sideways"), not two.
+function renderMovesStrip() {
+  if (!movesStripEl) return;
+  const tiles = [
+    { icon: '⬅️➡️', label: 'Move' },
+    { icon: CAL_META.jump.icon, label: 'Jump' },
+    { icon: CAL_META.duck.icon, label: 'Duck' },
+    { icon: CAL_META.punch.icon, label: 'Punch' },
+  ];
+  movesStripEl.innerHTML = tiles.map((t) => `
+    <div class="move-tile"><div class="move-icon">${t.icon}</div><span class="move-label">${t.label}</span></div>
+  `).join('');
 }
 
 // =========================================================================
@@ -2067,8 +2335,8 @@ function renderFramingPanel() {
   framingSilhouette.style.setProperty('--sil-color', meta.color);
   framingSilhouette.classList.toggle('good', framingStatus === 'good');
   framingSubHint.textContent = framingReady
-    ? "Press OK to continue, or we'll start in a moment…"
-    : "Press OK once you're set, or hold still and we'll continue automatically";
+    ? 'Press OK, or hold still…'
+    : 'Stand 2–3m back · press OK when set';
 }
 
 function updateFramingUI(status, ready) {
@@ -2344,9 +2612,11 @@ function chooseLevel() {
     if (card) { card.classList.remove('shake'); void card.offsetWidth; card.classList.add('shake'); }
     return;
   }
+  beginMultiplayerIfNeeded();
   applyEra(era.id);
   updateEraBadge();
-  startCountdown();
+  if (multiplayer.active) showTurnIntro();
+  else startCountdown();
 }
 
 const muteBtn = document.getElementById('muteBtn');
@@ -2405,10 +2675,24 @@ function levelComplete() {
   audio.sfx('star');
   const era = currentEra();
   state.phase = 'levelComplete';
+  state.turnEndT = 0;
   commitHighScore();
   recordBest(era.id, state.score);
   const opened = unlockNextAfter(era.id);
-  if (levelCompleteTitle) levelCompleteTitle.textContent = `${era.icon} ${era.name} complete!`;
+  if (multiplayer.active) {
+    recordTurnResult(true);
+    if (levelCompleteTitle) levelCompleteTitle.textContent = `${playerLabel(activePlayerId()).name} finished!`;
+  } else if (levelCompleteTitle) {
+    levelCompleteTitle.textContent = `${era.icon} ${era.name} complete!`;
+  }
+  const hintEl = document.getElementById('levelCompleteHint');
+  if (hintEl) {
+    hintEl.textContent = multiplayer.active
+      ? (multiplayer.index + 1 < multiplayer.order.length
+          ? '🎮 OK / Jump / Punch for the next player'
+          : '🎮 OK / Jump / Punch to see the results')
+      : '🎮 Press OK on your remote (or tap Jump/Punch on your phone) to continue';
+  }
   if (levelCompleteScore) levelCompleteScore.textContent = String(Math.floor(state.score));
   const stars = starRating();
   if (levelCompleteStars) {
@@ -2508,6 +2792,7 @@ function resetRun() {
   state.grounded = true;
   state.vy = 0;
   state.jumping = false;
+  state.jumpY = 0;
   state.punchTimer = 0;
   state.punchAnimTimer = 0;
   state.duckTimer = 0;
@@ -2592,9 +2877,27 @@ function gameOver() {
   audio.sfx('star', { rate: 0.5 });
   state.phase = 'gameover';
   state.gameOverT = 0;
+  state.turnEndT = 0;
   finalScoreEl.textContent = Math.floor(state.score);
   commitHighScore();
   newHighScoreNote.style.display = state.score > highScoreAtRunStart ? 'block' : 'none';
+  const titleEl = document.getElementById('gameOverTitle');
+  const hintEl = document.getElementById('gameOverHint');
+  const subHintEl = document.getElementById('gameOverSubHint');
+  if (multiplayer.active) {
+    recordTurnResult(false);
+    if (titleEl) titleEl.textContent = `${playerLabel(activePlayerId()).name} is out!`;
+    if (hintEl) {
+      hintEl.textContent = multiplayer.index + 1 < multiplayer.order.length
+        ? '🎮 OK / Jump / Punch for the next player'
+        : '🎮 OK / Jump / Punch to see the results';
+    }
+    if (subHintEl) subHintEl.style.display = 'none';
+  } else {
+    if (titleEl) titleEl.textContent = 'Run Over!';
+    if (hintEl) hintEl.textContent = '🎮 Press OK on your remote (or tap Jump/Punch on your phone) to run again';
+    if (subHintEl) subHintEl.style.display = 'block';
+  }
   hideActionPrompt();
   hideCountdown();
   endStar(); // don't leave the aura, the HUD pill or the widened FOV behind
@@ -2645,6 +2948,10 @@ function exitToMenu() {
   if (state.phase !== 'playing' && state.phase !== 'paused' && state.phase !== 'countdown') return;
   commitHighScore();
   hideCountdown();
+  // Exiting mid-turn abandons the whole multiplayer game, same reasoning as
+  // the Back-press handler on the results screens — there's no sensible
+  // "resume this player's turn later".
+  resetMultiplayer();
   state.phase = 'ready';
   calibrating = false;
   setupStage = 'none';
@@ -2670,11 +2977,20 @@ ws.addEventListener('message', (ev) => {
 
   if (msg.type === 'room') {
     roomCodeEl.textContent = msg.code;
+    if (roomCodeMiniEl) roomCodeMiniEl.textContent = msg.code;
     // Scan-to-join (2026-09-03): the server generates this SVG itself (see
     // server.js's /qr/<code>.svg route + lib/qrcode-lite.js) so no library
     // or network fetch is needed here — just point an <img> at it once the
     // room code exists. Same-origin request, so no CORS concerns either.
     joinQrEl.src = `/qr/${msg.code}.svg`;
+  } else if (msg.type === 'roster') {
+    // Who's actually connected, by player id — separate from
+    // controller_connected's bare count, which this still runs alongside.
+    // Multiplayer's turn order is only locked in once a level is chosen
+    // (see beginMultiplayerIfNeeded()), so a late join or a drop mid-game
+    // doesn't reshuffle a turn order already in progress.
+    roster = Array.isArray(msg.ids) ? msg.ids.slice().sort((a, b) => a - b) : [];
+    renderRoster();
   } else if (msg.type === 'controller_connected') {
     if (msg.count > 0 && (state.phase === 'pairing')) {
       state.phase = 'ready';
@@ -2683,6 +2999,7 @@ ws.addEventListener('message', (ev) => {
       state.phase = 'pairing';
       calibrating = false;
       setupStage = 'none';
+      resetMultiplayer();
       syncPanel();
     }
   } else if (msg.type === 'input') {
@@ -2755,16 +3072,34 @@ function handleInput(msg) {
     if ((msg.action === 'jump' || msg.action === 'punch') && msg.explicit) { chooseLevel(); return; }
     return;
   }
+  if (state.phase === 'leaderboard'
+      && (msg.action === 'jump' || msg.action === 'punch') && msg.explicit) {
+    endMultiplayer();
+    return;
+  }
   if (state.phase === 'levelComplete'
       && (msg.action === 'jump' || msg.action === 'punch') && msg.explicit) {
-    openLevelSelect();
+    if (multiplayer.active) advanceMultiplayerTurn(); else openLevelSelect();
     return;
   }
-  if ((state.phase === 'ready' || state.phase === 'gameover')
+  if (state.phase === 'ready'
       && (msg.action === 'jump' || msg.action === 'punch') && msg.explicit) {
-    startCountdown();
+    // Two or more phones connected before the first run starts means a
+    // multiplayer game — route through the era picker so the group picks
+    // together, same as any other route into chooseLevel()/
+    // beginMultiplayerIfNeeded(). One phone keeps the old direct-start.
+    if (roster.length >= 2) openLevelSelect(); else startCountdown();
     return;
   }
+  if (state.phase === 'gameover'
+      && (msg.action === 'jump' || msg.action === 'punch') && msg.explicit) {
+    if (multiplayer.active) advanceMultiplayerTurn(); else startCountdown();
+    return;
+  }
+  // Mid-run input during a multiplayer turn only counts from whoever's turn
+  // it actually is — otherwise every connected phone would steer the same
+  // character during someone else's timed run.
+  if (multiplayer.active && state.phase === 'playing' && msg.playerId !== activePlayerId()) return;
   if (state.phase !== 'playing') return;
 
   if (msg.action === 'lane') {
@@ -2857,9 +3192,12 @@ window.addEventListener('keydown', (e) => {
     if (state.phase === 'playing') { pauseGame(); return; }
     if (state.phase === 'paused') { exitToMenu(); return; }
     // From the results screens, Back goes to the era picker rather than
-    // straight back into the same level again.
-    if (state.phase === 'gameover' || state.phase === 'levelComplete' || state.phase === 'ready') {
-      openLevelSelect();
+    // straight back into the same level again. Mid-multiplayer-game, Back
+    // abandons the whole session (remaining turns included) rather than
+    // just the current one — a half-finished leaderboard would be worse.
+    if (state.phase === 'gameover' || state.phase === 'levelComplete'
+        || state.phase === 'ready' || state.phase === 'leaderboard') {
+      if (multiplayer.active) endMultiplayer(); else openLevelSelect();
       return;
     }
   }
@@ -2872,9 +3210,14 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   // Finishing a level: OK goes on to the picker, where the era just
-  // unlocked is already highlighted.
+  // unlocked is already highlighted — or, mid-multiplayer-game, on to the
+  // next player's turn (or the final leaderboard, for the last one).
   if (state.phase === 'levelComplete' && (isSelectPress(e) || e.code === 'KeyF')) {
-    openLevelSelect();
+    if (multiplayer.active) advanceMultiplayerTurn(); else openLevelSelect();
+    return;
+  }
+  if (state.phase === 'leaderboard' && (isSelectPress(e) || e.code === 'KeyF')) {
+    endMultiplayer();
     return;
   }
   if (state.phase === 'paused' && isSelectPress(e)) { resumeGame(); return; }
@@ -2889,7 +3232,11 @@ window.addEventListener('keydown', (e) => {
   // from the Ready or Game Over screens — the remote works here too, not
   // just jump/punch from the phone.
   if (!calibrating && state.phase !== 'playing' && state.phase !== 'paused' && (isSelectPress(e) || e.code === 'KeyF')) {
-    if (state.phase === 'ready' || state.phase === 'gameover') startCountdown();
+    if (state.phase === 'ready') {
+      if (roster.length >= 2) openLevelSelect(); else startCountdown();
+    } else if (state.phase === 'gameover') {
+      if (multiplayer.active) advanceMultiplayerTurn(); else startCountdown();
+    }
     return;
   }
   if (e.code === 'ArrowLeft' || e.code === 'KeyA') handleInput({ type: 'input', action: 'lane', value: -1 });
@@ -2932,6 +3279,14 @@ function updatePlaying(dt) {
   sceneryPool.forEach((t) => {
     t.position.z += speed * dt;
     if (t.position.z > 10) t.position.z -= 16 * sceneryPool.length * 0.5;
+    if (terrainActive()) {
+      const distAlong = state.distance - t.position.z;
+      t.position.x = t.userData.baseX + curveOffset(distAlong);
+      t.position.y = t.userData.baseY + hillOffset(distAlong);
+    } else {
+      t.position.x = t.userData.baseX;
+      t.position.y = t.userData.baseY;
+    }
   });
 
   // Player lane lerp + lean. The multiplier here (was 9, then 15) is how
@@ -2946,23 +3301,35 @@ function updatePlaying(dt) {
   // twice that many frames at the old dt*15.
   // The lean-rotation lerp is sped up to match (dt*10 -> dt*16) so the
   // torso bank doesn't visibly lag behind the now-snappier lane movement.
-  const targetX = LANE_X[state.lane];
+  // Auto-terrain (dino/rome): the lane centre itself drifts sideways as the
+  // player's own position along the track bends, so the existing lane-lerp
+  // and lean below carry the character around the curve automatically —
+  // no new input, no change to which of the 3 lanes they're actually in.
+  const targetX = LANE_X[state.lane] + curveOffset(state.distance);
   const dx = targetX - player.position.x;
   player.position.x += dx * Math.min(1, dt * 24);
   player.rotation.z = THREE.MathUtils.lerp(player.rotation.z, THREE.MathUtils.clamp(-dx * 0.35, -0.35, 0.35), dt * 16);
 
-  // Jump physics
+  // Jump physics — tracked in state.jumpY (height above LOCAL terrain), not
+  // player.position.y directly. player.position.y is grounded==0 whenever
+  // the character isn't jumping, every single frame, by construction, so
+  // auto-terrain's hill offset (added once, at the very bottom of this
+  // function) can never accumulate onto it just because nothing else here
+  // resets player.position.y while grounded.
   if (!state.grounded) {
     state.vy += GRAVITY * dt;
-    player.position.y += state.vy * dt;
-    if (player.position.y <= 0) {
-      player.position.y = 0;
+    state.jumpY += state.vy * dt;
+    if (state.jumpY <= 0) {
+      state.jumpY = 0;
       state.vy = 0;
       state.grounded = true;
       state.jumping = false;
       landSquash = 1; // drives the touchdown squash below
     }
+  } else {
+    state.jumpY = 0;
   }
+  player.position.y = state.jumpY;
   shadowBlob.position.x = player.position.x;
   shadowBlob.scale.setScalar(THREE.MathUtils.clamp(1 - player.position.y * 0.15, 0.4, 1));
 
@@ -3109,17 +3476,27 @@ function updatePlaying(dt) {
   for (let i = pickups.length - 1; i >= 0; i--) {
     const p = pickups[i];
     p.mesh.position.z += speed * dt;
+    // Auto-terrain (dino/rome): pickups ride the same bend/roll as the
+    // lane they sit in, so a coin trail visibly follows the curve instead
+    // of floating over a track that's drifted out from under it. 0 for
+    // every other era, so position.x/y below reduce to exactly what they
+    // were before this feature existed.
+    const distAlong = state.distance - p.mesh.position.z;
+    const curveX = terrainActive() ? curveOffset(distAlong) : 0;
+    const hillY = terrainActive() ? hillOffset(distAlong) : 0;
+    p.mesh.position.x = LANE_X[p.lane] + curveX;
     // A little spin so they read as collectible rather than scenery.
     if (p.kind === 'gem') {
       p.mesh.rotation.y += dt * 2.6;
-      p.mesh.position.y = GEM_Y + Math.sin(state.distanceForTex * 0.9 + p.mesh.position.x) * 0.12;
+      p.mesh.position.y = GEM_Y + Math.sin(state.distanceForTex * 0.9 + p.mesh.position.x) * 0.12 + hillY;
     } else if (p.kind === 'life' || p.kind === 'star') {
       // Rare pickups spin faster and bob, so they stand out from the
       // constant stream of coins at a glance.
       p.mesh.rotation.y += dt * 2.2;
-      p.mesh.position.y = COIN_Y + 0.25 + Math.sin(state.distanceForTex * 1.2) * 0.16;
+      p.mesh.position.y = COIN_Y + 0.25 + Math.sin(state.distanceForTex * 1.2) * 0.16 + hillY;
     } else {
       p.mesh.rotation.y += dt * 3.4;
+      p.mesh.position.y = COIN_Y + hillY;
     }
 
     if (!p.collected && p.lane === state.lane && Math.abs(p.mesh.position.z) <= PICKUP_RADIUS_Z) {
@@ -3186,6 +3563,19 @@ function updatePlaying(dt) {
 
     o.mesh.position.z += speed * dt;
 
+    // Auto-terrain (dino/rome): purely a redraw of where the obstacle sits
+    // on screen. Collision just below still keys off o.lane + a z window,
+    // never o.mesh.position.x/y, so a curving/rolling obstacle can't dodge
+    // or cheat its own hitbox.
+    if (terrainActive()) {
+      const distAlong = state.distance - o.mesh.position.z;
+      o.mesh.position.x = LANE_X[o.lane] + curveOffset(distAlong);
+      o.mesh.position.y = o.baseY + hillOffset(distAlong);
+    } else {
+      o.mesh.position.x = LANE_X[o.lane];
+      o.mesh.position.y = o.baseY;
+    }
+
     if (!o.resolved && o.mesh.position.z >= COLLISION_Z_MIN && o.mesh.position.z <= COLLISION_Z_MAX) {
       o.resolved = true;
       if (o.lane === state.lane) {
@@ -3231,6 +3621,36 @@ function updatePlaying(dt) {
       scene.remove(o.mesh);
       obstacles.splice(i, 1);
     }
+  }
+
+  // --- Auto-terrain visuals: ground, shadow, player & camera -------------
+  // Deliberately last: every check above this point (grounded/jump physics,
+  // the gem-height check, collision) already ran against the character's
+  // plain jump-relative height, so adding the local hill height to
+  // player.position.y here can't retroactively change any of those. The
+  // road plane itself is one big flat quad, so instead of trying to bend
+  // it point-by-point it rides the height at the PLAYER's own position and
+  // banks/tilts into the local slope — the far ends are inside the fog
+  // distance for every terrain era, so the simplification doesn't show.
+  if (terrainActive()) {
+    const groundY = hillOffset(state.distance);
+    const slope = THREE.MathUtils.clamp(hillSlope(state.distance), -1, 1);
+    const bank = THREE.MathUtils.clamp(curveSlope(state.distance), -1, 1);
+    ground.position.y = groundY;
+    ground.rotation.x = -Math.PI / 2 + slope * 0.12;
+    ground.rotation.z = bank * 0.05;
+    shadowBlob.position.y = groundY + 0.02;
+    player.position.y += groundY;
+    camera.position.y += groundY;
+    camera.lookAt(player.position.x * 0.4, 1.3 + groundY, -8);
+  } else if (ground.position.y !== 0 || ground.rotation.z !== 0) {
+    // Snap flat immediately on leaving a terrain era rather than easing out
+    // of a stale tilt — this only ever runs on the frame an era switch
+    // actually happens, not every frame of a non-terrain run.
+    ground.position.y = 0;
+    ground.rotation.x = -Math.PI / 2;
+    ground.rotation.z = 0;
+    shadowBlob.position.y = 0.02;
   }
 }
 
@@ -3279,10 +3699,24 @@ function animate() {
 
   // Auto-restart after a run ends, so a session keeps flowing without
   // anyone having to press anything. Exiting (remote Back / phone ✕) still
-  // leaves to the ready screen instead.
-  if (state.phase === 'gameover') {
+  // leaves to the ready screen instead. In multiplayer this instead advances
+  // the turn (see the block below) — restarting the SAME player's run here
+  // would silently skip everyone else.
+  if (state.phase === 'gameover' && !multiplayer.active) {
     state.gameOverT += dt;
     if (state.gameOverT >= GAMEOVER_RESTART_DELAY) startCountdown();
+  }
+
+  // Multiplayer: each turn's result screen (finished or not) clears itself
+  // after a few seconds, same idea as the auto-restart above but advancing
+  // to the next player (or the leaderboard) instead of retrying.
+  if (multiplayer.active && (state.phase === 'gameover' || state.phase === 'levelComplete')) {
+    state.turnEndT += dt;
+    if (state.turnEndT >= TURN_END_AUTO_DELAY) advanceMultiplayerTurn();
+  }
+  if (state.phase === 'turnIntro') {
+    state.turnIntroT += dt;
+    if (state.turnIntroT >= TURN_INTRO_DELAY) startCountdown();
   }
 
   // Setup finishes itself once the last move is done (see
@@ -3362,9 +3796,22 @@ window.__mrDebug = {
     mesh.position.x = LANE_X[lane];
     mesh.position.z = z;
     scene.add(mesh);
-    obstacles.push({ type, lane, mesh, resolved: false, flying: false });
+    obstacles.push({ type, lane, mesh, resolved: false, flying: false, baseY: mesh.position.y });
   },
   endRun: () => gameOver(),
+  roster: () => roster.slice(),
+  multiplayer: () => ({
+    active: multiplayer.active,
+    order: multiplayer.order.slice(),
+    index: multiplayer.index,
+    activePlayerId: activePlayerId(),
+    results: multiplayer.results.map((r) => ({ ...r })),
+  }),
+  terrainActive: () => terrainActive(),
+  terrainAt: (d) => ({ curve: curveOffset(d), hill: hillOffset(d) }),
+  playerX: () => player.position.x,
+  playerY: () => player.position.y,
+  groundTilt: () => ({ y: ground.position.y, rotX: ground.rotation.x, rotZ: ground.rotation.z }),
 };
 
 // Paint the initial (pairing) state once before the loop starts. Without
@@ -3386,6 +3833,8 @@ loadModelPack();
 audio.preloadSfx();
 updateEraBadge();
 renderLevelSelect();
+renderRoster();
+renderMovesStrip();
 syncPanel();
 animate();
 
