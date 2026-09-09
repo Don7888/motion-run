@@ -203,6 +203,22 @@ scene.background = makeSkyTexture();
 scene.fog = new THREE.Fog(0xcdeaf7, 60, 150);
 
 const CAMERA_BASE_Y = 4.6;
+// How far the camera leans into a corner at the sharpest point of the turn,
+// in radians (~4.6 degrees). Deliberately small: the ask was for the camera
+// to stay fixed behind the character, so this is a touch of body language on
+// the turn, not a camera move. Eased rather than applied directly so it
+// doesn't snap on at the corner entry.
+const CAMERA_CORNER_ROLL = 0.08;
+let cameraRoll = 0;
+// How far the horizon landmark swings across the view while a corner is
+// being taken. A backdrop nailed dead ahead through a 90-degree turn quietly
+// argues that you are not turning at all, which undercuts the whole thing.
+// Driven by the RATE of turn rather than by absolute heading, so it swings
+// out as the corner is taken and eases back afterwards — a landmark that
+// tracked heading outright would end up behind the player and leave the
+// horizon empty, which is exactly what these landmarks exist to prevent.
+const HORIZON_CORNER_SWING = 0.5;
+let horizonSwing = 0;
 const BASE_FOV = 62; // restored after the star's camera kick — see endStar()
 const camera = new THREE.PerspectiveCamera(BASE_FOV, window.innerWidth / window.innerHeight, 0.1, 200);
 camera.position.set(0, CAMERA_BASE_Y, 8.2);
@@ -812,6 +828,13 @@ function buildScenery(names) {
     // road itself visibly curves and rolls underneath them.
     t.userData.baseX = t.position.x;
     t.userData.baseY = t.position.y;
+    // Where the prop is along the track, in the same sign convention
+    // position.z used to carry (negative = ahead). The corner path (2026-09-09)
+    // needs the drawn position free, so this is the scroll/recycle variable.
+    t.userData.trackZ = t.position.z;
+    // Several makers give their prop a random yaw; keep it so the corner
+    // alignment adds to it rather than flattening every prop to one angle.
+    t.userData.baseYaw = t.rotation.y;
     scene.add(t);
     sceneryPool.push(t);
   }
@@ -1234,6 +1257,13 @@ function buildObstacleMesh(type) {
 }
 
 function spawnObstacle() {
+  // Nothing is placed on the turn-in. An obstacle that first becomes visible
+  // as the road is swinging away underneath it is unreadable — the player is
+  // being asked to judge a lane against a horizon that is still rotating —
+  // and the corner is much clearer with a clean stretch of road through it.
+  // Skipping simply means no obstacle this tick; the spawn timer carries on,
+  // so the run picks straight back up on the exit.
+  if (terrainActive() && insideCorner(state.distance - SPAWN_Z)) return;
   const types = currentEra().obstacleTypes;
   const type = types[Math.floor(Math.random() * types.length)];
   const lane = Math.floor(Math.random() * 3);
@@ -1245,7 +1275,14 @@ function spawnObstacle() {
   // 0) — auto-terrain adds hillOffset() on top of this each frame rather
   // than overwriting it, so an obstacle with its own vertical anchor still
   // keeps it.
-  obstacles.push({ type, lane, mesh, resolved: false, flying: false, baseY: mesh.position.y });
+  // `trackZ` is the obstacle's distance along the track in the sign
+  // convention position.z used to carry on its own (negative = ahead of the
+  // player). Since 2026-09-09 the drawn position.z is a function of the
+  // corner the obstacle is sitting on, so the two had to come apart —
+  // EVERYTHING that decides gameplay (the collision window below, the punch
+  // target search, despawn) reads trackZ, and nothing reads the drawn
+  // position. That is what keeps corners strictly cosmetic.
+  obstacles.push({ type, lane, mesh, resolved: false, flying: false, baseY: mesh.position.y, trackZ: SPAWN_Z });
   // A hurdle is the one obstacle you clear by going UP, so it's the natural
   // place to hang a gem: the jump you already have to make is what earns it.
   if (type === 'hurdle') spawnGem(lane, SPAWN_Z);
@@ -1465,53 +1502,171 @@ let currentEraId = 'present';
 function currentEra() { return ERA_BY_ID[currentEraId] || ERA_BY_ID.present; }
 
 // =====================================================================
-// AUTO-TERRAIN — turns, hills & dips (2026-09-08)
+// THE TRACK PATH — straight running, joined by real 90-degree corners
+// (2026-09-09, replacing the 2026-09-08 "auto-terrain" wobble)
 //
-// Danny-Go/Temple-Run-style automatic terrain, scoped to the two eras Don
-// asked to start with: the path itself curves and rolls, but nothing
-// requires a new player action — the character and camera simply follow
-// the bend. This is a purely COSMETIC layer on top of the existing
-// straight, lane-based simulation: collision is still decided by lane
-// index plus a z window (see the obstacle-collision block further down),
-// and pickups are still gated by lane + z, so bending the visuals
-// sideways/vertically can never desync a hit or a pickup — it only moves
-// where things are drawn, never what "lane 0/1/2" or "how far along"
-// means underneath. Both functions return exactly 0 for every other era,
-// so nothing about them changes how those eras look or play.
+// The previous version bent the track with a pair of summed sine waves. It
+// was never straight and it never actually turned: the character just slid
+// continuously sideways, which is precisely the complaint — "it is supposed
+// to be that the character turns 90 degrees round a corner and the camera
+// stays behind them... there should always be straight line running but
+// with 90 degree turns."
 //
-// Difficulty/chaos ramps with how far into the LEVEL a given point sits
-// (terrainRamp), not how far the player has personally run — so a hazard
-// spawned ahead of the player is already bending/rolling by the amount
-// appropriate to where the player will actually meet it, and a run gets
-// visibly wilder the deeper into it you get, per Don's "increasing
-// difficulty and chaos" ask.
+// So the path is now piecewise: long STRAIGHTS joined by CORNERS that each
+// turn exactly 90 degrees, left or right, over CORNER_ARC metres of track.
+// Between corners the heading is dead constant, so the running really is in
+// a straight line.
+//
+// HOW THE CORNER IS DRAWN, and why the camera needs no work at all.
+//
+// The game is a treadmill: the character stays at the origin running toward
+// -z, obstacles scroll toward +z, and the camera sits behind at +z looking
+// down -z. Rather than fight that, the path is evaluated IN THE PLAYER'S OWN
+// FRAME. pathLocal(d) answers "if I am here, where is the point d metres
+// further along the track, relative to me and to the way I am currently
+// facing?" — so the player is always at the origin facing -z, and the road
+// ahead is what bends away and comes back. The camera therefore stays
+// exactly, permanently behind the character through the whole turn without a
+// single line of camera code, which is the behaviour that was asked for.
+//
+// It also means the corner is visible from a long way off: pathLocal is
+// evaluated out to PATH_AHEAD metres, well beyond where obstacles spawn, so
+// the bend is on screen and unmistakable long before the player reaches it.
+//
+// WHAT THIS DOES NOT TOUCH. Exactly as before, this is a rendering layer.
+// The simulation underneath is still straight and lane-based: collision is
+// lane index plus a z window, pickups are lane plus z, and `position.z` is
+// still plain distance-ahead-along-the-track for every object. Bending where
+// things are DRAWN can never desync a hit or a pickup, because nothing that
+// decides either one reads any of this.
 // =====================================================================
-const TERRAIN_ERA_IDS = new Set(['dino', 'rome']);
+
+// Which eras run the corner system. 2026-09-09: all four. Corners are core
+// to how the game reads now rather than a two-era experiment, and a player
+// working forward through the timeline shouldn't find the road stops turning
+// halfway. Narrow this set to scope it back.
+const TERRAIN_ERA_IDS = new Set(['dino', 'rome', 'present', 'future']);
 function terrainActive() { return TERRAIN_ERA_IDS.has(currentEraId); }
 
-// 0 at the start of a level, 1 at the finish line.
+// Metres of track spent turning through the 90 degrees. At the game's
+// speeds (12 m/s at the start, 26 flat out) 26m is roughly 1-2 seconds of
+// turn: long enough to read as sweeping round a bend rather than pivoting on
+// the spot, short enough to be unmistakably a corner rather than a drift.
+const CORNER_ARC = 26;
+const CORNER_FIRST_MIN = 90;       // never a corner before the player has settled in
+const CORNER_STRAIGHT_MIN = 105;   // clear straight running between corners
+const CORNER_STRAIGHT_MAX = 150;
+const CORNER_END_CLEARANCE = 60;   // levels finish on a straight, not mid-turn
+const CORNER_WARN_DISTANCE = 60;   // how far out the "bend ahead" sign appears
+
+// How far along the track the local path is evaluated each frame. Ahead of
+// the player this has to comfortably exceed the obstacle spawn point
+// (SPAWN_Z, 80m) so a corner is fully drawn before anything arrives on it;
+// behind, just enough to cover objects still on screen after passing.
+// Both distances are exact multiples of PATH_STEP on purpose. The table
+// index for a distance is (d + PATH_BEHIND) / PATH_STEP, so if PATH_BEHIND
+// were not a whole number of steps the player's own sample would not land on
+// an index and every position in the game would sit half a step up the
+// track — subtle, uniform, and exactly the kind of thing that never looks
+// like a bug, just like everything being slightly wrong.
+// Far enough ahead that the end of the road is beyond every era's fogFar
+// (the deepest is Rome's 225), so the ribbon fades into the haze instead of
+// stopping in mid-air at a visible hard edge. 165 samples is ~330 vertices
+// rewritten per frame — still nothing next to the scenery.
+const PATH_AHEAD = 232;
+const PATH_BEHIND = 16;
+// 2 metres rather than 1.5: 125 samples instead of 165 for the same reach,
+// which is a quarter off the per-frame path maths and off the road geometry,
+// for a segment length still short enough that the road's edge reads as a
+// curve rather than as a polygon through a corner.
+const PATH_STEP = 2;
+const PATH_SAMPLES = Math.round((PATH_BEHIND + PATH_AHEAD) / PATH_STEP) + 1;
+
+// Corners are laid out deterministically from the era id, so a level has the
+// same corners every time you play it. A runner you can learn is fairer than
+// one that reshuffles under you, and it makes the layout reproducible in
+// tests. Small, standard hash + PRNG rather than Math.random().
+function hashSeed(str) {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) h = Math.imul(h ^ str.charCodeAt(i), 16777619);
+  return h >>> 0;
+}
+function mulberry32(a) {
+  return function () {
+    a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// [{ start, end, dir }] in metres along the track; dir -1 = left, +1 = right.
+let corners = [];
+
+function buildCorners(eraId, goal) {
+  const rnd = mulberry32(hashSeed(`motionquest:${eraId}`));
+  const out = [];
+  let d = CORNER_FIRST_MIN + rnd() * 40;
+  let lastDir = rnd() < 0.5 ? -1 : 1;
+  while (d + CORNER_ARC < goal - CORNER_END_CLEARANCE) {
+    // Mostly alternate. Always alternating reads as a metronome; never
+    // alternating spirals off in one direction and every corner starts to
+    // feel the same. Roughly three in four flips.
+    const dir = rnd() < 0.72 ? -lastDir : lastDir;
+    out.push({ start: d, end: d + CORNER_ARC, dir });
+    lastDir = dir;
+    d += CORNER_ARC + CORNER_STRAIGHT_MIN + rnd() * (CORNER_STRAIGHT_MAX - CORNER_STRAIGHT_MIN);
+  }
+  return out;
+}
+
+// Eased rather than a constant-radius arc: a real road corner turns in and
+// out gradually (a transition curve), and easing the same way keeps the
+// character from snapping into and out of the rotation.
+function cornerEase(t) { return t * t * (3 - 2 * t); }
+
+/** Absolute track heading in radians at distance `d`. Constant on straights. */
+function headingAt(d) {
+  if (!terrainActive()) return 0;
+  let h = 0;
+  for (let i = 0; i < corners.length; i++) {
+    const c = corners[i];
+    if (d <= c.start) break;
+    const t = d >= c.end ? 1 : (d - c.start) / CORNER_ARC;
+    h += c.dir * (Math.PI / 2) * cornerEase(t);
+  }
+  return h;
+}
+
+/** The next corner starting at or after `d`, or null if the level has none left. */
+function nextCornerFrom(d) {
+  for (let i = 0; i < corners.length; i++) {
+    if (corners[i].end > d) return corners[i];
+  }
+  return null;
+}
+
+/** True when `d` sits inside a corner (plus a little margin either side). */
+function insideCorner(d, margin = 6) {
+  for (let i = 0; i < corners.length; i++) {
+    const c = corners[i];
+    if (d >= c.start - margin && d <= c.end + margin) return true;
+    if (c.start - margin > d) break;
+  }
+  return false;
+}
+
+// 0 at the start of a level, 1 at the finish line. Still used by the hills.
 function terrainRamp(distanceAlong) {
   const goal = currentEra().goal || 1;
   return THREE.MathUtils.clamp(distanceAlong / goal, 0, 1);
 }
 
-// Lateral offset (metres) of the track's centre-line at a point along it —
-// one slow, wide bend from the very start, with a second faster, choppier
-// wave layered in only once a run is deep enough to have earned "chaotic".
-function curveOffset(distanceAlong) {
-  if (!terrainActive()) return 0;
-  const ramp = terrainRamp(distanceAlong);
-  const amp = THREE.MathUtils.lerp(0.9, 3.4, ramp);
-  const chaos = Math.max(0, ramp - 0.45) * (1 / 0.55);
-  return (
-    Math.sin(distanceAlong * THREE.MathUtils.lerp(0.018, 0.048, ramp)) * amp +
-    Math.sin(distanceAlong * 0.135 + 1.7) * chaos * 1.2
-  );
-}
-
 // Vertical offset (metres) of the ground at a point along it — hills and
-// dips, same escalating shape as curveOffset but on its own phase so the
-// two don't crest in lockstep on every pass.
+// dips, unchanged from the 2026-09-08 pass, which was never the complaint.
+// Kept as a plain function of absolute distance so the ground ribbon can
+// sample it per vertex (it now genuinely rolls, rather than the whole flat
+// plane tilting to the height under the player).
 function hillOffset(distanceAlong) {
   if (!terrainActive()) return 0;
   const ramp = terrainRamp(distanceAlong);
@@ -1523,16 +1678,216 @@ function hillOffset(distanceAlong) {
   );
 }
 
-// Local slope via finite difference. Banking the ground/camera INTO a turn
-// or hill (rather than just translating them sideways/up) is what actually
-// reads as "the path is turning" instead of "the path is sliding".
-function curveSlope(distanceAlong) {
-  const h = 3;
-  return (curveOffset(distanceAlong + h) - curveOffset(distanceAlong - h)) / (2 * h);
+// ---- The local path table -------------------------------------------
+// Rebuilt once per frame (guarded on the player's distance, so calling it
+// repeatedly within a frame is free) by integrating the unit heading vector
+// along the track. Roughly 100 samples of trivial arithmetic — far cheaper
+// than the per-object trig it replaces, and it makes every consumer a
+// clamped table lookup.
+const pathX = new Float32Array(PATH_SAMPLES);
+const pathZ = new Float32Array(PATH_SAMPLES);
+const pathYaw = new Float32Array(PATH_SAMPLES);
+// Ground height, cached alongside. hillOffset() is two sines, and it was
+// being called afresh for every road vertex AND every obstacle, pickup and
+// prop, every frame — several hundred sines a frame to answer the same
+// question at the same handful of distances.
+const pathY = new Float32Array(PATH_SAMPLES);
+let pathBase = NaN;
+
+function rebuildPathTable(base) {
+  if (base === pathBase) return;
+  pathBase = base;
+  const h0 = terrainActive() ? headingAt(base) : 0;
+  const zeroIdx = Math.round(PATH_BEHIND / PATH_STEP); // index of the player
+
+  // The player's own sample: origin, facing straight down -z by definition.
+  pathX[zeroIdx] = 0; pathZ[zeroIdx] = 0; pathYaw[zeroIdx] = 0;
+  pathY[zeroIdx] = hillOffset(base);
+
+  // Forward. Heading is sampled at the middle of each step (midpoint rule),
+  // which keeps the integrated path on the true curve through the corner
+  // rather than cutting the inside of it.
+  let x = 0, z = 0;
+  for (let i = zeroIdx + 1; i < PATH_SAMPLES; i++) {
+    const d = (i - zeroIdx) * PATH_STEP;
+    const mid = base + d - PATH_STEP / 2;
+    const th = (terrainActive() ? headingAt(mid) : 0) - h0;
+    x += Math.sin(th) * PATH_STEP;
+    z -= Math.cos(th) * PATH_STEP;
+    pathX[i] = x; pathZ[i] = z;
+    pathYaw[i] = (terrainActive() ? headingAt(base + d) : 0) - h0;
+    pathY[i] = hillOffset(base + d);
+  }
+  // Backward, for the stretch of track already behind the player that is
+  // still on screen.
+  x = 0; z = 0;
+  for (let i = zeroIdx - 1; i >= 0; i--) {
+    const d = (i - zeroIdx) * PATH_STEP; // negative
+    const mid = base + d + PATH_STEP / 2;
+    const th = (terrainActive() ? headingAt(mid) : 0) - h0;
+    x -= Math.sin(th) * PATH_STEP;
+    z += Math.cos(th) * PATH_STEP;
+    pathX[i] = x; pathZ[i] = z;
+    pathYaw[i] = (terrainActive() ? headingAt(base + d) : 0) - h0;
+    pathY[i] = hillOffset(base + d);
+  }
 }
-function hillSlope(distanceAlong) {
-  const h = 3;
-  return (hillOffset(distanceAlong + h) - hillOffset(distanceAlong - h)) / (2 * h);
+
+// Scratch object — pathLocal() is called for every obstacle, pickup, prop
+// and ribbon vertex every frame, and allocating a fresh {x,z,yaw} for each
+// would hand the garbage collector thousands of objects a second on a
+// device that really cannot afford it.
+const pathOut = { x: 0, z: 0, yaw: 0, y: 0 };
+
+/**
+ * Where the track point `dAhead` metres in front of the player sits,
+ * expressed relative to the player (origin, facing -z). Returns a SHARED
+ * object: read it before the next call.
+ */
+function pathLocal(dAhead) {
+  if (!terrainActive()) {
+    pathOut.x = 0; pathOut.z = -dAhead; pathOut.yaw = 0; pathOut.y = 0;
+    return pathOut;
+  }
+  const f = THREE.MathUtils.clamp((dAhead + PATH_BEHIND) / PATH_STEP, 0, PATH_SAMPLES - 1);
+  const i = Math.min(PATH_SAMPLES - 2, Math.floor(f));
+  const t = f - i;
+  pathOut.x = pathX[i] + (pathX[i + 1] - pathX[i]) * t;
+  pathOut.z = pathZ[i] + (pathZ[i + 1] - pathZ[i]) * t;
+  pathOut.yaw = pathYaw[i] + (pathYaw[i + 1] - pathYaw[i]) * t;
+  pathOut.y = pathY[i] + (pathY[i + 1] - pathY[i]) * t;
+  return pathOut;
+}
+
+/**
+ * Places `obj` on the track: `dAhead` metres along, `across` metres to the
+ * right of the centre line (a lane offset), sitting `baseY` above the
+ * ground. Also yaws it to face along the track, so a hurdle at a corner is
+ * square to the road rather than to the world.
+ *
+ * Sign convention: at relative heading th the track's forward direction is
+ * (sin th, 0, -cos th) and its right is (cos th, 0, sin th). A mesh whose
+ * own forward is -z lines up with that when rotated by -th about y.
+ */
+function trackPos(obj, dAhead, across, baseY) {
+  const p = pathLocal(dAhead);
+  obj.position.x = p.x + Math.cos(p.yaw) * across;
+  obj.position.z = p.z + Math.sin(p.yaw) * across;
+  obj.position.y = baseY + p.y;
+  return p;
+}
+
+/**
+ * As trackPos, and also yaws the object to face along the track, so a hurdle
+ * or a roadside column on a corner is square to the road rather than to the
+ * world. `yawBase` preserves whatever rotation the object was built with —
+ * several scenery makers give their props a random yaw, and overwriting it
+ * would line every rock and bone up in the same direction.
+ *
+ * Not used for the spinning pickups or for punched obstacles tumbling
+ * through the air: both animate rotation.y themselves, and this would fight
+ * them for it.
+ */
+function placeOnTrack(obj, dAhead, across, baseY, yawBase = 0) {
+  const p = trackPos(obj, dAhead, across, baseY);
+  obj.rotation.y = yawBase - p.yaw;
+}
+
+// ---- The road itself -------------------------------------------------
+// A 90-degree corner is the one thing the old single flat quad could never
+// show: you cannot bend a rigid plane, which is why the previous pass had to
+// settle for sliding and tilting it and calling that a turn. So the road is
+// now a RIBBON — a strip of quads laid along the path, rebuilt from the path
+// table every frame.
+//
+// It is much cheaper than it sounds. ~100 segments is ~200 vertices, i.e. a
+// few hundred floats rewritten per frame, against a Fire TV Stick already
+// drawing thousands of triangles of scenery. Rebuilding it in the player's
+// own frame, rather than keeping one long static mesh and sliding it, also
+// means the road is always exactly under the player with no world-space
+// bookkeeping that can drift.
+//
+// Normals are left pointing straight up. The hills are gentle (about a metre
+// of rise over tens of metres), so real per-vertex normals every frame would
+// cost more than the shading difference is worth.
+const ROAD_HALF_WIDTH = 7;      // matches the 14-wide plane it replaces
+// How far the ground keeps going beyond the road. On a straight you never
+// see past the edge of a 14-wide strip, because the road runs away to the
+// horizon and fills the view — but on a 90-degree corner you are looking
+// ACROSS the bend, and without this the road is a ribbon floating in open
+// sky with nothing under it. The apron rides the same path and the same
+// hills, so it fills the view at every point of the turn.
+const APRON_HALF_WIDTH = 70;
+// The shared road texture carries repeat.y = 60, so three multiplies our v
+// by 60 before sampling. Dividing distance by 500 here therefore lands one
+// texture tile every 500/60 = 8.33 metres — the same banding pitch, and so
+// the same sense of speed, as the flat plane this replaces.
+const ROAD_TEX_PERIOD = 500;
+// Four across: apron edge, road edge, road edge, apron edge. The two apron
+// vertices carry the same u as the road edge beside them (u = 0 and u = 1 are
+// both verge in makeRoadTexture), so the apron is the verge colour and its
+// banding lines up with the road's — no seam, and no second material.
+const RIB_COLS = 4;
+const RIB_VERTS = PATH_SAMPLES * RIB_COLS;
+const ribbonPos = new Float32Array(RIB_VERTS * 3);
+const ribbonUv = new Float32Array(RIB_VERTS * 2);
+const ribbonNorm = new Float32Array(RIB_VERTS * 3);
+const ribbonIdx = new Uint16Array((PATH_SAMPLES - 1) * (RIB_COLS - 1) * 6);
+// Winding matters: within a sample the columns run left to right, and `b` is
+// the same column one step further up the track. Wound the other way round
+// the whole road faces DOWNWARD, gets back-face culled, and the player runs
+// across an invisible surface over open sky — which is exactly what the
+// first version of this did.
+{
+  let k = 0;
+  for (let i = 0; i < PATH_SAMPLES - 1; i++) {
+    for (let j = 0; j < RIB_COLS - 1; j++) {
+      const a = i * RIB_COLS + j;
+      const b = a + RIB_COLS;
+      ribbonIdx[k++] = a; ribbonIdx[k++] = a + 1; ribbonIdx[k++] = b;
+      ribbonIdx[k++] = a + 1; ribbonIdx[k++] = b + 1; ribbonIdx[k++] = b;
+    }
+  }
+}
+for (let i = 0; i < RIB_VERTS; i++) ribbonNorm[i * 3 + 1] = 1;
+
+const ribbonGeo = new THREE.BufferGeometry();
+ribbonGeo.setAttribute('position', new THREE.BufferAttribute(ribbonPos, 3));
+ribbonGeo.setAttribute('uv', new THREE.BufferAttribute(ribbonUv, 2));
+ribbonGeo.setAttribute('normal', new THREE.BufferAttribute(ribbonNorm, 3));
+ribbonGeo.setIndex(new THREE.BufferAttribute(ribbonIdx, 1));
+const roadRibbon = new THREE.Mesh(ribbonGeo, new THREE.MeshLambertMaterial({ map: roadTexture }));
+// Regenerated in the player's own frame every frame, so three must never
+// cull it against a bounding volume computed from an older shape.
+roadRibbon.frustumCulled = false;
+roadRibbon.visible = false;
+scene.add(roadRibbon);
+
+const RIB_ACROSS = [-APRON_HALF_WIDTH, -ROAD_HALF_WIDTH, ROAD_HALF_WIDTH, APRON_HALF_WIDTH];
+const RIB_U = [0, 0, 1, 1];
+
+function updateRoadRibbon(base) {
+  for (let i = 0; i < PATH_SAMPLES; i++) {
+    const dAhead = i * PATH_STEP - PATH_BEHIND;
+    const p = pathLocal(dAhead);
+    // The track's right-hand direction here, so the ribbon's width stays
+    // square to the road all the way through a corner. A strip laid out on a
+    // fixed x axis would visibly shear as the road turned away from it.
+    const rx = Math.cos(p.yaw), rz = Math.sin(p.yaw);
+    const y = p.y;
+    const v = (base + dAhead) / ROAD_TEX_PERIOD;
+    for (let j = 0; j < RIB_COLS; j++) {
+      const o = (i * RIB_COLS + j) * 3;
+      const u = (i * RIB_COLS + j) * 2;
+      ribbonPos[o] = p.x + rx * RIB_ACROSS[j];
+      ribbonPos[o + 1] = y;
+      ribbonPos[o + 2] = p.z + rz * RIB_ACROSS[j];
+      ribbonUv[u] = RIB_U[j];
+      ribbonUv[u + 1] = v;
+    }
+  }
+  ribbonGeo.attributes.position.needsUpdate = true;
+  ribbonGeo.attributes.uv.needsUpdate = true;
 }
 
 // Swaps the whole world over to an era: sky, fog, the three lights, the
@@ -1560,7 +1915,18 @@ function applyEra(id) {
   roadTexture = makeRoadTexture(e.ground);
   ground.material.map = roadTexture;
   ground.material.needsUpdate = true;
+  roadRibbon.material.map = roadTexture;
+  roadRibbon.material.needsUpdate = true;
   oldTex?.dispose();
+
+  // This level's corners. Deterministic from the era id (see buildCorners),
+  // so the same level always turns in the same places. The ribbon takes over
+  // from the flat plane wherever corners are switched on — only one of the
+  // two is ever visible, or they would z-fight along the whole road.
+  corners = terrainActive() ? buildCorners(era, e.goal) : [];
+  pathBase = NaN; // force a path rebuild before the next frame draws
+  roadRibbon.visible = terrainActive();
+  ground.visible = !terrainActive();
 
   buildScenery(e.scenery);
   buildHorizon(era);
@@ -1619,6 +1985,10 @@ const pickups = [];
 // can place one known coin and watch what happens to it without the normal
 // trail spawner dropping more into the scene mid-measurement.
 let coinSpawnEnabled = true;
+// Test-only, mirroring coinSpawnEnabled: lets a suite put ONE known obstacle
+// on the track and watch what happens to it, instead of trying to pick it out
+// of the run's own stream of them.
+let obstacleSpawnEnabled = true;
 
 // Per-era collectible models. The Rome panel in Don's artwork literally
 // says "COLLECT MAGIC POTIONS", and the pack contains that potion; the
@@ -1653,7 +2023,7 @@ function addPickup(kind, lane, z) {
   mesh.position.y = kind === 'gem' ? GEM_Y : COIN_Y;
   mesh.position.z = z;
   scene.add(mesh);
-  pickups.push({ kind, lane, mesh, collected: false });
+  pickups.push({ kind, lane, mesh, collected: false, trackZ: z });
 }
 
 // Hearts and stars pick a lane that isn't already occupied by an obstacle,
@@ -1675,7 +2045,7 @@ function spawnGem(lane, z) {
 // trail would occupy — so trails don't get buried inside a wall or crate.
 function laneBlocked(lane, zStart, zEnd) {
   return obstacles.some((o) =>
-    !o.flying && o.lane === lane && o.mesh.position.z >= zStart - 3 && o.mesh.position.z <= zEnd + 3);
+    !o.flying && o.lane === lane && o.trackZ >= zStart - 3 && o.trackZ <= zEnd + 3);
 }
 
 function spawnCoinRun() {
@@ -1822,10 +2192,10 @@ function updateActionPrompt(speed) {
   for (const o of obstacles) {
     if (o.flying || o.resolved) continue;
     if (o.lane !== state.lane) continue;
-    if (o.mesh.position.z >= COLLISION_Z_MIN) continue;
+    if (o.trackZ >= COLLISION_Z_MIN) continue;
     // Obstacles travel toward +z, so the largest z among candidates is the
     // one closest to the player right now.
-    if (o.mesh.position.z > bestZ) { bestZ = o.mesh.position.z; target = o; }
+    if (o.trackZ > bestZ) { bestZ = o.trackZ; target = o; }
   }
   if (!target || speed <= 0) { actionPromptEl.style.display = 'none'; return; }
   const timeToImpact = (COLLISION_Z_MIN - bestZ) / speed;
@@ -2112,6 +2482,7 @@ const pairingHint = document.getElementById('pairingHint');
 const rosterRowEl = document.getElementById('rosterRow');
 const movesStripEl = document.getElementById('movesStrip');
 const readyJoinHintEl = document.getElementById('readyJoinHint');
+const readyStartHintEl = document.getElementById('readyStartHint');
 const turnIntroPanel = document.getElementById('turnIntroPanel');
 const turnIntroTitle = document.getElementById('turnIntroTitle');
 const turnIntroCallout = document.getElementById('turnIntroCallout');
@@ -2224,8 +2595,17 @@ function syncPanel() {
   // "Step 1 of 4" setup prompt, which reads like the game is already going.
   const inRun = state.phase === 'playing' || state.phase === 'paused' || state.phase === 'countdown';
   hudEl.style.display = inRun ? 'flex' : 'none';
-  // The countdown owns the screen on its own — no panel, no badge.
-  if (state.phase === 'countdown') { showPanel(null); updateControlBadge(null); return; }
+  // A run in progress outranks any setup stage (2026-09-09). Setup panels
+  // used to sit above everything except the countdown, so a second player
+  // starting setup on their phone mid-run — or a stale placement message
+  // arriving late — painted a full-screen "place your phone" panel over a
+  // live game. Their setup is still tracked underneath; it just waits for a
+  // screen it can legitimately have.
+  if (inRun) {
+    if (state.phase === 'paused') { showPanel('paused'); updateControlBadge('paused'); }
+    else { showPanel(null); updateControlBadge(null); }
+    return;
+  }
   if (setupStage === 'placement') { showPanel('placement'); updateControlBadge('placement'); return; }
   if (setupStage === 'framing') { showPanel('framing'); updateControlBadge('framing'); return; }
   if (calibrating) { showPanel('calibrating'); updateControlBadge('calibrating'); return; }
@@ -2306,6 +2686,99 @@ let framingReady = false;
 let framingReadySinceT = null;
 let movesConfirmSent = false;
 const FRAMING_AUTO_ADVANCE_MS = 900;
+
+// =========================================================================
+// WHO HAS ACTUALLY FINISHED SETUP (2026-09-09)
+//
+// "Sometimes it doesn't set up before starting the game." The cause was
+// that the TV had no memory of setup at all: `setupStage` and `calibrating`
+// were transient UI state, thrown away the moment a panel closed, and
+// nothing anywhere recorded that a given player had been through placement,
+// framing and the five moves.
+//
+// Meanwhile the ready screen invites a start ("Press OK on your remote, or
+// tap Jump/Punch on your phone") from the instant a phone's WebSocket
+// connects — which happens before the player has even chosen a control mode,
+// let alone set the phone down and stepped back. Press OK there and
+// startCountdown() ran happily with no setup whatsoever. Whether you got set
+// up came down to whether you happened to press OK before or after working
+// through your phone, which is exactly the "sometimes" in the report.
+//
+// So completion is now recorded per player id and the start is gated on it.
+// Two deliberate escape hatches keep this from ever being a trap: pressing
+// OK a second time starts anyway, and a player who disconnects stops being
+// something the room waits for.
+// =========================================================================
+const setupDonePlayers = new Set();
+// Set when a start was refused for want of setup; a second press inside this
+// window goes ahead regardless.
+let startOverrideUntil = 0;
+const START_OVERRIDE_WINDOW_MS = 6000;
+
+/** Connected players who have not yet finished setting their phone up. */
+function playersNotSetUp() {
+  return roster.filter((id) => !setupDonePlayers.has(id));
+}
+
+/**
+ * True when a run may begin. An empty roster falls through to the existing
+ * pairing handling rather than being treated as "everyone is ready".
+ */
+function everyoneSetUp() {
+  return roster.length > 0 && playersNotSetUp().length === 0;
+}
+
+/**
+ * The gate itself. Returns true if the caller should go ahead and start.
+ * Refusing once puts the ready screen into "still setting up" mode and arms
+ * the override, so the second press always gets through — a phone that
+ * crashed mid-setup, or a player who genuinely wants to use the remote
+ * only, can never leave the room stuck on a screen it can't leave.
+ */
+function mayStartRun() {
+  if (everyoneSetUp()) return true;
+  const now = performance.now();
+  if (startOverrideUntil && now < startOverrideUntil) {
+    startOverrideUntil = 0;
+    return true;
+  }
+  startOverrideUntil = now + START_OVERRIDE_WINDOW_MS;
+  renderReadyHint();
+  return false;
+}
+
+/** Forgets a player's setup once they drop, so the room stops waiting. */
+function forgetDisconnectedSetup() {
+  for (const id of Array.from(setupDonePlayers)) {
+    if (!roster.includes(id)) setupDonePlayers.delete(id);
+  }
+}
+
+/**
+ * The ready screen's bottom line. Three states, because the honest answer to
+ * "can I start?" is genuinely different in each: everyone's ready, someone
+ * is still setting up, or you've asked twice and we'll take your word for it.
+ */
+function renderReadyHint() {
+  if (!readyStartHintEl) return;
+  const waiting = playersNotSetUp();
+  if (waiting.length === 0) {
+    readyStartHintEl.textContent = '🎮 Press OK on your remote (or tap Jump/Punch on your phone) to start';
+    return;
+  }
+  const who = waiting.length === 1
+    ? `${playerLabel(waiting[0]).name} is`
+    : `${waiting.length} players are`;
+  // Even the override message names who is being waited for. A bare "press
+  // OK again to start anyway" answers the wrong question: the player pressed
+  // OK expecting a run and needs to know what stopped it, not just how to
+  // insist. Saying both means the skip is an informed choice.
+  if (startOverrideUntil && performance.now() < startOverrideUntil) {
+    readyStartHintEl.textContent = `📱 ${who} still setting up — press OK again to start anyway`;
+    return;
+  }
+  readyStartHintEl.textContent = `📱 ${who} still setting up — finish on the phone, then press OK`;
+}
 
 const FRAMING_META = {
   no_person: { text: 'Step into frame', color: '#ff8a8a' },
@@ -2478,7 +2951,22 @@ function finishSetupFromTv() {
   sendCalibrationControl('finish');
   finishCalibrationUI();
 }
-function finishCalibrationUI() {
+/**
+ * @param {number|undefined} playerId who finished, from the server's stamp on
+ *   the relayed `calibration` message. Undefined only for an old phone build
+ *   or a hand-crafted message, in which case every connected player is
+ *   credited — the pre-2026-09-09 behaviour, which is the safe fallback since
+ *   it can only ever unblock a start, never wrongly block one.
+ */
+function markSetupDone(playerId) {
+  if (typeof playerId === 'number') setupDonePlayers.add(playerId);
+  else roster.forEach((id) => setupDonePlayers.add(id));
+  startOverrideUntil = 0;
+  renderReadyHint();
+}
+
+function finishCalibrationUI(playerId) {
+  markSetupDone(playerId);
   calibrating = false;
   calAutoFinishT = 0;
   setupStage = 'none'; // covers the "Skip setup" escape hatch firing mid-placement/framing
@@ -2488,10 +2976,17 @@ function finishCalibrationUI() {
   // into a run — with four levels there is a genuine choice to make, and
   // the countdown still gives them time to put the phone down once they've
   // made it. One button press, not a menu to wade through.
-  if (state.phase === 'ready' || state.phase === 'pairing') {
+  // 2026-09-09: with more than one phone in the room this now waits for the
+  // rest of them. Rolling on to the era picker the moment the FIRST player
+  // finished was the multiplayer half of "it didn't set up before starting" —
+  // players two and three were still on the placement step when the picker
+  // took the screen away from them.
+  if ((state.phase === 'ready' || state.phase === 'pairing') && everyoneSetUp()) {
     openLevelSelect();
     return;
   }
+  if (state.phase === 'pairing' && roster.length > 0) state.phase = 'ready';
+  renderReadyHint();
   syncPanel();
 }
 
@@ -2620,6 +3115,46 @@ function chooseLevel() {
 }
 
 const muteBtn = document.getElementById('muteBtn');
+const soundHintEl = document.getElementById('soundHint');
+const turnSignEl = document.getElementById('turnSign');
+const turnSignArrowEl = document.getElementById('turnSignArrow');
+
+// Puts up the "bend ahead" sign while a corner is coming, and takes it down
+// once the player is into it. Only while actually running: on the menus the
+// distance isn't moving and a permanent sign would just be furniture.
+// Guarded writes, so a frame in which nothing changed costs two comparisons.
+let turnSignDir = 0;
+function updateTurnSign() {
+  if (!turnSignEl) return;
+  let dir = 0;
+  if (terrainActive() && state.phase === 'playing') {
+    const c = nextCornerFrom(state.distance);
+    // Shown from CORNER_WARN_DISTANCE out, and dropped once the turn is
+    // properly under way — by then the road is doing the telling.
+    if (c && state.distance > c.start - CORNER_WARN_DISTANCE
+        && state.distance < c.start + CORNER_ARC * 0.4) {
+      dir = c.dir;
+    }
+  }
+  if (dir === turnSignDir) return;
+  turnSignDir = dir;
+  turnSignEl.style.display = dir === 0 ? 'none' : 'flex';
+  if (dir !== 0 && turnSignArrowEl) turnSignArrowEl.textContent = dir < 0 ? '↰' : '↱';
+}
+
+// Shows "press OK for sound" only while the browser is actually refusing to
+// start the music (2026-09-09 — see tryStartMusic() in audio.js for why that
+// happens at all). Polled from the frame loop rather than pushed, because the
+// block clears asynchronously from inside a play() promise; the DOM write is
+// guarded so this is a property read per frame in the normal case.
+let soundHintShown = false;
+function updateSoundHint() {
+  if (!soundHintEl) return;
+  const blocked = audio.isMusicBlocked();
+  if (blocked === soundHintShown) return;
+  soundHintShown = blocked;
+  soundHintEl.style.display = blocked ? 'flex' : 'none';
+}
 
 function setMuted(isMuted) {
   if (!muteBtn) return;
@@ -2777,8 +3312,20 @@ function updateFinishPortal(dt) {
     scene.add(finishPortal);
   }
   // Sits exactly `remaining` metres up the track, so it arrives on the
-  // metre the era ends rather than drifting against the progress bar.
-  finishPortal.position.z = -remaining;
+  // metre the era ends rather than drifting against the progress bar. On a
+  // corner era that means following the road round: a finish line hanging in
+  // mid-air off the outside of the last bend would be a strange thing to be
+  // running towards. rotation.x/z are the portal's own upright-and-spinning
+  // pose, so only x/z position and the yaw are taken from the track.
+  if (terrainActive()) {
+    const q = pathLocal(remaining);
+    finishPortal.position.x = q.x;
+    finishPortal.position.z = q.z;
+    finishPortal.position.y = 2.8 + hillOffset(state.distance + remaining);
+  } else {
+    finishPortal.position.x = 0;
+    finishPortal.position.z = -remaining;
+  }
   portalSpin += dt * 1.6;
   // Spun about its own normal (local z), so it turns in its own plane like a
   // gateway rather than tumbling.
@@ -2927,8 +3474,14 @@ function commitHighScore() {
 }
 
 function pauseGame() {
-  audio.pauseMusic();
+  // 2026-09-09 (part of the "dino level has no music" fix): these two calls
+  // used to sit ABOVE the phase guards, so a pause_toggle arriving outside a
+  // run — a stray ⏸ from a phone sitting on a menu screen — silenced the
+  // music and then returned before anything was actually paused, leaving
+  // nothing behind that would ever turn it back on. Music state now only
+  // moves when the game state actually moves with it.
   if (state.phase !== 'playing') return;
+  audio.pauseMusic();
   state.phase = 'paused';
   pausedScoreVal.textContent = String(Math.floor(state.score));
   hideActionPrompt();
@@ -2936,8 +3489,8 @@ function pauseGame() {
 }
 
 function resumeGame() {
-  audio.resumeMusic();
   if (state.phase !== 'paused') return;
+  audio.resumeMusic();
   state.phase = 'playing';
   lastT = performance.now(); // avoid a huge dt jump on the first frame back
   showPanel(null);
@@ -2952,6 +3505,10 @@ function exitToMenu() {
   // the Back-press handler on the results screens — there's no sensible
   // "resume this player's turn later".
   resetMultiplayer();
+  // Leaving a paused run has to undo the pause's effect on the music, or the
+  // menus (and the next run, which may well be the same era) stay silent —
+  // this was the other half of the 2026-09-09 "no music" bug.
+  audio.resumeMusic();
   state.phase = 'ready';
   calibrating = false;
   setupStage = 'none';
@@ -2976,7 +3533,12 @@ ws.addEventListener('message', (ev) => {
   try { msg = JSON.parse(ev.data); } catch { return; }
 
   if (msg.type === 'room') {
-    roomCodeEl.textContent = msg.code;
+    // The Join screen (2026-09-08 redesign) shows the code as a row of
+    // individual voxel-style tiles rather than one plain string — built
+    // with no whitespace between the <span>s so .textContent (what the
+    // test suite and roomCodeMiniEl's copy both rely on) still reads back
+    // as exactly the 6-digit code.
+    roomCodeEl.innerHTML = String(msg.code).split('').map((d) => `<span class="pq-tile">${d}</span>`).join('');
     if (roomCodeMiniEl) roomCodeMiniEl.textContent = msg.code;
     // Scan-to-join (2026-09-03): the server generates this SVG itself (see
     // server.js's /qr/<code>.svg route + lib/qrcode-lite.js) so no library
@@ -2990,15 +3552,23 @@ ws.addEventListener('message', (ev) => {
     // (see beginMultiplayerIfNeeded()), so a late join or a drop mid-game
     // doesn't reshuffle a turn order already in progress.
     roster = Array.isArray(msg.ids) ? msg.ids.slice().sort((a, b) => a - b) : [];
+    // A player who has gone stops being someone the room waits for, and a
+    // NEW id in an old slot must not inherit the previous occupant's
+    // "already set up" — both handled by pruning against the live roster.
+    forgetDisconnectedSetup();
     renderRoster();
+    renderReadyHint();
   } else if (msg.type === 'controller_connected') {
     if (msg.count > 0 && (state.phase === 'pairing')) {
       state.phase = 'ready';
+      renderReadyHint();
       syncPanel();
     } else if (msg.count === 0 && state.phase !== 'playing') {
       state.phase = 'pairing';
       calibrating = false;
       setupStage = 'none';
+      setupDonePlayers.clear();
+      startOverrideUntil = 0;
       resetMultiplayer();
       syncPanel();
     }
@@ -3011,7 +3581,7 @@ ws.addEventListener('message', (ev) => {
     else if (msg.event === 'framing') updateFramingUI(msg.status, msg.ready);
     else if (msg.event === 'start') startCalibrationUI(msg.mode);
     else if (msg.event === 'step') advanceCalibrationUI(msg.step);
-    else if (msg.event === 'done') finishCalibrationUI();
+    else if (msg.event === 'done') finishCalibrationUI(msg.playerId);
   } else if (msg.type === 'error') {
     pairingHint.textContent = msg.message;
   }
@@ -3084,6 +3654,10 @@ function handleInput(msg) {
   }
   if (state.phase === 'ready'
       && (msg.action === 'jump' || msg.action === 'punch') && msg.explicit) {
+    // Won't start until every connected phone has actually been set up —
+    // see the note above setupDonePlayers. A refusal repaints the hint
+    // saying who we're waiting for; asking a second time goes anyway.
+    if (!mayStartRun()) return;
     // Two or more phones connected before the first run starts means a
     // multiplayer game — route through the era picker so the group picks
     // together, same as any other route into chooseLevel()/
@@ -3233,6 +3807,10 @@ window.addEventListener('keydown', (e) => {
   // just jump/punch from the phone.
   if (!calibrating && state.phase !== 'playing' && state.phase !== 'paused' && (isSelectPress(e) || e.code === 'KeyF')) {
     if (state.phase === 'ready') {
+      // Same setup gate as the phone's jump/punch route above — the remote
+      // was in fact the likelier way to skip setup, since the ready screen
+      // sits there inviting an OK press from the moment a phone connects.
+      if (!mayStartRun()) return;
       if (roster.length >= 2) openLevelSelect(); else startCountdown();
     } else if (state.phase === 'gameover') {
       if (multiplayer.active) advanceMultiplayerTurn(); else startCountdown();
@@ -3271,21 +3849,38 @@ function updatePlaying(dt) {
   // landing in the same frame as the win.
   if (state.distance >= currentEra().goal) { levelComplete(); return; }
 
-  // Ground scroll
-  state.distanceForTex += speed * dt;
-  roadTexture.offset.y = (state.distanceForTex / 8) % 1;
+  // The path table is what every position below is read out of, so it has to
+  // be rebuilt for this frame's distance before anything consults it.
+  rebuildPathTable(state.distance);
 
-  // Scenery scroll (recycle)
+  // Ground. On the corner eras the road is the ribbon, which carries the
+  // scroll in its own texture coordinates (see updateRoadRibbon), so the
+  // flat plane's offset trick would double it up.
+  state.distanceForTex += speed * dt;
+  if (terrainActive()) updateRoadRibbon(state.distance);
+  else roadTexture.offset.y = (state.distanceForTex / 8) % 1;
+
+  // Scenery scroll (recycle). position.z stays exactly what it always was —
+  // plain distance ahead of the player — and the drawn position is derived
+  // from it, so the recycling above is untouched by the corners.
+  // Scenery scroll (recycle). `trackZ` carries the meaning position.z used to
+  // (negative = ahead of the player) and is what the recycling runs on;
+  // position is then purely where the prop gets DRAWN. They have to be
+  // separate now, because on a corner the drawn z is a function of the bend
+  // and feeding that back into the scroll would corrupt the recycling.
   sceneryPool.forEach((t) => {
-    t.position.z += speed * dt;
-    if (t.position.z > 10) t.position.z -= 16 * sceneryPool.length * 0.5;
+    t.userData.trackZ += speed * dt;
+    if (t.userData.trackZ > 10) t.userData.trackZ -= 16 * sceneryPool.length * 0.5;
     if (terrainActive()) {
-      const distAlong = state.distance - t.position.z;
-      t.position.x = t.userData.baseX + curveOffset(distAlong);
-      t.position.y = t.userData.baseY + hillOffset(distAlong);
+      const zAhead = -t.userData.trackZ;
+      // baseX is the prop's distance out from the centre line, so it rides
+      // round the bend with the verge instead of staying where the road was.
+      placeOnTrack(t, zAhead, t.userData.baseX, t.userData.baseY, t.userData.baseYaw);
     } else {
       t.position.x = t.userData.baseX;
       t.position.y = t.userData.baseY;
+      t.position.z = t.userData.trackZ;
+      t.rotation.y = t.userData.baseYaw;
     }
   });
 
@@ -3301,11 +3896,12 @@ function updatePlaying(dt) {
   // twice that many frames at the old dt*15.
   // The lean-rotation lerp is sped up to match (dt*10 -> dt*16) so the
   // torso bank doesn't visibly lag behind the now-snappier lane movement.
-  // Auto-terrain (dino/rome): the lane centre itself drifts sideways as the
-  // player's own position along the track bends, so the existing lane-lerp
-  // and lean below carry the character around the curve automatically —
-  // no new input, no change to which of the 3 lanes they're actually in.
-  const targetX = LANE_X[state.lane] + curveOffset(state.distance);
+  // 2026-09-09: the corner path is evaluated in the PLAYER'S frame, so the
+  // player sits at the origin facing -z by construction and a lane is once
+  // again a plain sideways offset — no curve term, at any point on any
+  // corner. It is the road and everything on it that bends around them,
+  // which is exactly why the camera needs no work to stay behind.
+  const targetX = LANE_X[state.lane];
   const dx = targetX - player.position.x;
   player.position.x += dx * Math.min(1, dt * 24);
   player.rotation.z = THREE.MathUtils.lerp(player.rotation.z, THREE.MathUtils.clamp(-dx * 0.35, -0.35, 0.35), dt * 16);
@@ -3440,7 +4036,7 @@ function updatePlaying(dt) {
   // Spawn obstacles
   state.spawnTimer -= dt;
   if (state.spawnTimer <= 0) {
-    spawnObstacle();
+    if (obstacleSpawnEnabled) spawnObstacle();
     const interval = Math.max(MIN_SPAWN_INTERVAL, BASE_SPAWN_INTERVAL - state.distance * SPAWN_RAMP);
     state.spawnTimer = interval * (0.8 + Math.random() * 0.4);
   }
@@ -3475,16 +4071,21 @@ function updatePlaying(dt) {
   // Update collectibles
   for (let i = pickups.length - 1; i >= 0; i--) {
     const p = pickups[i];
-    p.mesh.position.z += speed * dt;
-    // Auto-terrain (dino/rome): pickups ride the same bend/roll as the
-    // lane they sit in, so a coin trail visibly follows the curve instead
-    // of floating over a track that's drifted out from under it. 0 for
-    // every other era, so position.x/y below reduce to exactly what they
-    // were before this feature existed.
-    const distAlong = state.distance - p.mesh.position.z;
-    const curveX = terrainActive() ? curveOffset(distAlong) : 0;
-    const hillY = terrainActive() ? hillOffset(distAlong) : 0;
-    p.mesh.position.x = LANE_X[p.lane] + curveX;
+    p.trackZ += speed * dt;
+    // Pickups ride the bend with the lane they sit in, so a coin trail
+    // follows the road round a corner instead of sailing off the outside of
+    // it. Position only — these spin on their own axis just below, and the
+    // spin is their whole read as "collectible", so the corner must not take
+    // rotation.y away from them.
+    // Ground height under this pickup, taken from the per-frame path table
+    // rather than recomputed — the bob/spin below adds to it.
+    let hillY = 0;
+    if (terrainActive()) {
+      hillY = trackPos(p.mesh, -p.trackZ, LANE_X[p.lane], 0).y;
+    } else {
+      p.mesh.position.x = LANE_X[p.lane];
+      p.mesh.position.z = p.trackZ;
+    }
     // A little spin so they read as collectible rather than scenery.
     if (p.kind === 'gem') {
       p.mesh.rotation.y += dt * 2.6;
@@ -3499,7 +4100,7 @@ function updatePlaying(dt) {
       p.mesh.position.y = COIN_Y + hillY;
     }
 
-    if (!p.collected && p.lane === state.lane && Math.abs(p.mesh.position.z) <= PICKUP_RADIUS_Z) {
+    if (!p.collected && p.lane === state.lane && Math.abs(p.trackZ) <= PICKUP_RADIUS_Z) {
       // A gem hangs high on purpose: you have to actually be off the ground
       // to take it, which is what makes it the reward for jumping a hurdle
       // rather than something you collect by walking underneath.
@@ -3533,7 +4134,7 @@ function updatePlaying(dt) {
       }
     }
 
-    if (p.mesh.position.z > DESPAWN_Z) {
+    if (p.trackZ > DESPAWN_Z) {
       scene.remove(p.mesh);
       pickups.splice(i, 1);
     }
@@ -3561,22 +4162,22 @@ function updatePlaying(dt) {
       continue;
     }
 
-    o.mesh.position.z += speed * dt;
+    o.trackZ += speed * dt;
 
-    // Auto-terrain (dino/rome): purely a redraw of where the obstacle sits
-    // on screen. Collision just below still keys off o.lane + a z window,
-    // never o.mesh.position.x/y, so a curving/rolling obstacle can't dodge
-    // or cheat its own hitbox.
+    // Purely a redraw of where the obstacle sits on screen. Collision just
+    // below still keys off o.lane plus a window on o.trackZ, never the drawn
+    // position, so an obstacle swinging round a corner can't dodge or cheat
+    // its own hitbox. Yawed to face along the track as well, so a hurdle
+    // mid-corner lies square across the road instead of skewed to the world.
     if (terrainActive()) {
-      const distAlong = state.distance - o.mesh.position.z;
-      o.mesh.position.x = LANE_X[o.lane] + curveOffset(distAlong);
-      o.mesh.position.y = o.baseY + hillOffset(distAlong);
+      placeOnTrack(o.mesh, -o.trackZ, LANE_X[o.lane], o.baseY);
     } else {
       o.mesh.position.x = LANE_X[o.lane];
       o.mesh.position.y = o.baseY;
+      o.mesh.position.z = o.trackZ;
     }
 
-    if (!o.resolved && o.mesh.position.z >= COLLISION_Z_MIN && o.mesh.position.z <= COLLISION_Z_MAX) {
+    if (!o.resolved && o.trackZ >= COLLISION_Z_MIN && o.trackZ <= COLLISION_Z_MAX) {
       o.resolved = true;
       if (o.lane === state.lane) {
         let safe = false;
@@ -3617,32 +4218,51 @@ function updatePlaying(dt) {
       }
     }
 
-    if (o.mesh.position.z > DESPAWN_Z) {
+    if (o.trackZ > DESPAWN_Z) {
       scene.remove(o.mesh);
       obstacles.splice(i, 1);
     }
   }
 
-  // --- Auto-terrain visuals: ground, shadow, player & camera -------------
+  // --- Terrain visuals: shadow, player & camera --------------------------
   // Deliberately last: every check above this point (grounded/jump physics,
   // the gem-height check, collision) already ran against the character's
   // plain jump-relative height, so adding the local hill height to
-  // player.position.y here can't retroactively change any of those. The
-  // road plane itself is one big flat quad, so instead of trying to bend
-  // it point-by-point it rides the height at the PLAYER's own position and
-  // banks/tilts into the local slope — the far ends are inside the fog
-  // distance for every terrain era, so the simplification doesn't show.
+  // player.position.y here can't retroactively change any of those.
+  //
+  // 2026-09-09: the road no longer needs faking here. The ribbon genuinely
+  // follows the path and genuinely rolls over the hills, vertex by vertex
+  // (updateRoadRibbon), so the old "tilt one big flat quad and hope the fog
+  // hides the ends" trick is gone with the quad.
+  //
+  // The camera keeps looking straight down the track — which, because the
+  // path is evaluated in the player's own frame, IS behind the character all
+  // the way through a corner without doing anything about it. The only nod
+  // to the turn is a slight roll into it, which reads as leaning into the
+  // bend; the camera's position and heading relative to the runner never
+  // change, exactly as asked for.
   if (terrainActive()) {
     const groundY = hillOffset(state.distance);
-    const slope = THREE.MathUtils.clamp(hillSlope(state.distance), -1, 1);
-    const bank = THREE.MathUtils.clamp(curveSlope(state.distance), -1, 1);
-    ground.position.y = groundY;
-    ground.rotation.x = -Math.PI / 2 + slope * 0.12;
-    ground.rotation.z = bank * 0.05;
     shadowBlob.position.y = groundY + 0.02;
     player.position.y += groundY;
     camera.position.y += groundY;
     camera.lookAt(player.position.x * 0.4, 1.3 + groundY, -8);
+    // How sharply the track is turning right here, as a fraction of the
+    // steepest a corner ever gets: 0 on a straight, 1 at the middle of a
+    // corner. cornerEase peaks at 1.5x the average rate.
+    const turnRate = (headingAt(state.distance + 2) - headingAt(state.distance - 2)) / 4;
+    const bank = THREE.MathUtils.clamp(turnRate / (1.5 * (Math.PI / 2) / CORNER_ARC), -1, 1);
+    cameraRoll += (bank * CAMERA_CORNER_ROLL - cameraRoll) * Math.min(1, dt * 3);
+    camera.rotateZ(cameraRoll);
+    if (horizonGroup) {
+      horizonSwing += (bank * HORIZON_CORNER_SWING - horizonSwing) * Math.min(1, dt * 1.6);
+      // Orbited about the PLAYER, not spun about its own centre — rotating
+      // the group in place would just turn the volcano round, which is not
+      // what a distant landmark does when you take a bend.
+      horizonGroup.position.x = HORIZON_Z * Math.sin(horizonSwing);
+      horizonGroup.position.z = HORIZON_Z * Math.cos(horizonSwing);
+      horizonGroup.rotation.y = horizonSwing;
+    }
   } else if (ground.position.y !== 0 || ground.rotation.z !== 0) {
     // Snap flat immediately on leaving a terrain era rather than easing out
     // of a stale tilt — this only ever runs on the frame an era switch
@@ -3685,6 +4305,7 @@ function animate() {
   const dt = Math.min(0.05, rawFrameMs / 1000);
   lastT = now;
   maybeDowngradeQuality(rawFrameMs);
+  updateSoundHint();
 
   if (state.phase === 'playing') updatePlaying(dt);
 
@@ -3734,6 +4355,17 @@ function animate() {
     confirmMovesStart();
   }
 
+  // The world is on screen during the countdown, the pause screen and the
+  // menus, not just mid-run, so the road has to be built for every frame
+  // that gets drawn — not only the ones updatePlaying() handles.
+  // rebuildPathTable() is guarded on the distance, so the common case where
+  // updatePlaying already did this costs one comparison.
+  if (terrainActive()) {
+    rebuildPathTable(state.distance);
+    updateRoadRibbon(state.distance);
+  }
+  updateTurnSign();
+
   renderer.render(scene, camera);
 }
 // A small read-mostly window onto game state for the automated tests.
@@ -3769,10 +4401,23 @@ window.__mrDebug = {
   setLives: (n) => { state.lives = n; renderLives(); },
   spawnSpecial: (kind) => spawnSpecial(kind),
   placeSpecial: (kind, lane, z) => addPickup(kind, lane, z),
+  coinsTaken: () => state.coinsTaken,
   pickupCount: (kind) => (kind ? pickups.filter((p) => p.kind === kind).length : pickups.length),
   clearPickups: () => { pickups.splice(0).forEach((p) => scene.remove(p.mesh)); },
   placePickup: (kind, lane, z) => addPickup(kind, lane, z),
   setCoinSpawning: (on) => { coinSpawnEnabled = !!on; },
+  setObstacleSpawning: (on) => { obstacleSpawnEnabled = !!on; },
+  clearObstacles: () => { obstacles.splice(0).forEach((o) => scene.remove(o.mesh)); },
+  clears: () => state.clears,
+  // Distance-along of the obstacle closest to the player (0 = level with
+  // them, negative = still ahead). Lets a test act at the right MOMENT
+  // rather than after a fixed sleep — this sandbox renders in software and
+  // runs the game clock at roughly half real-time, so a sleep tuned on one
+  // machine times a jump completely differently on another.
+  // As nearestObstacleZ, for pickups — same reason: a test needs to act when
+  // the thing actually arrives, not after a sleep that assumes a frame rate.
+  nearestPickupZ: (kind) => pickups.reduce((z, p) => ((kind && p.kind !== kind) || p.collected ? z : Math.max(z, p.trackZ)), -Infinity),
+  nearestObstacleZ: () => obstacles.reduce((z, o) => (o.flying ? z : Math.max(z, o.trackZ)), -Infinity),
   jump: () => { if (state.grounded) { state.grounded = false; state.jumping = true; state.vy = JUMP_VELOCITY; } },
   duck: () => { if (state.grounded && state.duckTimer <= 0) state.duckTimer = DUCK_DURATION; },
   duckRemaining: () => state.duckTimer,
@@ -3780,6 +4425,8 @@ window.__mrDebug = {
   era: () => currentEraId,
   music: () => audio.musicState(),
   muted: () => audio.isMuted(),
+  musicBlocked: () => audio.isMusicBlocked(),
+  pauseMusic: () => audio.pauseMusic(),
   grounded: () => state.grounded,
   eraGoal: () => currentEra().goal,
   eraList: () => ERAS.map((e) => e.id),
@@ -3796,7 +4443,7 @@ window.__mrDebug = {
     mesh.position.x = LANE_X[lane];
     mesh.position.z = z;
     scene.add(mesh);
-    obstacles.push({ type, lane, mesh, resolved: false, flying: false, baseY: mesh.position.y });
+    obstacles.push({ type, lane, mesh, resolved: false, flying: false, baseY: mesh.position.y, trackZ: z });
   },
   endRun: () => gameOver(),
   roster: () => roster.slice(),
@@ -3807,8 +4454,17 @@ window.__mrDebug = {
     activePlayerId: activePlayerId(),
     results: multiplayer.results.map((r) => ({ ...r })),
   }),
+  setupDone: () => Array.from(setupDonePlayers).sort((a, b) => a - b),
+  everyoneSetUp: () => everyoneSetUp(),
+  readyHint: () => (readyStartHintEl ? readyStartHintEl.textContent : ''),
   terrainActive: () => terrainActive(),
-  terrainAt: (d) => ({ curve: curveOffset(d), hill: hillOffset(d) }),
+  terrainAt: (d) => ({ hill: hillOffset(d), heading: headingAt(d) }),
+  corners: () => corners.map((c) => ({ ...c })),
+  headingAt: (d) => headingAt(d),
+  // The track point `d` metres ahead of a player standing at `base`,
+  // in that player's own frame. Copied out of the shared scratch object.
+  pathAt: (base, d) => { rebuildPathTable(base); const q = pathLocal(d); return { x: q.x, z: q.z, yaw: q.yaw }; },
+  nextCorner: (d) => { const c = nextCornerFrom(d); return c ? { ...c } : null; },
   playerX: () => player.position.x,
   playerY: () => player.position.y,
   groundTilt: () => ({ y: ground.position.y, rotX: ground.rotation.x, rotZ: ground.rotation.z }),

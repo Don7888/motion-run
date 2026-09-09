@@ -50,6 +50,15 @@ let muted = false;
 const buffers = new Map();      // name -> AudioBuffer
 let musicEl = null;
 let currentTrack = null;
+// Whether the game currently WANTS music playing, kept separate from
+// whether the element actually is. See the "why the first level was
+// silent" note above tryStartMusic().
+let musicWanted = false;
+// Set when a play() attempt was refused by the browser's autoplay policy,
+// cleared the moment one succeeds. The TV reads this (musicBlocked()) to
+// show a "press OK for sound" hint, which is the only way a player sitting
+// on a sofa can supply the gesture the browser is holding out for.
+let musicBlocked = false;
 
 try { muted = localStorage.getItem(MUTE_KEY) === '1'; } catch { /* private mode */ }
 
@@ -80,21 +89,63 @@ export async function preloadSfx() {
 }
 
 /**
- * Called from the first real user input. Browsers start an AudioContext
- * suspended and only allow resuming inside a genuine input handler, so this
- * has to be driven by the game's existing key/message handlers rather than
- * happening on load.
+ * The one place that ever asks the element to roll.
+ *
+ * 2026-09-09 — "the dino level has no music". The cause was not the track,
+ * the file or the era: it was WHERE the play() attempt was being made from.
+ *
+ * A browser only starts audio inside a genuine user gesture, and on the TV
+ * the only genuine gestures are Fire TV remote presses. Everything the
+ * phone does arrives as a WebSocket message, which is NOT a gesture no
+ * matter how deliberate the player was at the other end. MotionQuest is
+ * designed to be played from the phone, so a player can pair, pick a level
+ * and run a whole race without the TV ever seeing one — and the old code
+ * took its single shot at play() at era-switch time, let the rejection fall
+ * into an empty .catch(), and never tried again.
+ *
+ * It showed up on the Primeval Valley specifically because that is the only
+ * era unlocked on a fresh install: every LATER era can only be reached by
+ * finishing an earlier one, and the results screen in between is one of the
+ * places a player does press OK. So the first level anyone ever plays is
+ * the one most likely to be silent — which reads exactly like "the dino
+ * level has no music".
+ *
+ * The fix is to stop treating the start as a one-shot. `musicWanted` records
+ * the intent, and this retries it on every unlock() — i.e. on every remote
+ * press AND every phone message — so whichever one first happens to carry a
+ * real gesture is the one that gets the music going. If the browser is still
+ * refusing, `musicBlocked` lets the TV say so on screen rather than leaving
+ * the player wondering.
+ */
+function tryStartMusic() {
+  if (!musicWanted || muted || !unlocked || !musicEl || !musicEl.paused) return;
+  const attempt = musicEl.play();
+  // Older WebViews return undefined from play() rather than a promise.
+  if (!attempt || typeof attempt.then !== 'function') { musicBlocked = false; return; }
+  attempt.then(
+    () => { musicBlocked = false; },
+    () => { musicBlocked = true; },
+  );
+}
+
+/**
+ * Called from any input that might carry a user gesture. Browsers start an
+ * AudioContext suspended and only allow resuming inside a genuine input
+ * handler, so this has to be driven by the game's existing key/message
+ * handlers rather than happening on load. Cheap and safe to call often —
+ * that is the point, since we cannot tell from here which call is the one
+ * carrying the gesture.
  */
 export function unlock() {
   const audio = ensureContext();
   if (!audio) return;
   if (audio.state === 'suspended') audio.resume().catch(() => {});
   unlocked = true;
-  // A track asked for before unlocking is remembered and started here.
-  if (currentTrack && musicEl && musicEl.paused && !muted) {
-    musicEl.play().catch(() => {});
-  }
+  tryStartMusic();
 }
+
+/** True when music is wanted but the browser is still refusing to start it. */
+export function isMusicBlocked() { return musicWanted && !muted && musicBlocked; }
 
 /**
  * Fires an effect. `rate` re-pitches it — used for the moves the pack has no
@@ -122,30 +173,65 @@ export function sfx(name, { rate = 1, gain = 1 } = {}) {
   } catch { /* a failed effect must never interrupt the game */ }
 }
 
-/** Starts (or switches to) an era's music loop. */
+/**
+ * Starts (or switches to) an era's music loop.
+ *
+ * 2026-09-09 ("the dino level has no music"). This used to return early
+ * whenever `currentTrack === era`, which quietly conflated two different
+ * things: "this track is already SELECTED" and "this track is already
+ * PLAYING". They come apart on the most ordinary route through the game:
+ *
+ *   play a level -> pause (Back) -> exit to the menu (Back again)
+ *   -> pick the SAME level again
+ *
+ * pauseGame() pauses the element, exitToMenu() never resumed it, and then
+ * playMusic() saw its own era already in `currentTrack` and did nothing —
+ * so the whole next run was silent, with no way to get the music back short
+ * of choosing a different era or reloading the page. It reads as "this
+ * level has no music" because the level you replay most is the one you
+ * notice it on, and the first era is the one everybody replays.
+ *
+ * So the early-out now only skips the expensive part (re-assigning `src`,
+ * which would restart the track from the top mid-run). Whether the element
+ * should actually be rolling is re-decided every time, unconditionally —
+ * and if the browser won't have it yet, tryStartMusic() keeps asking.
+ */
 export function playMusic(era) {
   const file = MUSIC_FILES[era];
-  if (!file || currentTrack === era) return;
-  currentTrack = era;
+  if (!file) return;
   if (!musicEl) {
     musicEl = new Audio();
     musicEl.loop = true;
     musicEl.volume = 0.38;   // well under the effects: this sits behind play
+    // Autoplay-blocked audio can also surface as a stalled element rather
+    // than a rejected promise, so treat actually playing as the only
+    // evidence that it worked.
+    musicEl.addEventListener('playing', () => { musicBlocked = false; });
   }
-  musicEl.src = `./audio/${file}`;
-  if (!muted && unlocked) musicEl.play().catch(() => {});
+  // Only re-point the element when the era genuinely changed — assigning
+  // the same src again would restart the loop from zero.
+  if (currentTrack !== era) {
+    currentTrack = era;
+    musicEl.src = `./audio/${file}`;
+  }
+  musicWanted = true;
+  tryStartMusic();
 }
 
 export function pauseMusic() {
+  musicWanted = false;
   if (musicEl) musicEl.pause();
 }
 
 export function resumeMusic() {
-  if (musicEl && !muted && unlocked) musicEl.play().catch(() => {});
+  if (!currentTrack) return;
+  musicWanted = true;
+  tryStartMusic();
 }
 
 export function stopMusic() {
   currentTrack = null;
+  musicWanted = false;
   if (musicEl) { musicEl.pause(); musicEl.currentTime = 0; }
 }
 
@@ -157,9 +243,22 @@ export function isMuted() { return muted; }
  * there is no way to inspect it from the page without this.
  */
 export function musicState() {
+  // `paused` is the field that matters and the one this was missing: the
+  // 2026-09-09 silent-level bug had a perfectly correct `track` and `src`
+  // the whole time it was making no sound, so a test that only checked
+  // those two could never have caught it.
   return musicEl
-    ? { track: currentTrack, src: musicEl.getAttribute('src'), loop: musicEl.loop, volume: musicEl.volume }
-    : { track: currentTrack, src: null, loop: null, volume: null };
+    ? {
+        track: currentTrack,
+        src: musicEl.getAttribute('src'),
+        loop: musicEl.loop,
+        volume: musicEl.volume,
+        paused: musicEl.paused,
+        currentTime: musicEl.currentTime,
+        wanted: musicWanted,
+        blocked: isMusicBlocked(),
+      }
+    : { track: currentTrack, src: null, loop: null, volume: null, paused: true, currentTime: 0, wanted: musicWanted, blocked: false };
 }
 
 /** Returns the new muted state, and persists it for next time. */
@@ -168,8 +267,10 @@ export function toggleMute() {
   try { localStorage.setItem(MUTE_KEY, muted ? '1' : '0'); } catch { /* ignore */ }
   if (muted) {
     if (musicEl) musicEl.pause();
-  } else if (musicEl && unlocked) {
-    musicEl.play().catch(() => {});
+  } else {
+    // Unmuting is itself a button press, i.e. a real gesture — which makes
+    // it one of the reliable ways out of an autoplay block.
+    tryStartMusic();
   }
   return muted;
 }

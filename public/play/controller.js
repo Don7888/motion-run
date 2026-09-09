@@ -66,23 +66,58 @@
 (() => {
   // ==== Tunable thresholds ================================================
   const POSE_MIN_SCORE = 0.25;
-  // Lane zones (camera mode): fraction of frame width the hips must be
-  // offset from center to count as "in" the left/right zone (ENTER), and
-  // how far back toward center they must return to leave it (EXIT — kept
-  // smaller than ENTER so a normal stance reliably re-centers you without
-  // needing an exaggerated opposite step).
-  // 2026-09-04: back to a LANDSCAPE phone, and unlike the move to portrait
-  // these DO have to be rescaled, because they are fractions of frame WIDTH
-  // and the width is what just changed. A phone sensor is 4:3, so turning it
-  // on its side takes the width from 3 units to 4 — the same physical step
-  // now covers three-quarters of the fraction it did upright. Left as they
-  // were, every lane change would have needed a step a third bigger than
-  // the one the player learned in setup.
-  //   portrait: 0.11 x 3 = 0.33 units  ->  landscape: 0.33 / 4 = 0.083
-  // If lane changes feel twitchy or sluggish on a real device, these two
-  // are the knob to turn.
-  const LANE_ENTER_FRAC = 0.083;
-  const LANE_EXIT_FRAC = 0.038;
+  // Lane zones (camera mode): how far the hips must move sideways from the
+  // player's own neutral position to count as "in" the left/right zone
+  // (ENTER), and how far back toward neutral they must return to leave it
+  // (EXIT — kept smaller than ENTER so a normal stance reliably re-centers
+  // you without needing an exaggerated opposite step).
+  //
+  // 2026-09-09 — "the middle is too narrow". These were fractions of frame
+  // WIDTH, and that was the bug, not the number. A fraction of frame width
+  // is a different REAL distance depending on how far back you stand, so
+  // the centre lane silently changed size as the player moved:
+  //
+  //   at 1.5m from the phone   0.083 of frame width = ~17cm of hip movement
+  //   at 2.5m                                       = ~29cm
+  //   at 3.0m                                       = ~35cm
+  //
+  // 17cm is inside the ordinary sway of jogging on the spot, so anyone
+  // standing at the near end of the framing check's accepted range was
+  // getting lane changes they never asked for and could not hold the middle.
+  // Children get this worst: the framing check sizes them by torso, so a
+  // child is asked to stand ~0.8-1.9m back, i.e. squarely in the twitchy
+  // zone, where an adult at 2.5-3m never noticed a problem.
+  //
+  // The fix is to measure the threshold in TORSO LENGTHS instead. Torso
+  // (shoulder-mid to hip-mid) is already tracked, shrinks with distance in
+  // exactly the same proportion as everything else in frame, and scales with
+  // the player's own size — so one number now means one real distance for
+  // everybody, at any distance, adult or child:
+  //
+  //   0.75 torso  ~=  34cm for an adult (0.45m torso)
+  //               ~=  22cm for a young child (0.30m torso)
+  //
+  // which is comfortably clear of jog/sway noise (~10-15cm) and comfortably
+  // inside a deliberate side step (~35-55cm). THIS is the knob to turn if it
+  // still feels twitchy (lower = more sensitive) or sluggish (higher).
+  const LANE_ENTER_TORSO_FRAC = 0.75;
+  const LANE_EXIT_TORSO_FRAC = 0.36;
+  // Guard rails, as fractions of frame width, in case a bad torso read makes
+  // the threshold nonsense — without these a momentarily tiny torso estimate
+  // would make the character flick lanes on noise, and a huge one would make
+  // lane changes impossible. Never reached during normal tracking.
+  const LANE_ENTER_MIN_FRAME_FRAC = 0.05;
+  const LANE_ENTER_MAX_FRAME_FRAC = 0.16;
+  // The neutral position is learned rather than assumed to be the middle of
+  // the frame (the framing check tolerates being up to 0.28 of frame width
+  // off-centre, which is far more than a whole lane threshold). It used to be
+  // captured from a SINGLE frame, which is a coin toss if that frame landed
+  // mid-step — and it then never moved again for the rest of the session.
+  // Now it is the median of a short burst, and re-settles very slowly while
+  // the player is clearly standing neutral, so a run doesn't drift.
+  const POSE_CENTER_SAMPLES = 12;        // ~0.27s at POSE_TARGET_FPS
+  const POSE_CENTER_SETTLE = 0.004;      // per frame, only when clearly centred
+  const POSE_CENTER_SETTLE_BAND = 0.35;  // fraction of ENTER that counts as "clearly centred"
   const JUMP_TRIGGER_TORSO_FRAC = 0.28;
   const JUMP_COOLDOWN_MS = 500;
   // ---- Duck (2026-09-04, the era-levels round) ------------------------
@@ -291,6 +326,11 @@
     // you're actually setting up or playing — that's ~80px the camera view
     // and the buttons want. See body.in-game in index.html.
     document.body.classList.toggle('in-game', el === playScreen || el === calibrationScreen);
+    // 2026-09-08: the join screen's background art (art/join-bg.jpg) already
+    // paints the MotionQuest logo + tagline, so the standard #app header is
+    // redundant there — hide it just for this screen (see the join-screen
+    // CSS block in index.html).
+    document.body.classList.toggle('on-join', el === joinScreen);
     updateFullscreenCam();
   }
   // Camera mode's live preview is genuinely useful to see full-size — both
@@ -672,6 +712,16 @@
     if (calStuckTimer) clearTimeout(calStuckTimer);
     calSkipStepBtn.style.display = 'none';
     if (!opts || opts.notifyTv !== false) sendCalibration('done');
+    // 2026-09-09: re-learn where "centre" is on the way into real play.
+    // Calibration's last acts are a LEFT step, a RIGHT step, a jump, a duck
+    // and a punch — the player is rarely standing neutral at the moment it
+    // ends, and until now whatever position they happened to be in became
+    // the centre lane for the entire run. Nulling these makes onPose()
+    // re-derive the neutral from a fresh median burst once they settle.
+    poseCenterX = null;
+    poseCenterSamples.length = 0;
+    poseHipYBaseline = null;
+    cameraLaneZone = 0;
     actionHandlers = realHandlers;
     moveSensorPanelTo(playSensorSlot);
     showScreen(playScreen);
@@ -684,6 +734,7 @@
   function recenter() {
     if (currentMode === 'camera') {
       poseCenterX = null;
+      poseCenterSamples.length = 0;
       poseHipYBaseline = null;
       cameraLaneZone = 0;
     } else {
@@ -869,6 +920,9 @@
   let detector = null;
   let poseLoopRunning = false;
   let poseCenterX = null;
+  // Collected until there are POSE_CENTER_SAMPLES of them, then reduced to a
+  // median and cleared — see the lane block in onPose().
+  const poseCenterSamples = [];
   let poseHipYBaseline = null;
   // Absolute lane zone the player's body is currently in: -1 left, 0
   // center, 1 right. Recomputed every frame from raw position (with
@@ -1036,15 +1090,49 @@
     // So the player's real left is +x in raw coordinates, meaning a
     // positive dx (hips moved toward larger raw-x) corresponds to the
     // player's own left, hence zone -1.
-    if (poseCenterX === null) poseCenterX = hipMid.x;
-    const dx = hipMid.x - poseCenterX;
     const frameW = cameraVideo.videoWidth;
-    updateLaneMarker(dx, frameW);
+    // Thresholds in PIXELS, derived from this player's torso rather than
+    // from the frame — see the long note on LANE_ENTER_TORSO_FRAC. Clamped
+    // so a bad torso read can't turn the centre lane into a hair trigger or
+    // into something unreachable.
+    const laneEnter = Math.min(
+      LANE_ENTER_MAX_FRAME_FRAC * frameW,
+      Math.max(LANE_ENTER_MIN_FRAME_FRAC * frameW, LANE_ENTER_TORSO_FRAC * torsoScale),
+    );
+    const laneExit = laneEnter * (LANE_EXIT_TORSO_FRAC / LANE_ENTER_TORSO_FRAC);
 
-    const nextZone = computeZone(dx / frameW, cameraLaneZone, LANE_ENTER_FRAC, LANE_EXIT_FRAC);
-    if (nextZone !== cameraLaneZone) {
-      cameraLaneZone = nextZone;
-      actionHandlers.laneZone(cameraLaneZone);
+    // Learn the player's neutral x from a short burst and take the MEDIAN,
+    // so one frame caught mid-step can't define "centre" for the whole run
+    // (which is what used to happen — and calibration asks for a LEFT step
+    // and a RIGHT step immediately beforehand, so being mid-step at that
+    // moment was likely rather than unlucky).
+    if (poseCenterX === null) {
+      poseCenterSamples.push(hipMid.x);
+      if (poseCenterSamples.length >= POSE_CENTER_SAMPLES) {
+        const sorted = poseCenterSamples.slice().sort((a, b) => a - b);
+        poseCenterX = sorted[sorted.length >> 1];
+        poseCenterSamples.length = 0;
+      }
+    }
+    // Jump/duck/punch below don't depend on the lane baseline, so they stay
+    // live through those few frames — only lane reporting waits.
+    if (poseCenterX !== null) {
+      const dx = hipMid.x - poseCenterX;
+      updateLaneMarker(dx, laneEnter);
+
+      const nextZone = computeZone(dx, cameraLaneZone, laneEnter, laneExit);
+      if (nextZone !== cameraLaneZone) {
+        cameraLaneZone = nextZone;
+        actionHandlers.laneZone(cameraLaneZone);
+      }
+      // Very slow drift correction, and only while the player is clearly
+      // standing neutral — people creep across a room over a two-minute run,
+      // and without this the centre lane gradually stops being where they
+      // are standing. The band keeps it from eroding a deliberate lean that
+      // is sitting just inside the enter threshold.
+      if (cameraLaneZone === 0 && Math.abs(dx) < laneEnter * POSE_CENTER_SETTLE_BAND) {
+        poseCenterX += (hipMid.x - poseCenterX) * POSE_CENTER_SETTLE;
+      }
     }
 
     // Jump (hips rise) and duck (hips drop) share one baseline, because
@@ -1157,10 +1245,15 @@
     }
   }
 
-  function updateLaneMarker(dx, frameW) {
-    const frac = Math.max(-1, Math.min(1, dx / (frameW * 0.35)));
+  // `laneEnter` is now in pixels and varies with the player's torso (see
+  // LANE_ENTER_TORSO_FRAC), so the marker is scaled against the threshold
+  // itself. That also makes the readout more useful than it was: full
+  // deflection is now exactly "one lane change", not an arbitrary slice of
+  // the frame that happened to be near it.
+  function updateLaneMarker(dx, laneEnter) {
+    const frac = Math.max(-1, Math.min(1, dx / (laneEnter * 2.2)));
     laneMarker.style.left = `${50 - frac * 50}%`;
-    laneMarker.style.background = Math.abs(dx) > LANE_ENTER_FRAC * frameW ? '#ffd166' : '#6ee7ff';
+    laneMarker.style.background = Math.abs(dx) > laneEnter ? '#ffd166' : '#6ee7ff';
   }
 
   // =========================================================================
