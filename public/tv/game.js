@@ -76,7 +76,18 @@ const GAMEOVER_RESTART_DELAY = 4.5; // seconds on the Run Over screen before goi
 const JUMP_VELOCITY = 8.2;
 const GRAVITY = -22;
 
-const PUNCH_DURATION = 0.34; // seconds arm is "active" (gameplay hit-window — untouched, balance-sensitive)
+// 2026-09-10 ("the prompt comes up too early... make the window more
+// generous"). Both halves of that were one problem. Getting a punch to the
+// TV takes the player about 0.5-0.8s all in — see the prompt, decide, throw
+// the punch, have the phone's pose detector recognise it, relay it — but the
+// punch then counted for only 0.34s. So a player who reacted PROMPTLY to a
+// cue 0.85s out had their punch expire before the crate arrived, and the
+// only way to hit anything was to react late. Punishing people for being
+// quick is exactly backwards.
+//
+// The window is now long enough to cover the whole spread of human reaction
+// times, so any punch thrown in response to the cue lands.
+const PUNCH_DURATION = 0.9;
 const HIT_INVULN_TIME = 1.1;
 
 // Cosmetic-only punch animation timing — deliberately separate from
@@ -87,11 +98,16 @@ const HIT_INVULN_TIME = 1.1;
 // Sized up again 2026-09-02 ("not exaggerated enough" feedback) — bigger
 // windup, further reach, and a stronger overshoot snap (see the increased
 // easeOutBack() overshoot constant below too).
-const PUNCH_ANIM_DURATION = 0.68;
+// Stretched with the gameplay window (2026-09-10) so the animation still
+// finishes inside the time the punch actually counts for. Kept just under
+// PUNCH_DURATION, never over: the animation is what blocks a re-punch, and
+// a player should never be locked out of throwing another one while the
+// last is still live.
+const PUNCH_ANIM_DURATION = 0.85;
 const PUNCH_WINDUP_FRAC = 0.15; // fraction of the animation spent winding up (arm pulls back)
 const PUNCH_SNAP_FRAC = 0.3;    // fraction spent snapping forward (with overshoot)
-const PUNCH_WINDUP_PULL = 0.85; // radians the arm pulls back before throwing the punch
-const PUNCH_MAX_EXTEND = -2.95; // radians of forward extension at full reach (~169°) — big and cartoonish
+const PUNCH_WINDUP_PULL = 1.15; // radians the arm pulls back before throwing the punch
+const PUNCH_MAX_EXTEND = -3.35; // radians of forward extension at full reach (~192°) — past vertical, deliberately absurd
 
 const OBSTACLE_TYPES = ['hurdle', 'crate', 'wall', 'lowbar'];
 
@@ -124,7 +140,10 @@ const ACTION_PROMPT_META = {
   wall: { icon: '↔️', text: 'MOVE!' },
   lowbar: { icon: '⬇️', text: 'DUCK!' },
 };
-const PROMPT_LEAD_TIME = 0.85; // seconds of warning shown before the obstacle reaches the collision zone
+// Pulled in from 0.85 so the cue means "throw it now" rather than "something
+// is coming eventually". With the much longer PUNCH_DURATION above, a player
+// who reacts instantly and one who takes a beat both connect.
+const PROMPT_LEAD_TIME = 0.65; // seconds of warning before the obstacle reaches the collision zone
 
 // Obstacle knockback (see launchObstacleFlying()) — a punched crate
 // rockets off with its own little projectile arc instead of just scrolling
@@ -202,7 +221,11 @@ scene.background = makeSkyTexture();
 // draining the middle distance.
 scene.fog = new THREE.Fog(0xcdeaf7, 60, 150);
 
-const CAMERA_BASE_Y = 4.6;
+// Raised from 4.6 (2026-09-10). Together with the flatter hills above, this
+// is what buys back the line of sight over a crest to the base of an
+// obstacle in the dip beyond — the extra height costs nothing and changes
+// the framing barely at all.
+const CAMERA_BASE_Y = 5.15;
 // How far the camera leans into a corner at the sharpest point of the turn,
 // in radians (~4.6 degrees). Deliberately small: the ask was for the camera
 // to stay fixed behind the character, so this is a touch of body language on
@@ -320,6 +343,14 @@ function makeRoadTexture(pal) {
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
   tex.repeat.set(1, 60);
+  // The road recedes to the horizon, so almost every road pixel on screen is
+  // sampled at a grazing angle — exactly the case plain mipmapping blurs to
+  // mush, and the main reason the track looked soft a few metres ahead of the
+  // player. Anisotropic filtering is fixed-function GPU work that costs
+  // essentially nothing and keeps the lane markings and kerbs crisp into the
+  // distance. Clamped to 4 rather than the maximum: returns fall off sharply
+  // after that, and a Fire TV Stick's GPU is not where to spend the rest.
+  tex.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy());
   return tex;
 }
 let roadTexture = makeRoadTexture();
@@ -943,15 +974,223 @@ const brickTexture = makeBrickTexture();
 // =====================================================================
 const LOWBAR_UNDERSIDE = 1.35;
 
+// =====================================================================
+// THE PUNCHABLE CHARACTERS (2026-09-10)
+//
+// One per era, and the only obstacle the player meets face to face — you
+// walk right up to these and hit them, so they carry more of the game's
+// character than anything else on the track and are worth real geometry.
+//
+// Built to read at speed, from behind, at roughly 10-20 metres: strong
+// silhouette first (tail, crest, cannon arms), detail second. Each is
+// 20-30 boxes, which is nothing next to the scenery already on screen, and
+// each gets a slow idle motion so it looks alive on the approach rather
+// than like a prop sitting on the road — see updateObstacleIdle().
+//
+// They face the player (+z), because you are running at them.
+// =====================================================================
+
+/** Shorthand: a box at a position, optionally rotated, added to `g`. */
+function part(g, w, h, d, color, x, y, z, rx, ry) {
+  const m = boxMesh(w, h, d, color);
+  m.position.set(x, y, z);
+  if (rx) m.rotation.x = rx;
+  if (ry) m.rotation.y = ry;
+  g.add(m);
+  return m;
+}
+
+function makeTrex() {
+  const g = new THREE.Group();
+  const HIDE = 0x5f9e46, BELLY = 0x9dc47a, DARK = 0x477a34;
+  // Body, sloping forward from the hips — the line that makes a theropod
+  // read as a theropod rather than as a standing lizard.
+  part(g, 0.95, 0.85, 1.25, HIDE, 0, 1.15, 0);
+  part(g, 0.72, 0.55, 0.5, BELLY, 0, 0.98, 0.42);
+  // Tail: four tapering segments, each lower and further back, so it reads
+  // as a counterweight rather than a stuck-on stump.
+  const tail = [[0.6, 0.5, 0.75, 1.18, -0.85], [0.46, 0.4, 0.7, 1.06, -1.45],
+                [0.32, 0.3, 0.65, 0.94, -1.98], [0.2, 0.2, 0.55, 0.84, -2.4]];
+  tail.forEach(([w, h, d, y, z], i) => part(g, w, h, d, i % 2 ? DARK : HIDE, 0, y, z));
+  // Neck and head, thrust forward over the legs.
+  part(g, 0.42, 0.42, 0.5, HIDE, 0, 1.55, 0.5);
+  const head = part(g, 0.55, 0.5, 0.95, HIDE, 0, 1.78, 0.95);
+  head.name = 'trexHead';
+  part(g, 0.5, 0.22, 0.8, BELLY, 0, 1.6, 1.02);          // lower jaw
+  // Teeth — four little white blocks along the jawline. Tiny, but they are
+  // what turns a green box into something with a mouth.
+  for (let i = 0; i < 4; i++) part(g, 0.08, 0.16, 0.08, 0xfdf6e3, -0.18 + i * 0.12, 1.66, 1.36);
+  part(g, 0.14, 0.14, 0.06, 0xffd24a, -0.2, 1.92, 1.34); // eyes
+  part(g, 0.14, 0.14, 0.06, 0xffd24a, 0.2, 1.92, 1.34);
+  part(g, 0.08, 0.08, 0.05, 0x1a1a1a, -0.2, 1.92, 1.38);
+  part(g, 0.08, 0.08, 0.05, 0x1a1a1a, 0.2, 1.92, 1.38);
+  part(g, 0.3, 0.16, 0.2, DARK, 0, 2.06, 1.1);           // brow ridge
+  // The famous little arms.
+  part(g, 0.12, 0.32, 0.12, HIDE, -0.5, 1.3, 0.5);
+  part(g, 0.12, 0.32, 0.12, HIDE, 0.5, 1.3, 0.5);
+  part(g, 0.1, 0.1, 0.18, BELLY, -0.5, 1.14, 0.58);
+  part(g, 0.1, 0.1, 0.18, BELLY, 0.5, 1.14, 0.58);
+  // Legs: thick thigh, angled shin, big three-toed foot.
+  [-1, 1].forEach((side) => {
+    part(g, 0.4, 0.6, 0.5, HIDE, side * 0.36, 0.75, -0.1);
+    part(g, 0.26, 0.55, 0.3, DARK, side * 0.36, 0.32, 0.06);
+    part(g, 0.36, 0.16, 0.6, DARK, side * 0.36, 0.08, 0.28);
+    for (let t = 0; t < 3; t++) part(g, 0.09, 0.1, 0.16, 0xe8e0cf, side * 0.36 + (t - 1) * 0.12, 0.05, 0.56);
+  });
+  // Back stripes, for a bit of pattern at distance.
+  for (let i = 0; i < 3; i++) part(g, 0.12, 0.1, 0.9, DARK, -0.3 + i * 0.3, 1.58, -0.1);
+  g.userData.idle = 'trex';
+  g.userData.parts = { head };
+  return g;
+}
+
+function makeLegionary() {
+  const g = new THREE.Group();
+  const TUNIC = 0xb23a2e, ARMOUR = 0xc9a227, SKIN = 0xd9a273, LEATHER = 0x6b4a2f;
+  part(g, 0.62, 0.62, 0.42, ARMOUR, 0, 1.32, 0);          // segmented cuirass
+  for (let i = 0; i < 3; i++) part(g, 0.66, 0.08, 0.46, 0xa8871c, 0, 1.14 + i * 0.2, 0);
+  part(g, 0.6, 0.34, 0.4, TUNIC, 0, 0.92, 0);             // tunic skirt
+  for (let i = 0; i < 4; i++) part(g, 0.1, 0.28, 0.06, LEATHER, -0.24 + i * 0.16, 0.7, 0.21);
+  // Head, helmet and the crest that makes the silhouette unmistakable.
+  part(g, 0.34, 0.34, 0.32, SKIN, 0, 1.79, 0);
+  part(g, 0.4, 0.26, 0.38, ARMOUR, 0, 1.94, 0);           // helmet bowl
+  part(g, 0.44, 0.08, 0.12, ARMOUR, 0, 1.86, 0.2);        // brow guard
+  part(g, 0.1, 0.3, 0.34, ARMOUR, -0.2, 1.8, 0);          // cheek plates
+  part(g, 0.1, 0.3, 0.34, ARMOUR, 0.2, 1.8, 0);
+  const crest = part(g, 0.1, 0.26, 0.5, TUNIC, 0, 2.18, -0.02);
+  crest.name = 'crest';
+  part(g, 0.08, 0.06, 0.12, 0xffd24a, -0.09, 1.83, 0.18); // eyes in the helmet shadow
+  part(g, 0.08, 0.06, 0.12, 0xffd24a, 0.09, 1.83, 0.18);
+  // Shield on the left arm, held across the body — the big readable shape.
+  const shield = new THREE.Group();
+  part(shield, 0.62, 1.0, 0.12, TUNIC, 0, 0, 0);
+  part(shield, 0.5, 0.16, 0.14, ARMOUR, 0, 0.22, 0.02);
+  part(shield, 0.16, 0.16, 0.16, ARMOUR, 0, 0, 0.08);     // boss
+  part(shield, 0.16, 0.5, 0.13, ARMOUR, 0, -0.22, 0.01);
+  shield.position.set(-0.5, 1.22, 0.3);
+  shield.rotation.y = 0.3;
+  shield.name = 'shield';
+  g.add(shield);
+  part(g, 0.18, 0.5, 0.18, SKIN, -0.42, 1.35, 0.12);      // shield arm
+  // Spear arm, raised.
+  part(g, 0.18, 0.5, 0.18, SKIN, 0.42, 1.4, 0.05);
+  const spear = part(g, 0.08, 1.9, 0.08, LEATHER, 0.52, 1.5, 0.15);
+  spear.name = 'spear';
+  part(g, 0.12, 0.3, 0.12, 0xd8d8d8, 0.52, 2.5, 0.15);    // spearhead
+  // Legs and sandals.
+  [-1, 1].forEach((side) => {
+    part(g, 0.22, 0.55, 0.24, SKIN, side * 0.17, 0.45, 0);
+    part(g, 0.24, 0.12, 0.34, LEATHER, side * 0.17, 0.11, 0.05);
+    part(g, 0.25, 0.1, 0.25, ARMOUR, side * 0.17, 0.62, 0.11); // greaves
+  });
+  g.userData.idle = 'legionary';
+  g.userData.parts = { crest, spear };
+  return g;
+}
+
+function makeSentryBot() {
+  const g = new THREE.Group();
+  const SHELL = 0x2f3a63, TRIM = 0x4a5891, NEON = 0x36e0ff, HOT = 0xff4fd8;
+  part(g, 0.9, 0.8, 0.6, SHELL, 0, 1.35, 0);              // chassis
+  part(g, 0.96, 0.1, 0.64, TRIM, 0, 1.72, 0);
+  part(g, 0.7, 0.3, 0.5, TRIM, 0, 0.95, 0);               // waist
+  // Head with a full-width visor — the one bright shape, so it reads first.
+  part(g, 0.5, 0.36, 0.44, SHELL, 0, 1.95, 0);
+  const visor = neonBox(0.44, 0.14, 0.06, NEON);
+  visor.position.set(0, 1.97, 0.24);
+  visor.name = 'visor';
+  g.add(visor);
+  part(g, 0.06, 0.24, 0.06, TRIM, 0, 2.24, 0);            // antenna
+  const blip = neonBox(0.1, 0.1, 0.1, HOT);
+  blip.position.set(0, 2.4, 0);
+  blip.name = 'blip';
+  g.add(blip);
+  // Shoulders and arm cannons.
+  [-1, 1].forEach((side) => {
+    part(g, 0.28, 0.3, 0.42, TRIM, side * 0.6, 1.6, 0);
+    part(g, 0.22, 0.5, 0.22, SHELL, side * 0.62, 1.25, 0.02);
+    part(g, 0.3, 0.3, 0.55, SHELL, side * 0.62, 1.0, 0.2); // cannon housing
+    const muzzle = neonBox(0.16, 0.16, 0.12, HOT);
+    muzzle.position.set(side * 0.62, 1.0, 0.5);
+    g.add(muzzle);
+  });
+  // Chest light and vents.
+  const core = neonBox(0.26, 0.26, 0.06, HOT);
+  core.position.set(0, 1.38, 0.31);
+  core.name = 'core';
+  g.add(core);
+  for (let i = 0; i < 3; i++) part(g, 0.5, 0.05, 0.05, NEON, 0, 1.6 - i * 0.09, 0.31);
+  // Legs ending in a hover pad rather than feet — it floats a little.
+  [-1, 1].forEach((side) => {
+    part(g, 0.24, 0.45, 0.28, SHELL, side * 0.22, 0.62, 0);
+    part(g, 0.3, 0.14, 0.42, TRIM, side * 0.22, 0.36, 0.04);
+  });
+  const glow = neonBox(0.8, 0.08, 0.5, NEON);
+  glow.position.set(0, 0.24, 0.02);
+  glow.name = 'hoverGlow';
+  g.add(glow);
+  g.userData.idle = 'bot';
+  g.userData.parts = { visor, blip, core, glow };
+  return g;
+}
+
+/**
+ * A slow idle for the punchable characters, so one standing on the track
+ * reads as something waiting for you rather than as furniture. Called once
+ * per character per frame from the obstacle loop.
+ *
+ * Everything here is bounded and driven off the object's own phase offset,
+ * so a row of three across the lanes doesn't move in lockstep — the giveaway
+ * that would make them look like three copies of one prop.
+ */
+function updateObstacleIdle(mesh, t) {
+  const kind = mesh.userData.idle;
+  if (!kind) return;
+  if (mesh.userData.phase === undefined) mesh.userData.phase = Math.random() * Math.PI * 2;
+  const ph = mesh.userData.phase;
+  const p = mesh.userData.parts || {};
+  if (kind === 'trex') {
+    // Weight shifting foot to foot, head swinging with it.
+    mesh.rotation.z = Math.sin(t * 1.6 + ph) * 0.045;
+    if (p.head) {
+      p.head.position.y = 1.78 + Math.sin(t * 2.4 + ph) * 0.07;
+      p.head.rotation.x = Math.sin(t * 1.1 + ph) * 0.12;
+    }
+  } else if (kind === 'legionary') {
+    // At attention, but not carved from stone: the crest catches the wind
+    // and the spear shifts in his grip.
+    if (p.crest) p.crest.rotation.z = Math.sin(t * 2.2 + ph) * 0.16;
+    if (p.spear) p.spear.rotation.z = 0.05 + Math.sin(t * 0.9 + ph) * 0.04;
+    mesh.rotation.z = Math.sin(t * 0.8 + ph) * 0.02;
+  } else if (kind === 'bot') {
+    // Hovering, with the visor and core breathing and the antenna blipping.
+    mesh.position.y += Math.sin(t * 1.9 + ph) * 0.06;
+    const pulse = 0.55 + 0.45 * (0.5 + 0.5 * Math.sin(t * 3.1 + ph));
+    if (p.visor) p.visor.scale.set(1, pulse, 1);
+    if (p.core) p.core.scale.setScalar(0.85 + pulse * 0.3);
+    if (p.glow) p.glow.scale.set(1 + Math.sin(t * 1.9 + ph) * 0.12, 1, 1);
+    if (p.blip) p.blip.visible = Math.sin(t * 5.5 + ph) > 0;
+  }
+}
+
 // --- Present Day -----------------------------------------------------
+// 2026-09-10: the jump/duck/dodge obstacles were three or four plain boxes
+// apiece and had almost no era character. Each is now built to say what it
+// wants from the player in its silhouette — a hurdle is low and wide with
+// clear air under the bar, a wall is tall and solid with no gap, a low bar
+// hangs with obvious clearance beneath it — and to look like it belongs to
+// its century.
 function obPresentHurdle() {
   const g = new THREE.Group();
-  const bar = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.18, 0.18), new THREE.MeshLambertMaterial({ map: hazardTexture }));
-  bar.position.y = 0.55;
-  const legA = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.55, 0.1), new THREE.MeshLambertMaterial({ color: 0xd98a00 }));
-  legA.position.set(-0.65, 0.275, 0);
-  const legB = legA.clone(); legB.position.x = 0.65;
-  g.add(bar, legA, legB);
+  const bar = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.2, 0.2), new THREE.MeshLambertMaterial({ map: hazardTexture }));
+  bar.position.y = 0.6;
+  g.add(bar);
+  part(g, 1.7, 0.12, 0.14, 0xd98a00, 0, 0.34, 0);          // lower rail
+  [-1, 1].forEach((side) => {
+    part(g, 0.12, 0.62, 0.12, 0xd98a00, side * 0.72, 0.31, 0);
+    part(g, 0.2, 0.08, 0.5, 0x8c9099, side * 0.72, 0.04, 0); // weighted foot
+    part(g, 0.14, 0.14, 0.14, 0xffd166, side * 0.72, 0.68, 0); // cap light
+  });
   return g;
 }
 function obPresentCrate() {
@@ -960,41 +1199,58 @@ function obPresentCrate() {
   return m;
 }
 function obPresentWall() {
+  const g = new THREE.Group();
   const m = new THREE.Mesh(new THREE.BoxGeometry(1.8, 2.6, 0.6), new THREE.MeshLambertMaterial({ map: brickTexture }));
   m.position.y = 1.3;
-  return m;
+  g.add(m);
+  part(g, 1.95, 0.2, 0.75, 0x9aa0aa, 0, 2.7, 0);           // coping stone
+  part(g, 1.9, 0.14, 0.7, 0x8c9099, 0, 0.07, 0);           // footing
+  // A road-works sign bolted to it, so it reads as "closed" rather than
+  // as a piece of scenery that happens to be in the way.
+  part(g, 0.8, 0.55, 0.06, 0xffd166, 0, 1.75, 0.34);
+  part(g, 0.55, 0.1, 0.05, 0x2a1a08, 0, 1.75, 0.38);
+  return g;
 }
 function obPresentLowbar() {
   return modelOr('duck_barrier', obPresentLowbarBoxes);
 }
 function obPresentLowbarBoxes() {
   const g = new THREE.Group();
-  const beam = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.34, 0.3), new THREE.MeshLambertMaterial({ map: hazardTexture }));
-  beam.position.y = LOWBAR_UNDERSIDE + 0.17;
-  const postA = boxMesh(0.16, LOWBAR_UNDERSIDE + 0.34, 0.16, 0x8c9099);
-  postA.position.set(-0.95, (LOWBAR_UNDERSIDE + 0.34) / 2, 0);
-  const postB = postA.clone(); postB.position.x = 0.95;
-  g.add(beam, postA, postB);
+  const beam = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.36, 0.32), new THREE.MeshLambertMaterial({ map: hazardTexture }));
+  beam.position.y = LOWBAR_UNDERSIDE + 0.18;
+  g.add(beam);
+  [-1, 1].forEach((side) => {
+    part(g, 0.16, LOWBAR_UNDERSIDE + 0.36, 0.16, 0x8c9099, side * 1.0, (LOWBAR_UNDERSIDE + 0.36) / 2, 0);
+    part(g, 0.42, 0.1, 0.42, 0x6d727a, side * 1.0, 0.05, 0);  // base plate
+    part(g, 0.12, 0.12, 0.12, 0xff5a5f, side * 1.0, LOWBAR_UNDERSIDE + 0.44, 0);
+  });
+  // Hanging tapes, which is what actually sells "get under this".
+  for (let i = 0; i < 5; i++) part(g, 0.12, 0.3, 0.03, 0xffd166, -0.8 + i * 0.4, LOWBAR_UNDERSIDE - 0.12, 0.14);
   return g;
 }
 
 // --- Primeval Valley (dinosaurs) -------------------------------------
 function obDinoHurdle() {
   const g = new THREE.Group();
-  const log = boxMesh(2.0, 0.5, 0.5, 0x6b4a2f);
-  log.position.y = 0.28;
-  const knot = boxMesh(0.3, 0.3, 0.56, 0x54381f);
-  knot.position.set(0.35, 0.3, 0);
-  const moss = boxMesh(1.9, 0.1, 0.52, 0x4c8f45);
-  moss.position.y = 0.53;
-  g.add(log, knot, moss);
+  part(g, 2.0, 0.5, 0.5, 0x6b4a2f, 0, 0.32, 0);            // fallen log
+  part(g, 0.3, 0.3, 0.56, 0x54381f, 0.35, 0.34, 0);        // knot
+  part(g, 1.9, 0.1, 0.52, 0x4c8f45, 0, 0.57, 0);           // moss along the top
+  part(g, 0.55, 0.5, 0.55, 0x7a5638, -1.0, 0.3, 0);        // broken end, ragged
+  part(g, 0.34, 0.3, 0.34, 0x54381f, 1.0, 0.36, 0.06);
+  // Stumps of snapped branches, angled out of the trunk.
+  part(g, 0.14, 0.5, 0.14, 0x54381f, -0.5, 0.6, 0.1, 0.5, 0);
+  part(g, 0.12, 0.42, 0.12, 0x54381f, 0.62, 0.58, -0.08, -0.4, 0);
+  for (let i = 0; i < 3; i++) part(g, 0.26, 0.12, 0.2, 0x3f8c4a, -0.6 + i * 0.6, 0.06, 0.28);
   return g;
 }
-function obDinoCrate() {
-  // Punching a small T-rex beats punching a nest of eggs, and the pack has
-  // one. Eggs remain the fallback.
-  return modelOr('dinosaur_trex', obDinoCrateBoxes);
-}
+// 2026-09-10. The three punchable characters were coming from the GLB pack,
+// and those files are tiny — the T-rex was 7KB, which bought a green box with
+// legs: no tail, no jaw, no arms. Hand-built geometry gets far more shape for
+// the same triangle budget and matches the blocky art direction the rest of
+// the game is authored in, so these are now built here and the weak models
+// are no longer used for them. (roman_column, time_portal and the collectible
+// models are Don's own and still come from the pack.)
+function obDinoCrate() { return makeTrex(); }
 function obDinoCrateBoxes() {
   const g = new THREE.Group();
   const nest = boxMesh(1.35, 0.34, 1.05, 0x7a5c34);
@@ -1009,11 +1265,17 @@ function obDinoCrateBoxes() {
 }
 function obDinoWall() {
   const g = new THREE.Group();
-  const rock = boxMesh(1.8, 2.4, 0.7, 0x6f6659);
-  rock.position.y = 1.2;
-  const cap = boxMesh(1.4, 0.5, 0.6, 0x827868);
-  cap.position.y = 2.55;
-  g.add(rock, cap);
+  // A stack of boulders rather than one slab — offset a little each way so
+  // the silhouette is craggy instead of rectangular.
+  part(g, 1.8, 1.0, 0.7, 0x6f6659, 0, 0.5, 0);
+  part(g, 1.6, 0.85, 0.66, 0x7b7264, -0.08, 1.4, 0.04);
+  part(g, 1.3, 0.7, 0.6, 0x655d51, 0.1, 2.15, -0.03);
+  part(g, 0.8, 0.45, 0.5, 0x827868, -0.05, 2.7, 0.02);
+  part(g, 0.5, 0.3, 0.4, 0x6f6659, 0.45, 2.95, 0);
+  // Ribs half-buried at the base — the valley eats runners.
+  part(g, 0.16, 0.5, 0.16, 0xe8e0cf, -0.85, 0.22, 0.36, 0, 0.4);
+  part(g, 0.16, 0.42, 0.16, 0xe8e0cf, 0.9, 0.18, 0.32, 0, -0.3);
+  for (let i = 0; i < 3; i++) part(g, 0.3, 0.16, 0.26, 0x4c8f45, -0.6 + i * 0.6, 0.07, 0.4);
   return g;
 }
 function obDinoLowbar() {
@@ -1040,19 +1302,17 @@ function obDinoLowbarBoxes() {
 // --- Ancient Rome ----------------------------------------------------
 function obRomeHurdle() {
   const g = new THREE.Group();
-  const step = boxMesh(1.9, 0.5, 0.7, 0xe3dac2);
-  step.position.y = 0.25;
-  const top = boxMesh(2.0, 0.12, 0.8, 0xf2ead8);
-  top.position.y = 0.56;
-  g.add(step, top);
+  // A toppled column lying across the street, which is a far better reason
+  // to jump than the plain marble step this used to be.
+  part(g, 0.5, 0.5, 2.0, 0xefe7d4, 0, 0.3, 0);
+  for (let i = 0; i < 4; i++) part(g, 0.54, 0.08, 0.3, 0xd8cfb6, 0, 0.3, -0.75 + i * 0.5);
+  part(g, 0.7, 0.66, 0.3, 0xd8cfb6, 0, 0.33, 1.0);          // capital, one end
+  part(g, 0.62, 0.58, 0.22, 0xcfc3a4, 0, 0.31, -1.02);      // broken base
+  part(g, 0.3, 0.26, 0.26, 0xefe7d4, 0.75, 0.13, 0.55);     // chunks knocked off
+  part(g, 0.24, 0.2, 0.2, 0xd8cfb6, -0.8, 0.1, -0.4);
   return g;
 }
-function obRomeCrate() {
-  // "PUNCH ROMANS", straight off the key art. Don's roman_soldier model is
-  // this exact thing and carries far more shape than the boxes below, which
-  // stay as the fallback if the model can't be loaded.
-  return modelOr('roman_soldier', obRomeCrateBoxes);
-}
+function obRomeCrate() { return makeLegionary(); }
 function obRomeCrateBoxes() {
   const g = new THREE.Group();
   const legs = boxMesh(0.5, 0.5, 0.34, 0x8a6a4a);
@@ -1080,13 +1340,15 @@ function obRomeWall() {
 }
 function obRomeWallBoxes() {
   const g = new THREE.Group();
-  const base = boxMesh(1.5, 0.3, 1.0, 0xd8cfb6);
-  base.position.y = 0.15;
-  const shaft = boxMesh(1.1, 2.2, 0.8, 0xefe7d4);
-  shaft.position.y = 1.4;
-  const cap = boxMesh(1.5, 0.32, 1.0, 0xd8cfb6);
-  cap.position.y = 2.66;
-  g.add(base, shaft, cap);
+  part(g, 1.5, 0.3, 1.0, 0xd8cfb6, 0, 0.15, 0);             // plinth
+  part(g, 1.3, 0.16, 0.9, 0xcfc3a4, 0, 0.36, 0);
+  part(g, 1.1, 2.2, 0.8, 0xefe7d4, 0, 1.5, 0);              // shaft
+  // Fluting: shallow vertical grooves picked out in a darker tone.
+  for (let i = 0; i < 4; i++) part(g, 0.1, 2.1, 0.06, 0xdcd3bd, -0.36 + i * 0.24, 1.5, 0.41);
+  part(g, 1.3, 0.2, 0.95, 0xd8cfb6, 0, 2.7, 0);             // capital
+  part(g, 1.5, 0.22, 1.05, 0xefe7d4, 0, 2.9, 0);            // abacus
+  part(g, 0.28, 0.28, 0.28, 0xd9b04a, -0.5, 2.72, 0.4);     // gilded corner volutes
+  part(g, 0.28, 0.28, 0.28, 0xd9b04a, 0.5, 2.72, 0.4);
   return g;
 }
 function obRomeLowbar() {
@@ -1121,19 +1383,21 @@ function neonBox(w, h, d, color, opacity) {
 function obFutureHurdle() {
   const g = new THREE.Group();
   const bar = neonBox(1.8, 0.22, 0.22, 0x36e0ff);
-  bar.position.y = 0.55;
-  const postA = boxMesh(0.14, 0.55, 0.14, 0x2a3350);
-  postA.position.set(-0.85, 0.275, 0);
-  const postB = postA.clone(); postB.position.x = 0.85;
-  g.add(bar, postA, postB);
+  bar.position.y = 0.58;
+  g.add(bar);
+  const under = neonBox(1.6, 0.06, 0.06, 0x9b6bff);
+  under.position.y = 0.3;
+  g.add(under);
+  [-1, 1].forEach((side) => {
+    part(g, 0.16, 0.6, 0.16, 0x2a3350, side * 0.88, 0.3, 0);
+    part(g, 0.34, 0.1, 0.42, 0x39456b, side * 0.88, 0.05, 0);   // clamp foot
+    const cap = neonBox(0.2, 0.12, 0.2, 0x36e0ff);
+    cap.position.set(side * 0.88, 0.66, 0);
+    g.add(cap);
+  });
   return g;
 }
-function obFutureCrate() {
-  // The punchable one. future_robot stands at player height, which reads as
-  // something to hit; the drone model is long and flat and works better as
-  // scenery overhead.
-  return modelOr('future_robot', obFutureCrateBoxes);
-}
+function obFutureCrate() { return makeSentryBot(); }
 function obFutureCrateBoxes() {
   const g = new THREE.Group();
   const body = boxMesh(1.0, 0.7, 0.8, 0x39456b);
@@ -1149,11 +1413,22 @@ function obFutureCrateBoxes() {
 }
 function obFutureWall() {
   const g = new THREE.Group();
-  const frame = boxMesh(1.9, 2.6, 0.24, 0x2a3350);
-  frame.position.y = 1.3;
+  // A shield emitter: heavy posts top and bottom, energy field between.
+  part(g, 2.0, 0.34, 0.4, 0x2a3350, 0, 0.17, 0);
+  part(g, 2.0, 0.3, 0.4, 0x2a3350, 0, 2.75, 0);
+  [-1, 1].forEach((side) => part(g, 0.22, 2.6, 0.34, 0x39456b, side * 0.9, 1.45, 0));
   const field = neonBox(1.6, 2.3, 0.1, 0x9b6bff, 0.55);
-  field.position.y = 1.3;
-  g.add(frame, field);
+  field.position.y = 1.45;
+  g.add(field);
+  // Emitter nodes down each post, so the field looks generated rather than
+  // painted on.
+  for (let i = 0; i < 4; i++) {
+    [-1, 1].forEach((side) => {
+      const node = neonBox(0.14, 0.14, 0.4, 0x36e0ff);
+      node.position.set(side * 0.9, 0.55 + i * 0.62, 0);
+      g.add(node);
+    });
+  }
   return g;
 }
 function obFutureLowbar() {
@@ -1667,14 +1942,27 @@ function terrainRamp(distanceAlong) {
 // Kept as a plain function of absolute distance so the ground ribbon can
 // sample it per vertex (it now genuinely rolls, rather than the whole flat
 // plane tilting to the height under the player).
+// 2026-09-10 ("characters disappear into the ground on hills and dips").
+// Nothing was sinking — measured, obstacles sat exactly on the surface to
+// the millimetre. The problem was OCCLUSION: with up to ~3.1m of relief
+// packed into a few tens of metres, a crest between the camera and an
+// obstacle 20-40m ahead hid its legs, or the whole thing. That reads
+// exactly like the character sinking into the ground, and it is worse than
+// cosmetic — it hides the thing the player is supposed to be reacting to.
+//
+// So the roll stays, at roughly half the height and stretched out longer.
+// The short, choppy second wave is the part that did the hiding (a 84m
+// wavelength puts a crest and a trough inside the reaction window), so it
+// is both smaller and slower now. Line of sight to an obstacle's base is
+// checked by mr_test_terrain_sight.js rather than by eye.
 function hillOffset(distanceAlong) {
   if (!terrainActive()) return 0;
   const ramp = terrainRamp(distanceAlong);
-  const amp = THREE.MathUtils.lerp(0.3, 1.3, ramp);
+  const amp = THREE.MathUtils.lerp(0.25, 0.75, ramp);
   const chaos = Math.max(0, ramp - 0.35) * (1 / 0.65);
   return (
-    Math.sin(distanceAlong * THREE.MathUtils.lerp(0.013, 0.03, ramp) + 0.6) * amp +
-    Math.sin(distanceAlong * 0.075 + 2.4) * chaos * 0.55
+    Math.sin(distanceAlong * THREE.MathUtils.lerp(0.011, 0.02, ramp) + 0.6) * amp +
+    Math.sin(distanceAlong * 0.038 + 2.4) * chaos * 0.28
   );
 }
 
@@ -2336,22 +2624,81 @@ const multiplayer = {
   order: [],     // player ids, in turn order, fixed for the whole game
   index: 0,      // whose turn is current — order[index]
   results: [],   // {id, name, color, finished, time, distance, score}
+  // True when there are more players than phones, i.e. they are sharing.
+  // The turn structure is identical either way; what changes is that input
+  // is no longer matched to a specific phone, and the turn intro tells them
+  // to hand it over.
+  sharing: false,
 };
+
+// =====================================================================
+// HOW MANY PEOPLE ARE PLAYING (2026-09-10)
+//
+// "Players should only need one phone to play." Multiplayer used to be
+// inferred purely from how many phones were connected — two phones meant a
+// two-player game, one phone meant solo, and a family with one phone between
+// them simply could not play together.
+//
+// So the party size is now something the room states outright, from 1 to 4,
+// independently of how many phones are in the room. With fewer phones than
+// players it becomes a pass-the-phone game: same turns, same leaderboard,
+// the phone just changes hands between them.
+// =====================================================================
+const MAX_PARTY = 4;
+let partySize = 1;
+// Cleared once the player has chosen for themselves, so the default tracking
+// the roster never fights a deliberate choice.
+let partySizeChosen = false;
+
+function setPartySize(n) {
+  const next = THREE.MathUtils.clamp(Math.round(n), 1, MAX_PARTY);
+  if (next === partySize) return;
+  partySize = next;
+  partySizeChosen = true;
+  renderParty();
+  renderReadyHint();
+  renderPartyHint();
+}
+
+/** Keeps the default in step with the phones present, until someone chooses. */
+function syncPartyToRoster() {
+  if (partySizeChosen) return;
+  partySize = Math.max(1, Math.min(MAX_PARTY, roster.length));
+  renderParty();
+}
+
+function renderParty() {
+  let html = '';
+  for (let i = 1; i <= MAX_PARTY; i++) {
+    html += `<span class="party-chip${i === partySize ? ' on' : ''}">${i}</span>`;
+  }
+  if (partyChipsEl) partyChipsEl.innerHTML = html;
+  if (partyChipsLevelEl) partyChipsLevelEl.innerHTML = html;
+}
 
 function resetMultiplayer() {
   multiplayer.active = false;
   multiplayer.order = [];
   multiplayer.index = 0;
   multiplayer.results = [];
+  multiplayer.sharing = false;
 }
 
 // Called once, at the moment a level is actually chosen — the natural point
 // a "game" begins, whether that's one player or four. Locks in the turn
 // order for the whole session; players who join mid-game join the NEXT one.
 function beginMultiplayerIfNeeded() {
-  if (roster.length >= 2) {
+  // The party size is what decides this now, not the phone count. With a
+  // phone each, turn order follows the roster so every player keeps their own
+  // device and colour; with fewer phones than players the order is just the
+  // player slots 1..n and the phone is passed along them.
+  const size = Math.max(partySize, roster.length >= 2 ? roster.length : 1);
+  if (size >= 2) {
     multiplayer.active = true;
-    multiplayer.order = roster.slice().sort((a, b) => a - b);
+    multiplayer.sharing = roster.length < size;
+    multiplayer.order = multiplayer.sharing
+      ? Array.from({ length: size }, (_, i) => i + 1)
+      : roster.slice().sort((a, b) => a - b);
     multiplayer.index = 0;
     multiplayer.results = [];
   } else {
@@ -2390,7 +2737,14 @@ function showTurnIntro() {
   const id = activePlayerId();
   const label = playerLabel(id);
   if (turnIntroTitle) turnIntroTitle.textContent = `${label.name}'s turn`;
-  if (turnIntroCallout) turnIntroCallout.textContent = `Turn ${multiplayer.index + 1} of ${multiplayer.order.length} — get ready!`;
+  if (turnIntroCallout) {
+    // On a shared phone the handover IS the instruction, so it goes first and
+    // in place of the generic "get ready" — nobody can start until the right
+    // person is holding it.
+    turnIntroCallout.textContent = multiplayer.sharing && multiplayer.index > 0
+      ? `📱 Pass the phone to ${label.name} — turn ${multiplayer.index + 1} of ${multiplayer.order.length}`
+      : `Turn ${multiplayer.index + 1} of ${multiplayer.order.length} — get ready!`;
+  }
   if (turnIntroSwatch) turnIntroSwatch.style.setProperty('--slot-color', label.color);
   hideActionPrompt();
   hideCountdown();
@@ -2483,6 +2837,8 @@ const rosterRowEl = document.getElementById('rosterRow');
 const movesStripEl = document.getElementById('movesStrip');
 const readyJoinHintEl = document.getElementById('readyJoinHint');
 const readyStartHintEl = document.getElementById('readyStartHint');
+const partyChipsEl = document.getElementById('partyChips');
+const partyChipsLevelEl = document.getElementById('partyChipsLevel');
 const turnIntroPanel = document.getElementById('turnIntroPanel');
 const turnIntroTitle = document.getElementById('turnIntroTitle');
 const turnIntroCallout = document.getElementById('turnIntroCallout');
@@ -2763,7 +3119,14 @@ function renderReadyHint() {
   if (!readyStartHintEl) return;
   const waiting = playersNotSetUp();
   if (waiting.length === 0) {
-    readyStartHintEl.textContent = '🎮 Press OK on your remote (or tap Jump/Punch on your phone) to start';
+    // With more players than phones, say up front that it is a pass-the-phone
+    // game — otherwise the first handover is a surprise mid-game.
+    const sharing = partySize > Math.max(1, roster.length);
+    readyStartHintEl.textContent = partySize > 1
+      ? (sharing
+          ? `🎮 ◀ ▶ sets players · ${partySize} taking turns, passing the phone · OK to start`
+          : `🎮 ◀ ▶ sets players · ${partySize} with a phone each · OK to start`)
+      : '🎮 ◀ ▶ sets players · Press OK on your remote (or tap Jump/Punch on your phone) to start';
     return;
   }
   const who = waiting.length === 1
@@ -3054,6 +3417,19 @@ function recordBest(id, score) {
 
 let levelSelectIndex = 0;
 
+function renderPartyHint() {
+  const el = document.getElementById('levelSelectPanel');
+  if (!el) return;
+  const hint = el.querySelector('p.hint');
+  if (!hint) return;
+  const sharing = partySize > Math.max(1, roster.length);
+  hint.textContent = partySize > 1
+    ? (sharing
+        ? `🎮 ◀ ▶ picks a level · ${partySize} players taking turns, passing the phone`
+        : `🎮 ◀ ▶ picks a level · ${partySize} players, a phone each`)
+    : '🎮 ◀ ▶ + OK · 📱 step + jump — either picks a level';
+}
+
 function renderLevelSelect() {
   if (!levelGridEl) return;
   const p = loadProgress();
@@ -3088,6 +3464,10 @@ function openLevelSelect() {
   hideCountdown();
   hideActionPrompt();
   renderLevelSelect();
+  // The party chips and the hint live on this panel too, and a player who
+  // never touches up/down would otherwise see whatever they said last time.
+  renderParty();
+  renderPartyHint();
   syncPanel();
 }
 
@@ -3556,6 +3936,7 @@ ws.addEventListener('message', (ev) => {
     // NEW id in an old slot must not inherit the previous occupant's
     // "already set up" — both handled by pruning against the live roster.
     forgetDisconnectedSetup();
+    syncPartyToRoster();
     renderRoster();
     renderReadyHint();
   } else if (msg.type === 'controller_connected') {
@@ -3652,6 +4033,20 @@ function handleInput(msg) {
     if (multiplayer.active) advanceMultiplayerTurn(); else openLevelSelect();
     return;
   }
+  // Stepping left and right on the ready screen sets how many are playing —
+  // the same gesture that browses the era picker, so a player who never picks
+  // the remote up can still set the party size themselves.
+  if (state.phase === 'ready' && msg.action === 'lane_set' && typeof msg.value === 'number') {
+    if (msg.value !== lastSelectLaneValue) {
+      if (msg.value !== 0) setPartySize(partySize + (msg.value > 0 ? 1 : -1));
+      lastSelectLaneValue = msg.value;
+    }
+    return;
+  }
+  if (state.phase === 'ready' && msg.action === 'lane') {
+    setPartySize(partySize + (msg.value > 0 ? 1 : -1));
+    return;
+  }
   if (state.phase === 'ready'
       && (msg.action === 'jump' || msg.action === 'punch') && msg.explicit) {
     // Won't start until every connected phone has actually been set up —
@@ -3662,7 +4057,7 @@ function handleInput(msg) {
     // multiplayer game — route through the era picker so the group picks
     // together, same as any other route into chooseLevel()/
     // beginMultiplayerIfNeeded(). One phone keeps the old direct-start.
-    if (roster.length >= 2) openLevelSelect(); else startCountdown();
+    if (partySize >= 2 || roster.length >= 2) openLevelSelect(); else startCountdown();
     return;
   }
   if (state.phase === 'gameover'
@@ -3673,7 +4068,12 @@ function handleInput(msg) {
   // Mid-run input during a multiplayer turn only counts from whoever's turn
   // it actually is — otherwise every connected phone would steer the same
   // character during someone else's timed run.
-  if (multiplayer.active && state.phase === 'playing' && msg.playerId !== activePlayerId()) return;
+  // Whose input counts. With a phone each, only the player whose turn it is
+  // may steer. On a shared phone there is only one device and it belongs to
+  // whoever is holding it, so matching ids would lock everyone out from turn
+  // two onwards.
+  if (multiplayer.active && !multiplayer.sharing
+      && state.phase === 'playing' && msg.playerId !== activePlayerId()) return;
   if (state.phase !== 'playing') return;
 
   if (msg.action === 'lane') {
@@ -3780,6 +4180,10 @@ window.addEventListener('keydown', (e) => {
   if (state.phase === 'levelSelect') {
     if (e.code === 'ArrowLeft' || e.code === 'KeyA') { moveLevelSelection(-1); return; }
     if (e.code === 'ArrowRight' || e.code === 'KeyD') { moveLevelSelection(1); return; }
+    // Up/down sets how many are playing, so it doesn't fight left/right
+    // browsing the timeline.
+    if (e.code === 'ArrowUp' || e.code === 'KeyW') { setPartySize(partySize + 1); return; }
+    if (e.code === 'ArrowDown' || e.code === 'KeyS') { setPartySize(partySize - 1); return; }
     if (isSelectPress(e) || e.code === 'KeyF') { chooseLevel(); return; }
     return;
   }
@@ -3811,7 +4215,9 @@ window.addEventListener('keydown', (e) => {
       // was in fact the likelier way to skip setup, since the ready screen
       // sits there inviting an OK press from the moment a phone connects.
       if (!mayStartRun()) return;
-      if (roster.length >= 2) openLevelSelect(); else startCountdown();
+      // The party size decides this now, not the phone count: three people
+      // sharing one phone still go through the era picker together.
+      if (partySize >= 2 || roster.length >= 2) openLevelSelect(); else startCountdown();
     } else if (state.phase === 'gameover') {
       if (multiplayer.active) advanceMultiplayerTurn(); else startCountdown();
     }
@@ -3999,18 +4405,42 @@ function updatePlaying(dt) {
     // Sized up 2026-09-02 ("not exaggerated enough" feedback): bigger
     // multipliers across the board plus a camera kick, on top of the
     // bigger windup/reach/overshoot constants above.
+    // 2026-09-10 "exaggerate the animation to make it more amusing": the
+    // whole body now commits to the punch rather than just the arm. Windup
+    // rocks back and drops into a crouch; the snap throws the body forward
+    // onto its toes with a hop, a hard shoulder twist, the head thrown
+    // after the fist, and the off-arm flung out behind as counterweight.
     const elapsedFrac = 1 - state.punchAnimTimer / PUNCH_ANIM_DURATION;
     const armAngle = punchArmRotation(elapsedFrac);
     const bump = punchImpactBump(elapsedFrac);
+    // Positive while winding up, 0 once the fist is on its way — drives the
+    // anticipation (lean back, sink down) that makes the snap read as fast.
+    const windup = Math.max(0, armAngle) / PUNCH_WINDUP_PULL;
     punchBump = bump;
     armR.rotation.x = -armAngle;
-    armL.rotation.x = armAngle * 0.65;
-    player.rotation.y = -armAngle * 0.22;
-    player.position.z = -bump * 0.6;
-    torso.scale.set(1 + bump * 0.34, 1 - bump * 0.24, 1 + bump * 0.34);
+    // 0.45, not more: armAngle reaches -3.35 rad at full reach, so a bigger
+    // multiplier swings the off-arm past 200 degrees and straight through
+    // the torso. This is a hard counter-swing that stays outside the body.
+    armL.rotation.x = armAngle * 0.45;              // off-arm flung the other way
+    armR.rotation.z = -bump * 0.30;                 // fist crosses the body a little
+    armL.rotation.z = bump * 0.42;
+    player.rotation.y = -armAngle * 0.34;           // shoulder twist, was 0.22
+    player.rotation.x = windup * 0.16 - bump * 0.30; // rock back, then lunge over the fist
+    player.position.z = windup * 0.22 - bump * 1.15; // was a flat -bump * 0.6
+    player.position.y += bump * 0.30;               // little hop off the ground at impact
+    head.rotation.x = -bump * 0.34;                 // head thrown after the punch
+    legL.rotation.x = swing * 0.3 - windup * 0.35;  // knees bend into the windup
+    legR.rotation.x = -swing * 0.3 - windup * 0.35;
+    torso.scale.set(1 + bump * 0.52, 1 - bump * 0.38 + windup * 0.10, 1 + bump * 0.52);
   } else {
     armR.rotation.x = state.grounded ? swing * 0.8 : -0.4;
     armL.rotation.x = state.grounded ? -swing * 0.8 : -0.4;
+    // Everything the punch borrowed gets eased back, or the character keeps
+    // whatever pose the last frame of the punch left it in.
+    armR.rotation.z = THREE.MathUtils.lerp(armR.rotation.z, 0, Math.min(1, dt * 12));
+    armL.rotation.z = THREE.MathUtils.lerp(armL.rotation.z, 0, Math.min(1, dt * 12));
+    player.rotation.x = THREE.MathUtils.lerp(player.rotation.x, 0, Math.min(1, dt * 12));
+    head.rotation.x = THREE.MathUtils.lerp(head.rotation.x, 0, Math.min(1, dt * 12));
     player.rotation.y = THREE.MathUtils.lerp(player.rotation.y, 0, Math.min(1, dt * 10));
     player.position.z = THREE.MathUtils.lerp(player.position.z, 0, Math.min(1, dt * 10));
     torso.scale.set(
@@ -4030,8 +4460,8 @@ function updatePlaying(dt) {
   camera.position.x += (player.position.x * 0.6 - (camera.position.x - 0)) * Math.min(1, dt * 7);
   // A small extra "kick" at the moment of punch impact — quick camera pop
   // toward the player for a bit more comic-book oomph, purely cosmetic.
-  camera.position.y = CAMERA_BASE_Y + punchBump * 0.18;
-  camera.lookAt(player.position.x * 0.4, 1.3, -8);
+  camera.position.y = CAMERA_BASE_Y + punchBump * 0.30;
+  camera.lookAt(player.position.x * 0.4, 1.05, -13);
 
   // Spawn obstacles
   state.spawnTimer -= dt;
@@ -4176,6 +4606,9 @@ function updatePlaying(dt) {
       o.mesh.position.y = o.baseY;
       o.mesh.position.z = o.trackZ;
     }
+    // After placement, so the idle rides on top of the track position rather
+    // than being overwritten by it every frame.
+    updateObstacleIdle(o.mesh, state.distanceForTex * 0.35);
 
     if (!o.resolved && o.trackZ >= COLLISION_Z_MIN && o.trackZ <= COLLISION_Z_MAX) {
       o.resolved = true;
@@ -4246,7 +4679,11 @@ function updatePlaying(dt) {
     shadowBlob.position.y = groundY + 0.02;
     player.position.y += groundY;
     camera.position.y += groundY;
-    camera.lookAt(player.position.x * 0.4, 1.3 + groundY, -8);
+    // Aimed further up the track than the old -8: looking further ahead
+    // lifts the horizon in frame, which is the other half of seeing over a
+    // crest. Still a fixed point relative to the runner, so the camera is
+    // no more "active" than it was.
+    camera.lookAt(player.position.x * 0.4, 1.05 + groundY, -13);
     // How sharply the track is turning right here, as a fraction of the
     // steepest a corner ever gets: 0 on a straight, 1 at the middle of a
     // corner. cornerEase peaks at 1.5x the average rate.
@@ -4285,6 +4722,17 @@ let qualityFrameTimeSum = 0;
 let qualityDowngraded = false;
 const QUALITY_SAMPLE_FRAMES = 90;
 const QUALITY_FRAME_MS_FLOOR = 1000 / 45;
+// 2026-09-10 "improve the resolution without hurting performance". The old
+// logic could only ever step DOWN, so a device with headroom to spare stayed
+// at the cautious starting resolution forever — which is most of the reason
+// the picture looked soft. It now measures first and moves in whichever
+// direction the measurement points.
+//
+// The bar to earn more resolution is deliberately strict: a comfortable
+// margin over 60fps, not merely "not struggling", so a device that is only
+// just coping is never pushed over the edge by its own good behaviour.
+const QUALITY_FRAME_MS_HEADROOM = 1000 / 75;
+const QUALITY_MAX_PIXEL_RATIO = 2;
 function maybeDowngradeQuality(rawFrameMs) {
   if (qualityDowngraded || qualityFrameCount >= QUALITY_SAMPLE_FRAMES) return;
   qualityFrameCount++;
@@ -4292,8 +4740,16 @@ function maybeDowngradeQuality(rawFrameMs) {
   if (qualityFrameCount < QUALITY_SAMPLE_FRAMES) return;
   qualityDowngraded = true;
   const avgFrameMs = qualityFrameTimeSum / qualityFrameCount;
+  const dpr = window.devicePixelRatio || 1;
   if (avgFrameMs > QUALITY_FRAME_MS_FLOOR) {
     renderer.setPixelRatio(0.75);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  } else if (avgFrameMs < QUALITY_FRAME_MS_HEADROOM && dpr > 1) {
+    // Render above CSS resolution and let the display downsample. That is
+    // supersampling, so it smooths edges as well as sharpening detail — the
+    // antialiasing the renderer deliberately turned off, bought back only on
+    // hardware that has demonstrated it can afford it.
+    renderer.setPixelRatio(Math.min(dpr, QUALITY_MAX_PIXEL_RATIO));
     renderer.setSize(window.innerWidth, window.innerHeight);
   }
 }
@@ -4409,6 +4865,21 @@ window.__mrDebug = {
   setObstacleSpawning: (on) => { obstacleSpawnEnabled = !!on; },
   clearObstacles: () => { obstacles.splice(0).forEach((o) => scene.remove(o.mesh)); },
   clears: () => state.clears,
+  punchTimers: () => ({ hit: state.punchTimer, anim: state.punchAnimTimer,
+                        hitMax: PUNCH_DURATION, animMax: PUNCH_ANIM_DURATION }),
+  // The character's actual pose, for asserting that the punch animation
+  // really moves the whole body rather than just nudging an arm.
+  pose: () => ({
+    armR: +armR.rotation.x.toFixed(3), armL: +armL.rotation.x.toFixed(3),
+    armRz: +armR.rotation.z.toFixed(3),
+    bodyYaw: +player.rotation.y.toFixed(3), bodyPitch: +player.rotation.x.toFixed(3),
+    lungeZ: +player.position.z.toFixed(3), hopY: +player.position.y.toFixed(3),
+    headPitch: +head.rotation.x.toFixed(3),
+    torsoX: +torso.scale.x.toFixed(3), torsoY: +torso.scale.y.toFixed(3),
+  }),
+  promptLeadTime: () => PROMPT_LEAD_TIME,
+  speed: () => currentSpeed(),
+  promptVisible: () => actionPromptEl.style.display !== 'none',
   // Distance-along of the obstacle closest to the player (0 = level with
   // them, negative = still ahead). Lets a test act at the right MOMENT
   // rather than after a fixed sleep — this sandbox renders in software and
@@ -4454,6 +4925,8 @@ window.__mrDebug = {
     activePlayerId: activePlayerId(),
     results: multiplayer.results.map((r) => ({ ...r })),
   }),
+  partySize: () => partySize,
+  setPartySize: (n) => setPartySize(n),
   setupDone: () => Array.from(setupDonePlayers).sort((a, b) => a - b),
   everyoneSetUp: () => everyoneSetUp(),
   readyHint: () => (readyStartHintEl ? readyStartHintEl.textContent : ''),
@@ -4490,6 +4963,7 @@ audio.preloadSfx();
 updateEraBadge();
 renderLevelSelect();
 renderRoster();
+renderParty();
 renderMovesStrip();
 syncPanel();
 animate();

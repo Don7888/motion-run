@@ -597,6 +597,26 @@
     animation: pulse 1.6s ease-in-out infinite;
   }
 
+  /* Party-size picker on the ready screen. Sits with the hint stack, so it
+     reads as part of "here is what happens next" rather than as a setting. */
+  .party-row {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    margin-bottom: 4px;
+  }
+  .party-label {
+    font-size: clamp(9px, 1.2vw, 12px); font-weight: 800; color: #ffe9a8;
+    text-shadow: 0 2px 6px rgba(11,4,26,0.85); letter-spacing: 0.5px;
+  }
+  .party-chip {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: clamp(18px, 2.4vh, 24px); height: clamp(18px, 2.4vh, 24px);
+    margin: 0 2px; border-radius: 7px;
+    border: 2px solid rgba(255,255,255,0.35);
+    background: rgba(11,4,26,0.55); color: #fff;
+    font-size: clamp(9px, 1.3vh, 12px); font-weight: 900;
+  }
+  .party-chip.on { background: #ffd166; color: #2a1a08; border-color: #fff; }
+
   /* The bend-ahead sign. Top-centre, under the HUD pills, in road-sign
      yellow/black so it reads as signage rather than as a prompt. */
   #turnSign {
@@ -1119,6 +1139,14 @@
           <div class="moves-strip" id="movesStrip"></div>
         </div>
         <div class="hint-stack">
+          <!-- Party size (2026-09-10). The game used to need one phone per
+               player to be anything but solo; a group with a single phone
+               now says how many of them there are here and passes it round.
+               Driven by the remote's arrows or by stepping left/right. -->
+          <div class="party-row">
+            <span class="party-label">Players</span>
+            <span id="partyChips"></span>
+          </div>
           <p class="hint" id="readyJoinHint">👥 More can join — code <b id="roomCodeMini">······</b></p>
           <!-- Rewritten by renderReadyHint() (tv/game.js): until every
                connected phone reports setup finished, this says who is still
@@ -1134,6 +1162,15 @@
   <div id="levelSelectPanel" class="overlay-panel" style="display:none;">
     <h1>Choose Your Era</h1>
     <div id="levelGrid" class="level-grid"></div>
+    <!-- Party size lives here as well as on the ready screen, because
+         finishing setup opens this picker directly and most players never
+         see the ready screen at all on a first run. Up/down, so it doesn't
+         fight left/right browsing the eras. -->
+    <div class="party-row">
+      <span class="party-label">Players</span>
+      <span id="partyChipsLevel"></span>
+      <span class="party-label" style="opacity:.7">▲▼</span>
+    </div>
     <p class="hint pulse">🎮 ◀ ▶ + OK · 📱 step + jump — either picks a level</p>
   </div>
 
