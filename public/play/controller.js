@@ -222,6 +222,18 @@
   const FRAMING_GOOD_HOLD_MS = 900;
   const FRAMING_SEND_INTERVAL_MS = 200;
 
+  // 2026-09-10 ("started to move towards the camera and moved off the spot,
+  // affecting the motion capture"): liveFramingCheck() re-uses the two
+  // thresholds above DURING real play, not just at setup. It needs its own
+  // "clear" thresholds so a player who is right on the edge of too-close
+  // doesn't flicker in and out of the warning every frame — you have to back
+  // off a bit further than the trigger point before it clears, and the
+  // interval below throttles how often we bother re-sending the same
+  // still-bad status to the TV.
+  const LIVE_FRAMING_TOO_CLOSE_CLEAR_FRAC = FRAMING_TOO_CLOSE_FRAC * 0.88;
+  const LIVE_FRAMING_TOO_FAR_CLEAR_FRAC = FRAMING_TOO_FAR_FRAC * 1.2;
+  const LIVE_FRAMING_SEND_INTERVAL_MS = 400;
+
   const TFJS_URL = 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4/dist/tf.min.js';
   const POSE_DETECTION_URL = 'https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2/dist/pose-detection.min.js';
 
@@ -929,6 +941,12 @@
   // ENTER/EXIT hysteresis), not stepped/toggled — so standing back in a
   // neutral stance always lands you back at 0 (center lane) on its own.
   let cameraLaneZone = 0;
+  // Whether the player is currently too close/far DURING REAL PLAY, not just
+  // during setup — see the big comment above liveFramingCheck() for why this
+  // exists (2026-09-10: "started to move towards the camera and moved off
+  // the spot, affecting the motion capture").
+  let liveFramingStatus = 'ok';
+  let lastLiveFramingSentT = 0;
   let lastWrist = { left: null, right: null };
 
   // Shared absolute-zone hysteresis: harder to leave center (ENTER) than to
@@ -1083,6 +1101,8 @@
     if (inCameraSetupGate) return; // still on the "place your phone" step — camera's warming up, nothing to detect yet
     if (!detectionEnabled) return;
 
+    liveFramingCheck(torsoScale, cameraVideo.videoWidth, cameraVideo.videoHeight);
+
     // Lane (absolute: which zone is the player's body in right now).
     // NOTE the sign convention: the camera feed is mirrored for display
     // (see `transform: scaleX(-1)` in CSS) so it feels like a selfie
@@ -1167,6 +1187,63 @@
     // Punch (fast wrist extension)
     checkPunch('left', kp(keypoints, 'left_wrist'), lShoulder, torsoScale, now);
     checkPunch('right', kp(keypoints, 'right_wrist'), rShoulder, torsoScale, now);
+  }
+
+  // 2026-09-10 ("started to move towards the camera and moved off the
+  // spot, affecting the motion capture"): the placement/framing handshake
+  // above only ever ran ONCE, during setup — once a real run started,
+  // nothing noticed a player drifting closer or farther from the lens.
+  // The lane/jump/duck thresholds already scale with torsoScale each
+  // frame, so they mostly track a gradual size change on their own, but
+  // the BASELINES they're measured against (poseCenterX, poseHipYBaseline)
+  // are fixed pixel positions from whenever they were last set, and don't
+  // move with the player — a real step toward the camera changes both
+  // torso scale AND the hips' pixel position at once, which is exactly the
+  // kind of jump the slow drift-correction elsewhere in this file (see
+  // POSE_CENTER_SETTLE) is deliberately too gentle to absorb quickly.
+  //
+  // This reuses the same too-close/too-far thresholds the setup screen
+  // already trusts, checked continuously during real play: the moment the
+  // player crosses into "too close" or "too far", both baselines are
+  // dropped so they get rebuilt fresh from right now (a stale reference
+  // measured at the OLD distance is worse than none), and the TV is told
+  // so it can nudge the player back — the phone itself is usually propped
+  // up out of sight during play, so that's the only place the player will
+  // actually see the warning. Hysteresis (the *_CLEAR fractions) stops
+  // this flapping on/off right at the boundary, same idea as
+  // LANE_EXIT_TORSO_FRAC for lanes.
+  function liveFramingCheck(torsoScale, frameW, frameH) {
+    const torsoFrac = torsoScale / Math.min(frameW, frameH);
+    let status = liveFramingStatus;
+    if (liveFramingStatus === 'ok') {
+      if (torsoFrac > FRAMING_TOO_CLOSE_FRAC) status = 'too_close';
+      else if (torsoFrac < FRAMING_TOO_FAR_FRAC) status = 'too_far';
+    } else if (liveFramingStatus === 'too_close' && torsoFrac < LIVE_FRAMING_TOO_CLOSE_CLEAR_FRAC) {
+      status = 'ok';
+    } else if (liveFramingStatus === 'too_far' && torsoFrac > LIVE_FRAMING_TOO_FAR_CLEAR_FRAC) {
+      status = 'ok';
+    }
+
+    const changed = status !== liveFramingStatus;
+    liveFramingStatus = status;
+
+    if (changed) {
+      // Whichever way this just changed, the OLD baselines were measured
+      // at the OLD distance — re-seed them from scratch rather than let a
+      // stale reference keep fighting the player. poseCenterX going back
+      // to null re-runs the same short median-sampling burst used on
+      // first ever calibration (see POSE_CENTER_SAMPLES above), rather
+      // than trusting one possibly-mid-step frame.
+      poseCenterX = null;
+      poseCenterSamples.length = 0;
+      poseHipYBaseline = null;
+      if (cameraLaneZone !== 0) { cameraLaneZone = 0; actionHandlers.laneZone(0); }
+    }
+    const now = performance.now();
+    if (changed || (status !== 'ok' && now - lastLiveFramingSentT > LIVE_FRAMING_SEND_INTERVAL_MS)) {
+      lastLiveFramingSentT = now;
+      sendCalibration('tracking', { status });
+    }
   }
 
   // Reports whether enough of the player is visible, at a sensible

@@ -1315,7 +1315,11 @@ function obDinoLowbarBoxes() {
 // nothing in that switch recognises 'boulder' by name, so it lands on the
 // same catch-all as 'wall' — only a genuine lane dodge saves you.
 const BOULDER_ERA_IDS = new Set(['dino']);
-function boulderActive() { return BOULDER_ERA_IDS.has(currentEraId); }
+// 2026-09-10 ("make it more appropriate for 4 year olds" — Easy mode):
+// the boulder commits to a lane with no warning and needs a genuine, timed
+// reaction to dodge, which is exactly the kind of hazard Easy is meant to
+// remove rather than soften — see the DIFFICULTY section above.
+function boulderActive() { return BOULDER_ERA_IDS.has(currentEraId) && difficultyTuning().boulders; }
 const BOULDER_SPAWN_MIN = 16;     // seconds between eruptions — rare, not routine
 const BOULDER_SPAWN_MAX = 26;
 const BOULDER_ROLL_Z = -55;       // trackZ at which it commits to its new lane
@@ -1701,6 +1705,72 @@ const ERAS = [
 ];
 
 // =====================================================================
+// DIFFICULTY (2026-09-10 — "give an easy, medium and hard setting and
+// easy should be suitable for a 4 year old")
+//
+// Medium is exactly the game as it already played before this setting
+// existed — nothing above or below this section changes for anyone who
+// never touches it, which is deliberate: Don only asked for a genuinely
+// gentle EASY mode, not a redesign of the default experience.
+//
+// Easy is built around the one concrete example given for "too much for a
+// 4 year old": the Dino era's rolling lava boulder, which commits to a lane
+// with no warning and needs a real reaction to dodge. Easy turns it off
+// entirely rather than trying to make a fair version of a surprise — see
+// boulderActive() below. Everything else about Easy is the same three
+// levers the per-era tiers above already use (speed, spawn gap, and how
+// fast both ramp up over a run), just pushed much further toward "there is
+// always time to see it coming and always room to react": noticeably
+// slower to start, obstacles spaced well apart, and the ramp over a long
+// run damped almost to nothing so a 4 year old's turn doesn't quietly turn
+// into a hard mode the longer they last.
+//
+// Hard is the mirror of Easy for a player who wants MORE than Medium —
+// asked for as the natural companion to Easy, not on its own, so it is
+// tuned as a moderate step up rather than an extreme one.
+// =====================================================================
+const DIFFICULTY_KEY = 'motionquest_difficulty';
+const DIFFICULTIES = ['easy', 'medium', 'hard'];
+const DIFFICULTY_LABEL = { easy: 'Easy', medium: 'Medium', hard: 'Hard' };
+const DIFFICULTY_ICON = { easy: '🐣', medium: '🎯', hard: '🔥' };
+const DIFFICULTY_TUNING = {
+  // speedMult/maxSpeedMult scale the run's pace; spawnMult scales the gap
+  // between obstacles (bigger = more spread out); rampMult scales how
+  // quickly both speed and spawn gap tighten up over a long run; boulders
+  // gates the Dino era's rolling lava boulder specifically.
+  easy: { speedMult: 0.62, maxSpeedMult: 0.65, spawnMult: 1.55, rampMult: 0.4, boulders: false },
+  medium: { speedMult: 1, maxSpeedMult: 1, spawnMult: 1, rampMult: 1, boulders: true },
+  hard: { speedMult: 1.18, maxSpeedMult: 1.12, spawnMult: 0.82, rampMult: 1.3, boulders: true },
+};
+
+let difficulty = 'medium';
+try {
+  const savedDifficulty = localStorage.getItem(DIFFICULTY_KEY);
+  if (DIFFICULTIES.includes(savedDifficulty)) difficulty = savedDifficulty;
+} catch { /* private mode */ }
+
+function difficultyTuning() { return DIFFICULTY_TUNING[difficulty] || DIFFICULTY_TUNING.medium; }
+
+function renderDifficultyBadge() {
+  if (!difficultyBadgeEl) return;
+  difficultyBadgeEl.textContent = `${DIFFICULTY_ICON[difficulty]} ${DIFFICULTY_LABEL[difficulty]}`;
+  difficultyBadgeEl.classList.remove('easy', 'medium', 'hard');
+  difficultyBadgeEl.classList.add(difficulty);
+}
+
+function setDifficulty(next) {
+  if (!DIFFICULTIES.includes(next) || next === difficulty) return;
+  difficulty = next;
+  try { localStorage.setItem(DIFFICULTY_KEY, difficulty); } catch { /* private mode */ }
+  renderDifficultyBadge();
+}
+
+function cycleDifficulty(dir) {
+  const i = DIFFICULTIES.indexOf(difficulty);
+  setDifficulty(DIFFICULTIES[(i + dir + DIFFICULTIES.length) % DIFFICULTIES.length]);
+}
+
+// =====================================================================
 // PER-ERA DIFFICULTY TIER (2026-09-10)
 //
 // "The levels should increase in difficulty as the player gets further
@@ -1711,11 +1781,14 @@ const ERAS = [
 // still, even before either has covered a metre. Gentle steps, same
 // philosophy as the `goal` spacing above: a later era should read as the
 // next challenge, not a wall.
+//
+// Both now also go through difficultyTuning()'s speedMult/spawnMult, so an
+// Easy player gets the same gentler pacing on every era, not just the first.
 // =====================================================================
 function eraTier(era) { return Math.max(0, ERAS.findIndex((e) => e.id === era.id)); }
-function eraBaseSpeed(era) { return BASE_SPEED + eraTier(era) * 1.1; }
+function eraBaseSpeed(era) { return (BASE_SPEED + eraTier(era) * 1.1) * difficultyTuning().speedMult; }
 function eraBaseSpawnInterval(era) {
-  return Math.max(MIN_SPAWN_INTERVAL + 0.15, BASE_SPAWN_INTERVAL - eraTier(era) * 0.14);
+  return Math.max(MIN_SPAWN_INTERVAL + 0.15, (BASE_SPAWN_INTERVAL - eraTier(era) * 0.14) * difficultyTuning().spawnMult);
 }
 
 // =====================================================================
@@ -3345,6 +3418,29 @@ function updateFramingUI(status, ready) {
   syncPanel();
 }
 
+// 2026-09-10 ("started to move towards the camera and moved off the spot,
+// affecting the motion capture"): the phone now watches framing continuously
+// during real play (liveFramingCheck() in controller.js) and reports it here
+// over the already-whitelisted 'calibration' message type as a 'tracking'
+// event, rather than only ever checking once during setup. The phone itself
+// re-anchors its own tracking baselines the moment this fires — this banner
+// is purely the on-screen nudge telling the player why the game briefly felt
+// "off" and what to do about it.
+let trackingWarningStatus = 'ok';
+function updateTrackingWarning(status) {
+  if (!trackingWarningEl || status === trackingWarningStatus) return;
+  trackingWarningStatus = status;
+  if (status === 'too_close') {
+    trackingWarningEl.textContent = '↩ Take a step back';
+    trackingWarningEl.style.display = 'flex';
+  } else if (status === 'too_far') {
+    trackingWarningEl.textContent = '↪ Come a bit closer';
+    trackingWarningEl.style.display = 'flex';
+  } else {
+    trackingWarningEl.style.display = 'none';
+  }
+}
+
 function confirmMovesStart() {
   if (movesConfirmSent || setupStage !== 'framing') return;
   movesConfirmSent = true;
@@ -3662,6 +3758,8 @@ const muteBtn = document.getElementById('muteBtn');
 const soundHintEl = document.getElementById('soundHint');
 const turnSignEl = document.getElementById('turnSign');
 const turnSignArrowEl = document.getElementById('turnSignArrow');
+const trackingWarningEl = document.getElementById('trackingWarning');
+const difficultyBadgeEl = document.getElementById('difficultyBadge');
 
 // Puts up the "bend ahead" sign while a corner is coming, and takes it down
 // once the player is into it. Only while actually running: on the menus the
@@ -3708,6 +3806,14 @@ function setMuted(isMuted) {
 if (muteBtn) {
   setMuted(audio.isMuted());
   muteBtn.addEventListener('click', () => { audio.unlock(); setMuted(audio.toggleMute()); });
+}
+
+renderDifficultyBadge();
+if (difficultyBadgeEl) {
+  // Clickable on every screen, same reasoning as the mute button above — the
+  // remote's ▲▼ (see the keydown handler) only works while on the Ready
+  // screen, which most sessions only ever see once.
+  difficultyBadgeEl.addEventListener('click', () => cycleDifficulty(1));
 }
 
 function updateEraBadge() {
@@ -4044,11 +4150,19 @@ function exitToMenu() {
   // menus (and the next run, which may well be the same era) stay silent —
   // this was the other half of the 2026-09-09 "no music" bug.
   audio.resumeMusic();
-  state.phase = 'ready';
   calibrating = false;
   setupStage = 'none';
   hideActionPrompt();
-  syncPanel();
+  // 2026-09-10 ("no way of quitting the level using the remote and
+  // selecting another level"): this used to drop back to the pre-setup
+  // Ready screen, which meant Back->Back only replayed the SAME era — a
+  // third Back press (Ready counts as one of the "results screens" too)
+  // was what actually reached the era picker. Reaching exitToMenu() at all
+  // requires a run to already be under way, which means setup is already
+  // done, so there is no reason left to detour through Ready — go straight
+  // to the picker. Two presses (pause, then quit) now does what the player
+  // is actually asking for.
+  openLevelSelect();
 }
 
 // ---------------------------------------------------------------------
@@ -4118,6 +4232,7 @@ ws.addEventListener('message', (ev) => {
     else if (msg.event === 'start') startCalibrationUI(msg.mode);
     else if (msg.event === 'step') advanceCalibrationUI(msg.step);
     else if (msg.event === 'done') finishCalibrationUI(msg.playerId);
+    else if (msg.event === 'tracking') updateTrackingWarning(msg.status);
   } else if (msg.type === 'error') {
     pairingHint.textContent = msg.message;
   }
@@ -4326,6 +4441,15 @@ window.addEventListener('keydown', (e) => {
     }
   }
 
+  // Difficulty (2026-09-10). Left/right on the Ready screen already sets
+  // party size (via the phone's lane gestures and, since they route through
+  // the same handleInput(), the remote's own arrows too), so up/down is
+  // free here the same way it's used for party size on the era picker below.
+  if (state.phase === 'ready') {
+    if (e.code === 'ArrowUp' || e.code === 'KeyW') { cycleDifficulty(1); return; }
+    if (e.code === 'ArrowDown' || e.code === 'KeyS') { cycleDifficulty(-1); return; }
+  }
+
   // Era picker: left/right to browse the timeline, OK to travel there.
   if (state.phase === 'levelSelect') {
     if (e.code === 'ArrowLeft' || e.code === 'KeyA') { moveLevelSelection(-1); return; }
@@ -4378,7 +4502,8 @@ window.addEventListener('keydown', (e) => {
 let lastT = performance.now();
 
 function currentSpeed() {
-  const base = Math.min(MAX_SPEED, eraBaseSpeed(currentEra()) + state.distance * SPEED_RAMP);
+  const tuning = difficultyTuning();
+  const base = Math.min(MAX_SPEED * tuning.maxSpeedMult, eraBaseSpeed(currentEra()) + state.distance * SPEED_RAMP * tuning.rampMult);
   // Terrain grade nudges pace up or down (2026-09-10) — see slopeSpeedMult().
   // Everything on the track (player, obstacles, pickups, scenery) reads this
   // same currentSpeed() to advance each frame, so a slope changes the pace
@@ -4623,7 +4748,7 @@ function updatePlaying(dt) {
   state.spawnTimer -= dt;
   if (state.spawnTimer <= 0) {
     if (obstacleSpawnEnabled) spawnObstacle();
-    const interval = Math.max(MIN_SPAWN_INTERVAL, eraBaseSpawnInterval(currentEra()) - state.distance * SPAWN_RAMP);
+    const interval = Math.max(MIN_SPAWN_INTERVAL, eraBaseSpawnInterval(currentEra()) - state.distance * SPAWN_RAMP * difficultyTuning().rampMult);
     state.spawnTimer = interval * (0.8 + Math.random() * 0.4);
   }
 
@@ -5090,6 +5215,11 @@ window.__mrDebug = {
   music: () => audio.musicState(),
   muted: () => audio.isMuted(),
   musicBlocked: () => audio.isMusicBlocked(),
+  // --- 2026-09-10: difficulty (easy/medium/hard) --------------------------
+  difficulty: () => difficulty,
+  setDifficulty: (d) => setDifficulty(d),
+  cycleDifficulty: (dir) => cycleDifficulty(dir),
+  difficultyTuning: () => ({ ...difficultyTuning() }),
   pauseMusic: () => audio.pauseMusic(),
   grounded: () => state.grounded,
   eraGoal: () => currentEra().goal,

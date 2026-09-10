@@ -590,17 +590,52 @@
   .mute-btn:active { transform: translateY(3px); box-shadow: 0 2px 0 rgba(11,4,26,0.55); }
   .mute-btn.muted { opacity: 0.55; border-color: #5B4B8A; }
 
-  /* Sits directly to the right of the mute button, same baseline, so it
-     reads as a label on it rather than as another piece of HUD. */
-  #soundHint {
-    position: fixed; left: 92px; bottom: 24px; z-index: 40;
-    display: flex; align-items: center; height: 54px;
-    padding: 0 18px; border-radius: 16px;
-    background: var(--grape-900); color: #ffe9a8;
-    border: 4px solid var(--violet);
+  /* 2026-09-10 ("give an easy, medium and hard setting and easy should be
+     suitable for a 4 year old"). Opposite corner from the mute button, for
+     the same reason mute lives in a fixed corner rather than inside one
+     particular menu: it needs to be visible and changeable at any time, not
+     just during the one brief screen (Ready, before the first setup) where
+     the remote's own ▲▼ also cycles it. Coloured by level so it reads at a
+     glance without having to read the word. */
+  .diff-badge {
+    position: fixed; right: 26px; bottom: 24px; z-index: 40;
+    display: flex; align-items: center; gap: 8px; height: 54px;
+    padding: 0 20px; border-radius: 18px;
+    background: var(--grape-900); color: #fff;
+    border: 4px solid var(--violet); border-radius: 18px;
     box-shadow: 0 5px 0 rgba(11,4,26,0.55);
-    font-size: 17px; font-weight: 800; white-space: nowrap;
-    animation: pulse 1.6s ease-in-out infinite;
+    font-size: 16px; font-weight: 800; white-space: nowrap;
+    cursor: pointer;
+  }
+  .diff-badge:active { transform: translateY(3px); box-shadow: 0 2px 0 rgba(11,4,26,0.55); }
+  .diff-badge.easy { border-color: #7CD992; }
+  .diff-badge.medium { border-color: #ffd166; }
+  .diff-badge.hard { border-color: #ef4444; }
+
+  /* 2026-09-10 ("when select the level it put the music on mute straight
+     away"): this used to sit as a small 54px-tall label next to the mute
+     button in the bottom-left corner — easy to miss for a player standing
+     well back from the TV to move around, which is the whole point of this
+     game. A player whose entire session is phone-driven (never touches the
+     physical remote) never gives the browser the one genuine gesture it
+     insists on before it will start audio — see the big comment above
+     tryStartMusic() in audio.js — and that state is otherwise invisible, so
+     it read as "the music just muted itself". Now a wide, bold, bottom-
+     centre banner: unmissable from across a room, and it says exactly what
+     to do about it. */
+  #soundHint {
+    position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); z-index: 40;
+    display: flex; align-items: center; gap: 10px;
+    padding: 14px 32px; border-radius: 20px;
+    background: var(--grape-900); color: #ffe9a8;
+    border: 5px solid var(--violet);
+    box-shadow: 0 7px 0 rgba(11,4,26,0.55);
+    font-size: 26px; font-weight: 900; white-space: nowrap;
+    animation: soundHintPulse 1.4s ease-in-out infinite;
+  }
+  @keyframes soundHintPulse {
+    0%, 100% { transform: translateX(-50%) scale(1); }
+    50% { transform: translateX(-50%) scale(1.05); }
   }
 
   /* Party-size picker on the ready screen. Sits with the hint stack, so it
@@ -636,6 +671,27 @@
     white-space: nowrap;
   }
   #turnSignArrow { font-size: 28px; line-height: 1; }
+
+  /* Live tracking warning — same top-centre spot as the bend sign (they
+     never show at once: a corner needs no input, this needs the player to
+     stop and reposition, so there's nothing useful for the bend sign to
+     say at that moment anyway) but in red/white "stop and fix this" colours
+     so it never reads as just another road sign to glance past. */
+  #trackingWarning {
+    position: fixed; left: 50%; top: 96px; transform: translateX(-50%); z-index: 36;
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 24px; border-radius: 14px;
+    background: #ef4444; color: #fff;
+    border: 4px solid #fff;
+    box-shadow: 0 5px 0 rgba(11,4,26,0.45);
+    font-size: 22px; font-weight: 900; letter-spacing: 0.3px;
+    white-space: nowrap;
+    animation: trackingWarningPulse 1.1s ease-in-out infinite;
+  }
+  @keyframes trackingWarningPulse {
+    0%, 100% { transform: translateX(-50%) scale(1); }
+    50% { transform: translateX(-50%) scale(1.04); }
+  }
 
   /* ---- Era picker ----------------------------------------------------- */
   /* The picker is the one panel that wants to be wide: four cards side by
@@ -1037,6 +1093,12 @@
        remote's M key does the same thing. -->
   <button id="muteBtn" class="mute-btn" title="Sound on/off">🔊</button>
 
+  <!-- Difficulty (2026-09-10 — "give an easy, medium and hard setting").
+       Opposite corner from mute, same reasoning: visible and clickable on
+       every screen. Also cyclable with the remote's ▲▼ while on the Ready
+       screen (see the keydown handler in game.js). -->
+  <button id="difficultyBadge" class="diff-badge" type="button" title="Change difficulty">🎯 Medium</button>
+
   <!-- Shown only when the browser is refusing to start the music because it
        has not seen a user gesture on the TV itself (2026-09-09 — see the
        long note above tryStartMusic() in audio.js). A player who drives the
@@ -1053,6 +1115,15 @@
        corner needs NO input, and dressing it like a jump/duck cue would tell
        the player to do something there is nothing to do. -->
   <div id="turnSign" style="display:none;"><span id="turnSignArrow">↰</span> Bend ahead</div>
+
+  <!-- Live tracking warning (2026-09-10 — "started to move towards the
+       camera and moved off the spot, affecting the motion capture"). The
+       phone is usually propped up out of sight during play, so the TV is
+       the only place the player will actually see this. Styled as an
+       urgent warning (red, not the road-sign yellow above) since unlike
+       the bend sign, this DOES need the player to act — step back into
+       frame — before the game can keep tracking them properly. -->
+  <div id="trackingWarning" style="display:none;"></div>
 
   <div id="controlBadge" class="control-badge" style="display:none;"></div>
   <div id="actionPrompt" style="display:none;"></div>

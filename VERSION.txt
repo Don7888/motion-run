@@ -1,57 +1,78 @@
-MotionQuest — motionquest-deploy folder
-========================================
+MotionQuest — motionquest-deploy
 
-Commit (sandbox-tested, ready to upload): 052e1c1
+Commit: 918638c (built on top of 052e1c1, which is already live)
 Date: 2026-09-10
 
-What's in this round: menu clarity fixes, from Don's screenshots
-("Mobile: numbers are on top of the 0s" / "Tv: the menu is so unclear")
+This round — four fixes from Don's report:
 
-  1. Phone join screen — the 6-digit code box was see-through art with
-     "000000" painted into it underneath, and a typed digit didn't
-     cleanly replace the baked zero, so you saw both at once. Fixed:
-     the code box now paints its own solid white background over that
-     spot, so only what you actually type is ever shown.
-  2. TV Ready screen — the "Setup 1/4 ..." banner at the top was long
-     enough to wrap onto two lines and sit on top of the artwork's own
-     header. Shortened it and gave it a bit more room. It also used to
-     repeat "press OK to start" a second time lower on the screen even
-     when there was nothing more to say — that line now stays quiet
-     unless it actually has something new to add (like "more than one
-     player" controls, or who's still finishing setup).
+1. EASY / MEDIUM / HARD DIFFICULTY
+   New setting, top-right corner badge on every screen (click to cycle),
+   or the remote's Up/Down while on the very first "Ready?" screen (before
+   setup starts). Medium is exactly the game as it always played — nothing
+   changes if you never touch this. Easy is noticeably slower, spaces
+   obstacles out more, barely speeds up over a long run, and turns the
+   Dino era's rolling lava boulder off entirely (the example Don gave for
+   "too much for a 4 year old"). Hard is a moderate step up from Medium.
+   Your choice is remembered (like the mute setting).
 
-Files changed this round: public/play/index.html, public/tv/game.js,
-public/tv/index.html
+2. CAMERA TRACKING — stepping toward/away from the phone mid-run
+   Previously, moving noticeably closer to or further from the phone
+   during a run could throw off the character's left/right and jump/duck
+   tracking, because the tracker's reference points were only ever set
+   once, at the start. Now this is checked continuously: if you drift too
+   close or too far, the game notices immediately, re-anchors itself to
+   your new position, and puts a red "Take a step back" / "Come a bit
+   closer" banner on the TV so you know to reposition.
 
-Tested: new Playwright suite for both fixes (15/15 passing), plus the
-full existing regression suite re-run clean against this build.
+3. MUSIC NOT PLAYING WHEN A LEVEL IS PICKED
+   Confirmed as a real browser restriction: if a whole session is played
+   entirely from the phone (the physical Fire TV remote is never pressed
+   even once), the browser refuses to start any audio at all — this is a
+   deliberate browser rule, not a bug in the usual sense, and there's no
+   way to force it. What WAS a bug is that the only on-screen sign this had
+   happened was a small label tucked in the bottom-left corner, easy to
+   miss from across a room. It's now a large banner across the
+   bottom-centre of the screen: "🔊 Press OK on your remote for sound" —
+   one press of the actual remote (any button) is all it takes to unlock
+   sound for the rest of the session.
 
---- How to upload this round ---
-Go to: https://github.com/Don7888/motion-run/upload/main
-Drag the "public" folder from this motionquest-deploy folder onto that
-page (not this motionquest-deploy folder itself — just "public").
-Let me know once it's uploaded and I'll verify + deploy.
+4. QUITTING A LEVEL TO PICK ANOTHER
+   Pressing Back on the remote (or Exit on the phone) during a run now
+   goes straight to the era picker. It used to take three Back presses and
+   land you back on a screen that only let you replay the SAME level —
+   now it's two presses (pause, then quit) and you're on the picker.
 
---- Previous rounds (for reference) ---
+Files changed this round: public/tv/game.js, public/tv/index.html,
+public/play/controller.js. (public/play/index.html unchanged.)
 
-Deployed/pending 2026-09-10 (dino gameplay round)
-Commit ef11b2c — Dino era gets its own gameplay: steeper hills with a
-slope-speed effect, bone collectibles, rolling lava boulders. Only
-public/tv/game.js changed. Was staged and pending upload when this
-round's fixes were layered on top — this round's game.js already
-includes those dino changes plus the ready-screen fixes above, so
-uploading now covers both in one go.
+Testing: full existing regression suite re-run clean, plus four new test
+files covering all four fixes above. The only failures are two known,
+pre-existing, unrelated ones in the QR-code test (a test-detection quirk,
+not a real bug) that predate this round.
 
-Deployed 2026-09-10 (endless levels round)
-Commit d4b39e4 live — endless levels, per-era difficulty ramp, clearer
-setup menus. public/tv/game.js + public/tv/index.html changed.
-Deploy dep-dahbdtlbedkc739uppdg, confirmed live.
+---
 
-Deployed 2026-09-10 (earlier round)
-Commit 585ff8f — one-phone multiplayer, sharper resolution, better 3D
-models, ground/hill sightline fix, punch fix, transparent app icon.
-Deploy dep-dah58q15efls73831ieg, verified live.
+Earlier rounds, still in this build:
 
-Deployed 2026-09-09
-Commit 0ac98ea, deploy dep-dagtfsjl550s73edqh6g, live. Corner/tracking
-fixes plus join/ready/placement artwork.
+Commit 052e1c1 (dino gameplay + menu clarity round 2, combined, deployed
+2026-09-10): Dino era hills/slope, bone collectibles, rolling lava
+boulders; phone join-code digits no longer ghost over the art; TV Ready
+badge no longer wraps or repeats its own instruction.
+
+Commit d4b39e4 (endless levels, deployed 2026-09-10): crossing an era's
+finish line now shows an unlock toast instead of ending the run; later
+eras start harder; clearer "Setup N/4" and "Move X of Y" labelling.
+
+Commit 585ff8f (deployed 2026-09-10): one-phone multiplayer, sharper
+resolution, better 3D models, ground/hill sightline fix, punch
+timing/animation fix, corrected transparent-background app icon.
+
+Commit 0ac98ea (deployed 2026-09-09): camera/corner tracking fixes, join/
+ready/placement artwork.
+
+---
+
+HOW TO UPLOAD (same as always):
+1. Drag the "public" folder (not this whole motionquest-deploy folder) onto
+   https://github.com/Don7888/motion-run/upload/main
+2. Tell Claude once it's uploaded, so it can verify and trigger the deploy.
