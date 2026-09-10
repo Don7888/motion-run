@@ -936,9 +936,15 @@
      .pq-content — both Ready and Placement always show a badge. Sized via
      height (not a translate/padding on a fixed-height box) so the frame
      actually shrinks to fit the remaining space instead of just moving
-     down and overflowing the bottom of the screen. */
+     down and overflowing the bottom of the screen.
+     2026-09-10: the floor here (was 58px) sat below the badge's own actual
+     height — badge top is a fixed 26px, and even its shortest one-line
+     wording runs about 52px tall with its padding, so anything under ~86px
+     let the art's frame start before the badge had finished, overlapping
+     the two (Don's screenshot: the badge sitting on top of the artwork's
+     own header). Floor raised past that with a small margin. */
   body.badge-visible .tv-frame-wrap {
-    align-items: flex-start; padding-top: clamp(58px, 10vh, 104px);
+    align-items: flex-start; padding-top: clamp(86px, 11vh, 120px);
   }
   .tv-frame { position: relative; width: min(100%, 150vh); aspect-ratio: 3 / 2; }
   body.badge-visible .tv-frame { width: auto; height: 100%; max-width: 100%; }
@@ -983,6 +989,10 @@
     margin: 0; font-size: clamp(9px, 1.3vw, 12px); line-height: 1.3;
     text-shadow: 0 2px 6px rgba(11,4,26,0.85);
   }
+  /* 2026-09-10: solo play has nothing left to say here once the redundant
+     "press OK to start" was cut (the control badge already says it) — an
+     empty line would still eat a row of the gap/line-height for nothing. */
+  #readyPanel .hint-stack p.hint:empty { display: none; }
 
   /* Placement: one real line for the phone-orientation instruction the
      test suite (and camera tracking itself) depends on, tucked into the
@@ -1169,7 +1179,13 @@
           <!-- Rewritten by renderReadyHint() (tv/game.js): until every
                connected phone reports setup finished, this says who is still
                setting up rather than inviting a start that would skip it. -->
-          <p class="hint pulse" id="readyStartHint">🎮 Press OK on your remote (or tap Jump/Punch on your phone) to start</p>
+          <!-- Left empty by default (2026-09-10): the control badge at the
+               top of the screen already carries the "press OK / jump-punch
+               to start" instruction, so this line's job is to say only what
+               the badge doesn't — party controls, or who's still setting up.
+               renderReadyHint() (game.js) fills it in before this panel is
+               ever shown. -->
+          <p class="hint pulse" id="readyStartHint"></p>
         </div>
       </div>
     </div>

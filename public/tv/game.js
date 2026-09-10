@@ -1299,6 +1299,65 @@ function obDinoLowbarBoxes() {
   return g;
 }
 
+// --- Dino era: rolling lava boulders (2026-09-10 gameplay round) -------
+// "Volcano spitting out lava boulders" (Don's own brief for this era). This
+// is deliberately NOT a reskin of the four universal obstacle types — it's
+// the first hazard in the game that changes state after it spawns. It
+// starts in one lane, then partway through its approach it visibly commits
+// to a DIFFERENT lane and rolls there, so avoiding it is about reading
+// which way it's headed and dodging into a lane it isn't going to be in —
+// not just reacting to wherever it already sits, like every other obstacle.
+//
+// It lives outside the normal obstacleTypes/ERA_OBSTACLES machinery (spawns
+// on its own rare timer, not mixed into the everyday hurdle/crate/wall/
+// lowbar stream) precisely because it's a set-piece hazard, not a common
+// one. Its "safe" rule falls out of the existing collision code for free:
+// nothing in that switch recognises 'boulder' by name, so it lands on the
+// same catch-all as 'wall' — only a genuine lane dodge saves you.
+const BOULDER_ERA_IDS = new Set(['dino']);
+function boulderActive() { return BOULDER_ERA_IDS.has(currentEraId); }
+const BOULDER_SPAWN_MIN = 16;     // seconds between eruptions — rare, not routine
+const BOULDER_SPAWN_MAX = 26;
+const BOULDER_ROLL_Z = -55;       // trackZ at which it commits to its new lane
+const BOULDER_VISUAL_LERP = 2.4;  // how snappily the drawn position chases the committed lane
+
+function obDinoBoulder() {
+  const g = new THREE.Group();
+  // A craggy, roughly-rounded mass of dark volcanic rock, built from offset
+  // blocks rather than one cube so the silhouette reads as a boulder and
+  // not a crate.
+  part(g, 1.5, 1.2, 1.4, 0x3a2a22, 0, 0.6, 0);
+  part(g, 1.05, 0.95, 1.05, 0x4a362a, 0.32, 1.05, 0.12);
+  part(g, 0.85, 0.75, 0.9, 0x2e211a, -0.36, 1.05, -0.18);
+  part(g, 0.55, 0.5, 0.55, 0x4a362a, 0.08, 1.5, 0.28);
+  // Glowing lava cracks — bright against the dark rock, the tell that this
+  // is molten and not just another rockslide.
+  part(g, 0.85, 0.13, 0.16, 0xff6a2f, 0.05, 0.72, 0.64);
+  part(g, 0.16, 0.62, 0.14, 0xffb03d, -0.5, 0.65, 0.42, 0, 0.5);
+  part(g, 0.55, 0.11, 0.12, 0xff8a3d, 0.38, 1.18, -0.5);
+  part(g, 0.13, 0.45, 0.12, 0xffb03d, 0.52, 0.48, -0.22, 0, -0.35);
+  return g;
+}
+
+function spawnBoulder() {
+  // Same rule as every other obstacle: never place one on the blind turn-in
+  // of a corner, where the player can't yet see it coming.
+  if (terrainActive() && insideCorner(state.distance - SPAWN_Z)) return;
+  const startLane = Math.floor(Math.random() * 3);
+  const mesh = obDinoBoulder();
+  mesh.position.x = LANE_X[startLane];
+  mesh.position.z = SPAWN_Z;
+  scene.add(mesh);
+  // visualX is the DRAWN x position, separate from `lane` (which is what
+  // collision reads) — see the boulder-specific block in the obstacle
+  // update loop for why the two have to be able to disagree briefly.
+  obstacles.push({
+    type: 'boulder', lane: startLane, mesh, resolved: false, flying: false,
+    baseY: mesh.position.y, trackZ: SPAWN_Z,
+    visualX: LANE_X[startLane], rolled: false,
+  });
+}
+
 // --- Ancient Rome ----------------------------------------------------
 function obRomeHurdle() {
   const g = new THREE.Group();
@@ -1995,15 +2054,53 @@ function terrainRamp(distanceAlong) {
 // wavelength puts a crest and a trough inside the reaction window), so it
 // is both smaller and slower now. Line of sight to an obstacle's base is
 // checked by mr_test_terrain_sight.js rather than by eye.
+// Per-era hill character (2026-09-10 gameplay round): wavelength and
+// amplitude bounds on top of the shared formula below. Every era except
+// dino gets exactly today's numbers (freq 0.011-0.02 rad/m, amp 0.25-0.75m,
+// chaos 0.28) so nothing changes for them. Dino gets a longer wavelength —
+// real sustained climbs rather than short rolling bumps — and taller
+// amplitude: "sections where you're running uphill more", Don's own brief.
+// (A longer wavelength at a bigger amplitude is, perhaps counterintuitively,
+// no harder on the sightline budget than the original: occlusion tracks
+// CURVATURE, which scales with amplitude but with the SQUARE of frequency —
+// so roughly halving the frequency more than pays for doubling the
+// amplitude. Verified against mr_test_sightlines.js, not just assumed.)
+const HILL_PROFILES = {
+  dino: { freqMin: 0.0055, freqMax: 0.010, ampMin: 0.45, ampMax: 1.35, chaosMax: 0.34 },
+};
+const DEFAULT_HILL_PROFILE = { freqMin: 0.011, freqMax: 0.02, ampMin: 0.25, ampMax: 0.75, chaosMax: 0.28 };
+function hillProfile() { return HILL_PROFILES[currentEraId] || DEFAULT_HILL_PROFILE; }
+
 function hillOffset(distanceAlong) {
   if (!terrainActive()) return 0;
   const ramp = terrainRamp(distanceAlong);
-  const amp = THREE.MathUtils.lerp(0.25, 0.75, ramp);
+  const prof = hillProfile();
+  const amp = THREE.MathUtils.lerp(prof.ampMin, prof.ampMax, ramp);
   const chaos = Math.max(0, ramp - 0.35) * (1 / 0.65);
   return (
-    Math.sin(distanceAlong * THREE.MathUtils.lerp(0.011, 0.02, ramp) + 0.6) * amp +
-    Math.sin(distanceAlong * 0.038 + 2.4) * chaos * 0.28
+    Math.sin(distanceAlong * THREE.MathUtils.lerp(prof.freqMin, prof.freqMax, ramp) + 0.6) * amp +
+    Math.sin(distanceAlong * 0.038 + 2.4) * chaos * prof.chaosMax
   );
+}
+
+// How steep the ground is at `d`, as a rise/run ratio — used just below to
+// slow the player slightly on a genuine climb and give a small push back on
+// the way down. A plain central-difference on hillOffset() itself, so it
+// automatically inherits whatever profile the current era is using: it
+// stays close to flat for the three gentle eras and becomes a real effect
+// only where the slope actually is one (currently: dino's longer climbs).
+const SLOPE_EPS = 3;
+function terrainSlope(distanceAlong) {
+  if (!terrainActive()) return 0;
+  return (hillOffset(distanceAlong + SLOPE_EPS) - hillOffset(distanceAlong - SLOPE_EPS)) / (2 * SLOPE_EPS);
+}
+const SLOPE_SPEED_FACTOR = 2.4; // how strongly grade affects pace
+const SLOPE_SPEED_MIN = 0.86;   // floor: a climb slows you, it never stops you
+const SLOPE_SPEED_MAX = 1.14;   // ceiling: matches the star's precedent of a deliberate,
+                                 // modest breach of MAX_SPEED — a downhill run should feel
+                                 // like it's genuinely carrying you, not just visually tilting
+function slopeSpeedMult(distanceAlong) {
+  return THREE.MathUtils.clamp(1 - terrainSlope(distanceAlong) * SLOPE_SPEED_FACTOR, SLOPE_SPEED_MIN, SLOPE_SPEED_MAX);
 }
 
 // ---- The local path table -------------------------------------------
@@ -2323,7 +2420,7 @@ let obstacleSpawnEnabled = true;
 // says "COLLECT MAGIC POTIONS", and the pack contains that potion; the
 // future era gets its energy cell. Anywhere without a model kept the coin
 // disc, which is why coins are still the fallback rather than being removed.
-const ERA_COIN_MODEL = { rome: 'magic_potion', future: 'future_energy_cell' };
+const ERA_COIN_MODEL = { dino: 'dinosaur_bone', rome: 'magic_potion', future: 'future_energy_cell' };
 
 function makePickupMesh(kind) {
   if (kind === 'gem') return new THREE.Mesh(gemGeo, gemMat);
@@ -2620,6 +2717,7 @@ const state = {
   starT: 0,            // seconds of star left; > 0 means invincible + boosted
   lifeSpawnTimer: 0,   // countdown to the next heart spawn attempt
   starSpawnTimer: 0,   // countdown to the next star spawn attempt
+  boulderSpawnTimer: 0, // countdown to the next lava boulder (dino era only)
   spawnTimer: BASE_SPAWN_INTERVAL,
   coinTimer: 0.8,
   distance: 0,        // metres this run — drives the difficulty ramp
@@ -2959,7 +3057,11 @@ const PANELS = {
 // ---------------------------------------------------------------------
 const CONTROL_BADGE_TEXT = {
   pairing: { text: '📱 Use your phone to join', cls: 'phone' },
-  ready: { text: '🎮 Remote OK, or 📱 jump/punch, to start', cls: 'remote' },
+  // 2026-09-10: shortened from "Remote OK, or jump/punch, to start" — with
+  // the "Setup 1/4 · " prefix in front of it, the longer wording wrapped
+  // onto two lines on a real TV and sat tall enough to crowd the art's own
+  // header (Don: "the menu is so unclear"). Same information, one line.
+  ready: { text: '🎮 OK or 📱 jump/punch to start', cls: 'remote' },
   placement: { text: '🎮 Step back, then press OK', cls: 'remote' },
   framing: { text: '🎮 Get in frame — press OK to skip ahead', cls: 'remote' },
   calibrating: { text: '📱 Copy the moves · 🎮 OK to start', cls: 'phone' },
@@ -3172,14 +3274,19 @@ function renderReadyHint() {
   if (!readyStartHintEl) return;
   const waiting = playersNotSetUp();
   if (waiting.length === 0) {
+    // 2026-09-10: this used to end every branch with its own "...to start"
+    // instruction, which just repeated the control badge fixed at the top
+    // of the screen word-for-word (Don: "the menu is so unclear" — this was
+    // the same instruction shown twice at once). This line's job now is
+    // only to say what the badge can't: the party controls, and — when
+    // there's nothing else to add — nothing at all, rather than a duplicate.
+    if (partySize <= 1) { readyStartHintEl.textContent = ''; return; }
     // With more players than phones, say up front that it is a pass-the-phone
     // game — otherwise the first handover is a surprise mid-game.
     const sharing = partySize > Math.max(1, roster.length);
-    readyStartHintEl.textContent = partySize > 1
-      ? (sharing
-          ? `🎮 ◀ ▶ sets players · ${partySize} taking turns, passing the phone · OK to start`
-          : `🎮 ◀ ▶ sets players · ${partySize} with a phone each · OK to start`)
-      : '🎮 ◀ ▶ sets players · Press OK on your remote (or tap Jump/Punch on your phone) to start';
+    readyStartHintEl.textContent = sharing
+      ? `🎮 ◀ ▶ sets players · ${partySize} taking turns, passing the phone`
+      : `🎮 ◀ ▶ sets players · ${partySize} with a phone each`;
     return;
   }
   const who = waiting.length === 1
@@ -3760,6 +3867,7 @@ function resetRun() {
   state.starT = 0;
   state.lifeSpawnTimer = LIFE_SPAWN_MIN + Math.random() * (LIFE_SPAWN_MAX - LIFE_SPAWN_MIN);
   state.starSpawnTimer = STAR_SPAWN_MIN + Math.random() * (STAR_SPAWN_MAX - STAR_SPAWN_MIN);
+  state.boulderSpawnTimer = BOULDER_SPAWN_MIN + Math.random() * (BOULDER_SPAWN_MAX - BOULDER_SPAWN_MIN);
   endStar();
   state.spawnTimer = BASE_SPAWN_INTERVAL;
   state.coinTimer = 0.8;
@@ -4271,9 +4379,14 @@ let lastT = performance.now();
 
 function currentSpeed() {
   const base = Math.min(MAX_SPEED, eraBaseSpeed(currentEra()) + state.distance * SPEED_RAMP);
+  // Terrain grade nudges pace up or down (2026-09-10) — see slopeSpeedMult().
+  // Everything on the track (player, obstacles, pickups, scenery) reads this
+  // same currentSpeed() to advance each frame, so a slope changes the pace
+  // of the whole world uniformly rather than just the player relative to it.
+  const graded = base * slopeSpeedMult(state.distance);
   // The star deliberately breaks the MAX_SPEED ceiling — going faster than
   // the game normally allows is the whole point of it.
-  return state.starT > 0 ? base * STAR_SPEED_MULT : base;
+  return state.starT > 0 ? graded * STAR_SPEED_MULT : graded;
 }
 
 function updatePlaying(dt) {
@@ -4541,6 +4654,19 @@ function updatePlaying(dt) {
       : 1.5;
   }
 
+  // Lava boulders (dino era only) — its own rare, independent timer, same
+  // shape as hearts/stars above but never retried early on a skip: unlike a
+  // heart or star, a boulder has no "all three lanes are busy" failure mode
+  // (spawnBoulder only ever bails on a blind corner turn-in), so a fixed
+  // interval is enough.
+  if (boulderActive()) {
+    state.boulderSpawnTimer -= dt;
+    if (state.boulderSpawnTimer <= 0) {
+      spawnBoulder();
+      state.boulderSpawnTimer = BOULDER_SPAWN_MIN + Math.random() * (BOULDER_SPAWN_MAX - BOULDER_SPAWN_MIN);
+    }
+  }
+
   // Update collectibles
   for (let i = pickups.length - 1; i >= 0; i--) {
     const p = pickups[i];
@@ -4637,15 +4763,38 @@ function updatePlaying(dt) {
 
     o.trackZ += speed * dt;
 
+    // Lava boulder: commit to a new lane once, at a fixed point in its
+    // approach, well before the collision window — then let the DRAWN x
+    // chase that commitment smoothly (visualX), while `lane` itself (what
+    // collision actually reads, below) flips the instant it commits. This
+    // is deliberately the same split every obstacle already uses between
+    // trackZ (gameplay) and drawn position (cosmetic) — here it's just lane
+    // rather than the corner bend doing the bending.
+    if (o.type === 'boulder') {
+      if (!o.rolled && o.trackZ >= BOULDER_ROLL_Z) {
+        o.rolled = true;
+        if (o._testTargetLane !== undefined) {
+          o.lane = o._testTargetLane;
+        } else {
+          const others = [0, 1, 2].filter((l) => l !== o.lane);
+          o.lane = others[Math.floor(Math.random() * others.length)];
+        }
+      }
+      o.visualX += (LANE_X[o.lane] - o.visualX) * Math.min(1, dt * BOULDER_VISUAL_LERP);
+      // A rolling tumble, faster the faster the run is going.
+      o.mesh.rotation.x -= speed * dt * 0.7;
+    }
+
     // Purely a redraw of where the obstacle sits on screen. Collision just
     // below still keys off o.lane plus a window on o.trackZ, never the drawn
     // position, so an obstacle swinging round a corner can't dodge or cheat
     // its own hitbox. Yawed to face along the track as well, so a hurdle
     // mid-corner lies square across the road instead of skewed to the world.
+    const drawnX = o.type === 'boulder' ? o.visualX : LANE_X[o.lane];
     if (terrainActive()) {
-      placeOnTrack(o.mesh, -o.trackZ, LANE_X[o.lane], o.baseY);
+      placeOnTrack(o.mesh, -o.trackZ, drawnX, o.baseY);
     } else {
-      o.mesh.position.x = LANE_X[o.lane];
+      o.mesh.position.x = drawnX;
       o.mesh.position.y = o.baseY;
       o.mesh.position.z = o.trackZ;
     }
@@ -4663,7 +4812,7 @@ function updatePlaying(dt) {
         // one puts your head straight through it, which is what stops the
         // new obstacle from collapsing back into "another hurdle".
         else if (o.type === 'lowbar') safe = state.duckTimer > 0 && state.grounded;
-        else safe = false; // wall: only lane-dodge saves you
+        else safe = false; // wall, boulder: only lane-dodge saves you
 
         if (state.starT > 0) {
           // Star: run straight through it. Walls included — this is the one
@@ -4996,6 +5145,33 @@ window.__mrDebug = {
   eraBaseSpeed: (id) => eraBaseSpeed(ERA_BY_ID[id] || currentEra()),
   eraBaseSpawnInterval: (id) => eraBaseSpawnInterval(ERA_BY_ID[id] || currentEra()),
   best: (id) => loadProgress().best[id] || 0,
+  // --- 2026-09-10: dino-era gameplay (lava boulders, slope speed) --------
+  slope: (d) => terrainSlope(d),
+  slopeSpeedMult: (d) => slopeSpeedMult(d),
+  hillProfile: () => ({ ...hillProfile() }),
+  boulderActive: () => boulderActive(),
+  boulderCount: () => obstacles.filter((o) => o.type === 'boulder').length,
+  // Full control over both lanes and placement, for a deterministic test —
+  // spawnBoulder() itself always picks a random start lane and a random
+  // (different) target lane.
+  placeBoulder: (startLane, targetLane, z) => {
+    const mesh = obDinoBoulder();
+    mesh.position.x = LANE_X[startLane];
+    mesh.position.z = z;
+    scene.add(mesh);
+    obstacles.push({
+      type: 'boulder', lane: startLane, mesh, resolved: false, flying: false,
+      baseY: mesh.position.y, trackZ: z,
+      visualX: LANE_X[startLane], rolled: false,
+      // A placed boulder is for testing the roll itself, so pre-arm the
+      // target lane rather than leaving it to chance.
+      _testTargetLane: targetLane,
+    });
+  },
+  boulderLane: () => { const b = obstacles.find((o) => o.type === 'boulder'); return b ? b.lane : null; },
+  boulderVisualX: () => { const b = obstacles.find((o) => o.type === 'boulder'); return b ? b.visualX : null; },
+  boulderRolled: () => { const b = obstacles.find((o) => o.type === 'boulder'); return b ? b.rolled : null; },
+  coinModelName: () => ERA_COIN_MODEL[currentEraId] || null,
 };
 
 // Paint the initial (pairing) state once before the loop starts. Without

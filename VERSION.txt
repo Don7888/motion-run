@@ -1,0 +1,57 @@
+MotionQuest — motionquest-deploy folder
+========================================
+
+Commit (sandbox-tested, ready to upload): 052e1c1
+Date: 2026-09-10
+
+What's in this round: menu clarity fixes, from Don's screenshots
+("Mobile: numbers are on top of the 0s" / "Tv: the menu is so unclear")
+
+  1. Phone join screen — the 6-digit code box was see-through art with
+     "000000" painted into it underneath, and a typed digit didn't
+     cleanly replace the baked zero, so you saw both at once. Fixed:
+     the code box now paints its own solid white background over that
+     spot, so only what you actually type is ever shown.
+  2. TV Ready screen — the "Setup 1/4 ..." banner at the top was long
+     enough to wrap onto two lines and sit on top of the artwork's own
+     header. Shortened it and gave it a bit more room. It also used to
+     repeat "press OK to start" a second time lower on the screen even
+     when there was nothing more to say — that line now stays quiet
+     unless it actually has something new to add (like "more than one
+     player" controls, or who's still finishing setup).
+
+Files changed this round: public/play/index.html, public/tv/game.js,
+public/tv/index.html
+
+Tested: new Playwright suite for both fixes (15/15 passing), plus the
+full existing regression suite re-run clean against this build.
+
+--- How to upload this round ---
+Go to: https://github.com/Don7888/motion-run/upload/main
+Drag the "public" folder from this motionquest-deploy folder onto that
+page (not this motionquest-deploy folder itself — just "public").
+Let me know once it's uploaded and I'll verify + deploy.
+
+--- Previous rounds (for reference) ---
+
+Deployed/pending 2026-09-10 (dino gameplay round)
+Commit ef11b2c — Dino era gets its own gameplay: steeper hills with a
+slope-speed effect, bone collectibles, rolling lava boulders. Only
+public/tv/game.js changed. Was staged and pending upload when this
+round's fixes were layered on top — this round's game.js already
+includes those dino changes plus the ready-screen fixes above, so
+uploading now covers both in one go.
+
+Deployed 2026-09-10 (endless levels round)
+Commit d4b39e4 live — endless levels, per-era difficulty ramp, clearer
+setup menus. public/tv/game.js + public/tv/index.html changed.
+Deploy dep-dahbdtlbedkc739uppdg, confirmed live.
+
+Deployed 2026-09-10 (earlier round)
+Commit 585ff8f — one-phone multiplayer, sharper resolution, better 3D
+models, ground/hill sightline fix, punch fix, transparent app icon.
+Deploy dep-dah58q15efls73831ieg, verified live.
+
+Deployed 2026-09-09
+Commit 0ac98ea, deploy dep-dagtfsjl550s73edqh6g, live. Corner/tracking
+fixes plus join/ready/placement artwork.
