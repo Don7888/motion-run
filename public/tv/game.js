@@ -1572,14 +1572,16 @@ function spawnObstacle() {
 // timeline rather than an arbitrary menu.
 //
 // Each era is pure data — palette, lighting, scenery mix, obstacle set and
-// a finish line. Nothing here changes how the game PLAYS; see the note on
-// ERA_OBSTACLES above for why that is deliberate.
+// an unlock threshold. Nothing here changes how the game PLAYS; see the
+// note on ERA_OBSTACLES above for why that is deliberate.
 //
-// `goal` is the distance in metres that completes the level and unlocks the
-// next one. Until this round the game was endless; a runner with no finish
-// line has nothing to unlock, so each era now has an end you can actually
-// reach. They step up gently rather than doubling, because the difficulty
-// already ramps with distance inside a single run.
+// `goal` is the distance in metres at which the NEXT era unlocks. It is no
+// longer a finish line — 2026-09-10 ("no end, but tell the player when the
+// next level is unlocked"): a run now keeps going for as long as the player
+// keeps their hearts, through the unlock moment and beyond, getting harder
+// the further they get (see currentSpeed()/spawnInterval and ERA_TIER).
+// `goal` still steps up per era rather than doubling, both because it's a
+// gentler unlock curve and because a later era already starts tougher.
 // =====================================================================
 const ERAS = [
   {
@@ -1638,6 +1640,25 @@ const ERAS = [
     coin: [0x36e0ff, 0x08616b], gem: [0xff4fd8, 0x6b0a52],
   },
 ];
+
+// =====================================================================
+// PER-ERA DIFFICULTY TIER (2026-09-10)
+//
+// "The levels should increase in difficulty as the player gets further
+// in." An era's position in ERAS (0-3) nudges the run's starting speed up
+// and its starting spawn gap down, on top of the existing ramp-with-distance
+// inside a run (SPEED_RAMP/SPAWN_RAMP below) — so Ancient Rome opens
+// noticeably brisker than Primeval Valley did, and Neon Future brisker
+// still, even before either has covered a metre. Gentle steps, same
+// philosophy as the `goal` spacing above: a later era should read as the
+// next challenge, not a wall.
+// =====================================================================
+function eraTier(era) { return Math.max(0, ERAS.findIndex((e) => e.id === era.id)); }
+function eraBaseSpeed(era) { return BASE_SPEED + eraTier(era) * 1.1; }
+function eraBaseSpawnInterval(era) {
+  return Math.max(MIN_SPAWN_INTERVAL + 0.15, BASE_SPAWN_INTERVAL - eraTier(era) * 0.14);
+}
+
 // =====================================================================
 // HORIZON LANDMARKS (2026-09-04, from Don's key art)
 //
@@ -1831,8 +1852,11 @@ const CORNER_ARC = 26;
 const CORNER_FIRST_MIN = 90;       // never a corner before the player has settled in
 const CORNER_STRAIGHT_MIN = 105;   // clear straight running between corners
 const CORNER_STRAIGHT_MAX = 150;
-const CORNER_END_CLEARANCE = 60;   // levels finish on a straight, not mid-turn
 const CORNER_WARN_DISTANCE = 60;   // how far out the "bend ahead" sign appears
+// How far past the player's current distance the corner table stays built
+// out to. Comfortably beyond PATH_AHEAD (below) so a corner is always fully
+// laid out long before the road-drawing or spawn code needs to read it.
+const CORNER_LOOKAHEAD = 600;
 
 // How far along the track the local path is evaluated each frame. Ahead of
 // the player this has to comfortably exceed the obstacle spawn point
@@ -1876,23 +1900,39 @@ function mulberry32(a) {
 }
 
 // [{ start, end, dir }] in metres along the track; dir -1 = left, +1 = right.
+// 2026-09-10 ("no end"): a run no longer stops at a fixed distance, so the
+// corner table can no longer be built once up to a known `goal` — it is
+// grown lazily instead, as far ahead of the player as CORNER_LOOKAHEAD
+// needs, for as long as the run keeps going. The generator (cornerRng) and
+// its running state (cornerD/cornerLastDir) persist between calls so the
+// sequence is one continuous draw from the era's seed, not a series of
+// independent ones — the same level still turns in the same places every
+// time you play it, all the way out, however far that ends up being.
 let corners = [];
+let cornerRng = null;
+let cornerD = 0;
+let cornerLastDir = 1;
 
-function buildCorners(eraId, goal) {
-  const rnd = mulberry32(hashSeed(`motionquest:${eraId}`));
-  const out = [];
-  let d = CORNER_FIRST_MIN + rnd() * 40;
-  let lastDir = rnd() < 0.5 ? -1 : 1;
-  while (d + CORNER_ARC < goal - CORNER_END_CLEARANCE) {
+function resetCorners(eraId) {
+  corners = [];
+  if (!TERRAIN_ERA_IDS.has(eraId)) { cornerRng = null; return; }
+  cornerRng = mulberry32(hashSeed(`motionquest:${eraId}`));
+  cornerD = CORNER_FIRST_MIN + cornerRng() * 40;
+  cornerLastDir = cornerRng() < 0.5 ? -1 : 1;
+  extendCornersTo(CORNER_LOOKAHEAD);
+}
+
+function extendCornersTo(minDistance) {
+  if (!cornerRng) return;
+  while (cornerD + CORNER_ARC < minDistance) {
     // Mostly alternate. Always alternating reads as a metronome; never
     // alternating spirals off in one direction and every corner starts to
     // feel the same. Roughly three in four flips.
-    const dir = rnd() < 0.72 ? -lastDir : lastDir;
-    out.push({ start: d, end: d + CORNER_ARC, dir });
-    lastDir = dir;
-    d += CORNER_ARC + CORNER_STRAIGHT_MIN + rnd() * (CORNER_STRAIGHT_MAX - CORNER_STRAIGHT_MIN);
+    const dir = cornerRng() < 0.72 ? -cornerLastDir : cornerLastDir;
+    corners.push({ start: cornerD, end: cornerD + CORNER_ARC, dir });
+    cornerLastDir = dir;
+    cornerD += CORNER_ARC + CORNER_STRAIGHT_MIN + cornerRng() * (CORNER_STRAIGHT_MAX - CORNER_STRAIGHT_MIN);
   }
-  return out;
 }
 
 // Eased rather than a constant-radius arc: a real road corner turns in and
@@ -2207,11 +2247,12 @@ function applyEra(id) {
   roadRibbon.material.needsUpdate = true;
   oldTex?.dispose();
 
-  // This level's corners. Deterministic from the era id (see buildCorners),
-  // so the same level always turns in the same places. The ribbon takes over
-  // from the flat plane wherever corners are switched on — only one of the
-  // two is ever visible, or they would z-fight along the whole road.
-  corners = terrainActive() ? buildCorners(era, e.goal) : [];
+  // This level's corners. Deterministic from the era id (see resetCorners),
+  // so the same level always turns in the same places, however far the run
+  // goes. The ribbon takes over from the flat plane wherever corners are
+  // switched on — only one of the two is ever visible, or they would
+  // z-fight along the whole road.
+  resetCorners(era);
   pathBase = NaN; // force a path rebuild before the next frame draws
   roadRibbon.visible = terrainActive();
   ground.visible = !terrainActive();
@@ -2585,6 +2626,7 @@ const state = {
   runTime: 0,         // seconds of actual running, for the results breakdown
   coinsTaken: 0,      // collectibles picked up this run
   clears: 0,          // obstacles jumped, ducked or punched rather than hit
+  unlockAnnounced: false, // has this run already shown its unlock toast
   distanceForTex: 0,
   countdownT: 0,      // seconds left on the pre-run countdown
   gameOverT: 0,       // seconds spent on the Run Over screen (auto-restart)
@@ -2596,7 +2638,7 @@ const state = {
 // MULTIPLAYER — up to 4 players, one phone each, taking turns at a time
 // trial on the same level. Deliberately built as a thin layer on top of the
 // existing single-player flow rather than a parallel mode: the level, the
-// countdown, resetRun(), levelComplete() and gameOver() are all exactly the
+// countdown, resetRun() and gameOver() are all exactly the
 // same code a solo player uses — a "turn" is just one ordinary run, with
 // bookkeeping before and after it to say whose run it was and what to do
 // when it ends. Single-player is `roster.length <= 1`, in which case none
@@ -2769,9 +2811,10 @@ function showLeaderboard() {
   syncPanel();
 }
 
-// Called once a turn's result screen (levelComplete or gameover) is done —
-// either the timer ran out or someone pressed the button early. Moves to
-// the next player, or to the leaderboard if that was the last one.
+// Called once a turn's result screen (gameover — the only way a turn ends
+// now) is done — either the timer ran out or someone pressed the button
+// early. Moves to the next player, or to the leaderboard if that was the
+// last one.
 function advanceMultiplayerTurn() {
   if (!multiplayer.active) return;
   multiplayer.index += 1;
@@ -2877,15 +2920,10 @@ const newHighScoreNote = document.getElementById('newHighScoreNote');
 
 const levelSelectPanel = document.getElementById('levelSelectPanel');
 const levelGridEl = document.getElementById('levelGrid');
-const levelCompletePanel = document.getElementById('levelCompletePanel');
-const levelCompleteTitle = document.getElementById('levelCompleteTitle');
-const levelCompleteScore = document.getElementById('levelCompleteScore');
-const levelCompleteUnlock = document.getElementById('levelCompleteUnlock');
-const levelCompleteStars = document.getElementById('levelCompleteStars');
-const levelCompleteStats = document.getElementById('levelCompleteStats');
 const eraBadge = document.getElementById('eraBadge');
 const progressFill = document.getElementById('progressFill');
 const progressLabel = document.getElementById('progressLabel');
+const unlockToastEl = document.getElementById('unlockToast');
 
 const PANELS = {
   pairing: pairingPanel,
@@ -2896,7 +2934,6 @@ const PANELS = {
   placement: placementPanel,
   framing: framingPanel,
   levelSelect: levelSelectPanel,
-  levelComplete: levelCompletePanel,
   turnIntro: turnIntroPanel,
   leaderboard: leaderboardPanel,
 };
@@ -2907,20 +2944,36 @@ const PANELS = {
 // remote or the phone is what drives the current screen. Shown for every
 // non-playing stage; hidden once a run is actually in progress (input is
 // coming from the phone continuously at that point, no ambiguity).
+//
+// 2026-09-10 ("the setup menus are unclear"): placement and framing used to
+// just say WHICH device to use ("Use your Fire TV remote") without saying
+// what to actually do with it — the one on-screen line that did say
+// ("Step back, then press OK") was accidentally left screen-reader-only,
+// i.e. invisible, on the placement screen. This badge is the one thing
+// guaranteed to be on screen at every setup stage, so it now carries the
+// real instruction itself rather than just naming the input device. It
+// also gets a "Setup N/4" prefix on the four setup screens specifically
+// (see SETUP_STEP_OF_4) — the art behind Ready/Placement draws that same
+// 4-step timeline, but only for those two; the badge now keeps it going
+// through Framing and Calibration too, where the art doesn't.
 // ---------------------------------------------------------------------
 const CONTROL_BADGE_TEXT = {
   pairing: { text: '📱 Use your phone to join', cls: 'phone' },
   ready: { text: '🎮 Remote OK, or 📱 jump/punch, to start', cls: 'remote' },
-  placement: { text: '🎮 Use your Fire TV remote', cls: 'remote' },
-  framing: { text: '🎮 Use your Fire TV remote', cls: 'remote' },
+  placement: { text: '🎮 Step back, then press OK', cls: 'remote' },
+  framing: { text: '🎮 Get in frame — press OK to skip ahead', cls: 'remote' },
   calibrating: { text: '📱 Copy the moves · 🎮 OK to start', cls: 'phone' },
   paused: { text: '🎮 Remote OK to resume, Back to exit', cls: 'remote' },
   gameover: { text: '🎮 Remote OK to retry · Back for levels', cls: 'remote' },
   levelSelect: { text: '🎮 ◀ ▶ to choose · OK to travel', cls: 'remote' },
-  levelComplete: { text: '🎮 Remote OK to continue', cls: 'remote' },
   turnIntro: null, // no input needed — see TURN_INTRO_DELAY
   leaderboard: { text: '🎮 Remote OK to continue', cls: 'remote' },
 };
+// The four setup stages, in order, so the badge can say "Setup 2/4" etc.
+// Kept separate from CAL_ORDER (the four MOVES inside the calibrating
+// stage) precisely so the two "step 1 of 4" ideas never collide again.
+const SETUP_STEP_OF_4 = { ready: 1, placement: 2, framing: 3, calibrating: 4 };
+
 function updateControlBadge(stageKey) {
   const meta = CONTROL_BADGE_TEXT[stageKey];
   // The badge is a fixed pill near the top of the screen and the panels are
@@ -2930,7 +2983,8 @@ function updateControlBadge(stageKey) {
   // `body.badge-visible .overlay-panel` in index.html.
   document.body.classList.toggle('badge-visible', !!meta);
   if (!meta) { controlBadge.style.display = 'none'; return; }
-  controlBadge.textContent = meta.text;
+  const step = SETUP_STEP_OF_4[stageKey];
+  controlBadge.textContent = step ? `Setup ${step}/4 · ${meta.text}` : meta.text;
   controlBadge.className = `control-badge ${meta.cls}`;
   controlBadge.style.display = 'block';
 }
@@ -2967,7 +3021,6 @@ function syncPanel() {
   if (calibrating) { showPanel('calibrating'); updateControlBadge('calibrating'); return; }
   if (state.phase === 'pairing') { showPanel('pairing'); updateControlBadge('pairing'); }
   else if (state.phase === 'levelSelect') { showPanel('levelSelect'); updateControlBadge('levelSelect'); }
-  else if (state.phase === 'levelComplete') { showPanel('levelComplete'); updateControlBadge('levelComplete'); }
   else if (state.phase === 'ready') { showPanel('ready'); updateControlBadge('ready'); }
   else if (state.phase === 'paused') { showPanel('paused'); updateControlBadge('paused'); }
   else if (state.phase === 'gameover') { showPanel('gameover'); updateControlBadge('gameover'); }
@@ -3266,7 +3319,11 @@ function showCalibrationStep() {
   const meta = CAL_META[CAL_ORDER[calIndex]];
   calMoveIcon.textContent = meta.icon;
   calMoveText.textContent = calMode === 'hold' ? meta.textHold : meta.textCamera;
-  calStepCounter.textContent = `Step ${calIndex + 1} of ${CAL_ORDER.length}`;
+  // "Move" rather than "Step" — Setup 4/4 (the control badge, above) already
+  // owns "step" for the four setup STAGES; reusing it here for the four
+  // calibration MOVES was the exact ambiguity that made this screen read as
+  // "back to setup stage 1" instead of "the first of four moves".
+  calStepCounter.textContent = `Move ${calIndex + 1} of ${CAL_ORDER.length}`;
   renderCalDots();
   requestCalStepOnPhone();
 }
@@ -3445,8 +3502,8 @@ function renderLevelSelect() {
     card.innerHTML = `
       <div class="level-icon">${locked ? '🔒' : era.icon}</div>
       <div class="level-name">${era.name}</div>
-      <div class="level-sub">${locked ? 'Finish the era before' : era.sub}</div>
-      <div class="level-meta">${locked ? '' : `${era.goal} m${best ? ` · best ${best}` : ''}`}</div>
+      <div class="level-sub">${locked ? 'Unlock the era before' : era.sub}</div>
+      <div class="level-meta">${locked ? '' : (best ? `Best ${best}` : `${era.goal}m unlocks next era`)}</div>
     `;
     levelGridEl.appendChild(card);
   });
@@ -3552,32 +3609,22 @@ function updateEraBadge() {
   eraBadge.textContent = `${e.icon} ${e.name}`;
 }
 
-// The distance bar in the HUD — without a visible finish line, a level with
-// an end feels exactly like the endless mode it replaced.
+// The distance bar in the HUD. 2026-09-10 ("no end"): once the unlock
+// threshold is passed the bar has nothing left to fill towards, so it
+// holds full and gold rather than sitting at a permanently-maxed-out
+// "100%" that invites the question of why the run hasn't stopped.
 function updateProgressBar() {
   if (!progressFill) return;
   const goal = currentEra().goal;
-  const pct = Math.max(0, Math.min(1, state.distance / goal));
+  const past = state.distance >= goal;
+  const pct = past ? 1 : Math.max(0, state.distance / goal);
   progressFill.style.width = `${(pct * 100).toFixed(1)}%`;
+  progressFill.classList.toggle('endless', past);
   if (progressLabel) {
-    progressLabel.textContent = `${Math.floor(state.distance)} / ${goal} m`;
+    progressLabel.textContent = past
+      ? `${Math.floor(state.distance)} m · endless`
+      : `${Math.floor(state.distance)} / ${goal} m`;
   }
-}
-
-// Star rating, borrowed from the results mockup in Don's UI pack. The pack's
-// version is a flat PNG with the numbers painted on, so the idea is worth
-// taking and the image is not — this is the same design driven by what
-// actually happened in the run.
-//
-// Three stars is deliberately not "finish the level": everyone who sees this
-// screen has already done that. It asks for finishing it WELL — without
-// losing hearts, and collecting as you go — so there is a reason to replay
-// an era you have already beaten.
-function starRating() {
-  let stars = 1;                                  // you finished, that's one
-  if (state.lives >= START_LIVES) stars += 1;     // without losing a heart
-  if (state.coinsTaken >= 40) stars += 1;         // and you collected properly
-  return Math.min(3, stars);
 }
 
 function formatTime(seconds) {
@@ -3586,54 +3633,33 @@ function formatTime(seconds) {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
-function levelComplete() {
-  audio.sfx('star');
+// =====================================================================
+// UNLOCKING THE NEXT ERA MID-RUN (2026-09-10)
+//
+// "No end, but tell the player when the next level is unlocked." Reaching
+// an era's `goal` used to stop the run and show a whole results screen
+// (levelComplete()); now the run doesn't stop for anything but running out
+// of hearts, so this just banks the unlock and puts up a toast — the game
+// underneath keeps playing, and keeps getting harder, right through it.
+// =====================================================================
+function announceUnlock() {
+  // The run keeps going right through this — a player's turn (solo or
+  // multiplayer) still only ends at gameOver(), which is where the score
+  // and unlock get their final, one-time recording.
   const era = currentEra();
-  state.phase = 'levelComplete';
-  state.turnEndT = 0;
-  commitHighScore();
-  recordBest(era.id, state.score);
   const opened = unlockNextAfter(era.id);
-  if (multiplayer.active) {
-    recordTurnResult(true);
-    if (levelCompleteTitle) levelCompleteTitle.textContent = `${playerLabel(activePlayerId()).name} finished!`;
-  } else if (levelCompleteTitle) {
-    levelCompleteTitle.textContent = `${era.icon} ${era.name} complete!`;
-  }
-  const hintEl = document.getElementById('levelCompleteHint');
-  if (hintEl) {
-    hintEl.textContent = multiplayer.active
-      ? (multiplayer.index + 1 < multiplayer.order.length
-          ? '🎮 OK / Jump / Punch for the next player'
-          : '🎮 OK / Jump / Punch to see the results')
-      : '🎮 Press OK on your remote (or tap Jump/Punch on your phone) to continue';
-  }
-  if (levelCompleteScore) levelCompleteScore.textContent = String(Math.floor(state.score));
-  const stars = starRating();
-  if (levelCompleteStars) {
-    levelCompleteStars.innerHTML = [0, 1, 2]
-      .map((i) => `<span class="rating-star${i < stars ? '' : ' empty'}">${i < stars ? '★' : '☆'}</span>`)
-      .join('');
-  }
-  if (levelCompleteStats) {
-    levelCompleteStats.innerHTML = `
-      <div><span>Time</span><b>${formatTime(state.runTime)}</b></div>
-      <div><span>Collected</span><b>${state.coinsTaken}</b></div>
-      <div><span>Cleared</span><b>${state.clears}</b></div>
-      <div><span>Hearts left</span><b>${state.lives}</b></div>
-    `;
-  }
-  if (levelCompleteUnlock) {
-    levelCompleteUnlock.textContent = opened
-      ? `🔓 ${opened.icon} ${opened.name} unlocked`
-      : 'Every era beaten — go for a better score';
-  }
-  hideActionPrompt();
-  hideCountdown();
-  endStar();
-  clearFinishPortal();
-  renderLevelSelect();
-  syncPanel();
+  if (!opened) return; // last era already reached on a previous run
+  audio.sfx('star');
+  showUnlockToast(`🔓 ${opened.icon} ${opened.name} unlocked!`);
+  renderLevelSelect(); // so the picker reflects it immediately if paused into
+}
+
+function showUnlockToast(text) {
+  if (!unlockToastEl) return;
+  unlockToastEl.textContent = text;
+  unlockToastEl.classList.add('show');
+  clearTimeout(showUnlockToast._t);
+  showUnlockToast._t = setTimeout(() => unlockToastEl.classList.remove('show'), 3200);
 }
 
 function popCombo(text) {
@@ -3661,6 +3687,13 @@ function flashHit() {
 // Positioned by the same maths the obstacles use, so it approaches at
 // exactly the run's speed and lines up with the goal distance rather than
 // merely being nearby.
+//
+// 2026-09-10 ("no end"): running through it no longer ends anything — the
+// unlock toast (announceUnlock()) fires independently, on the same
+// threshold, and the run carries straight on. The portal is now purely the
+// visual beat for that moment: it still needs to disappear behind the
+// player once passed, which it never had to do before (the run always
+// ended here, so nothing was left running long enough to notice it hadn't).
 // =====================================================================
 const PORTAL_LEAD_DISTANCE = 55; // metres before the goal that it appears
 let finishPortal = null;
@@ -3676,7 +3709,7 @@ function updateFinishPortal(dt) {
   const goal = currentEra().goal;
   const remaining = goal - state.distance;
   if (remaining > PORTAL_LEAD_DISTANCE || remaining < -4) {
-    if (remaining > PORTAL_LEAD_DISTANCE) clearFinishPortal();
+    clearFinishPortal();
     return;
   }
   if (!finishPortal) {
@@ -3734,6 +3767,7 @@ function resetRun() {
   state.runTime = 0;
   state.coinsTaken = 0;
   state.clears = 0;
+  state.unlockAnnounced = false; // a fresh run gets its own shot at the toast
   obstacles.splice(0).forEach((o) => scene.remove(o.mesh));
   pickups.splice(0).forEach((p) => scene.remove(p.mesh));
   clearFinishPortal();
@@ -3807,10 +3841,23 @@ function gameOver() {
   state.turnEndT = 0;
   finalScoreEl.textContent = Math.floor(state.score);
   commitHighScore();
+  // The run has no other end any more (2026-09-10), so this is also the one
+  // moment an era's "best" score gets banked — it used to happen only on
+  // reaching the old finish line, which every run now runs straight past.
+  recordBest(currentEra().id, state.score);
   newHighScoreNote.style.display = state.score > highScoreAtRunStart ? 'block' : 'none';
   const titleEl = document.getElementById('gameOverTitle');
   const hintEl = document.getElementById('gameOverHint');
   const subHintEl = document.getElementById('gameOverSubHint');
+  const statsEl = document.getElementById('gameOverStats');
+  if (statsEl) {
+    statsEl.innerHTML = `
+      <div><span>Time</span><b>${formatTime(state.runTime)}</b></div>
+      <div><span>Distance</span><b>${Math.floor(state.distance)}m</b></div>
+      <div><span>Collected</span><b>${state.coinsTaken}</b></div>
+      <div><span>Cleared</span><b>${state.clears}</b></div>
+    `;
+  }
   if (multiplayer.active) {
     recordTurnResult(false);
     if (titleEl) titleEl.textContent = `${playerLabel(activePlayerId()).name} is out!`;
@@ -4028,11 +4075,6 @@ function handleInput(msg) {
     endMultiplayer();
     return;
   }
-  if (state.phase === 'levelComplete'
-      && (msg.action === 'jump' || msg.action === 'punch') && msg.explicit) {
-    if (multiplayer.active) advanceMultiplayerTurn(); else openLevelSelect();
-    return;
-  }
   // Stepping left and right on the ready screen sets how many are playing —
   // the same gesture that browses the era picker, so a player who never picks
   // the remote up can still set the party size themselves.
@@ -4169,7 +4211,7 @@ window.addEventListener('keydown', (e) => {
     // straight back into the same level again. Mid-multiplayer-game, Back
     // abandons the whole session (remaining turns included) rather than
     // just the current one — a half-finished leaderboard would be worse.
-    if (state.phase === 'gameover' || state.phase === 'levelComplete'
+    if (state.phase === 'gameover'
         || state.phase === 'ready' || state.phase === 'leaderboard') {
       if (multiplayer.active) endMultiplayer(); else openLevelSelect();
       return;
@@ -4185,13 +4227,6 @@ window.addEventListener('keydown', (e) => {
     if (e.code === 'ArrowUp' || e.code === 'KeyW') { setPartySize(partySize + 1); return; }
     if (e.code === 'ArrowDown' || e.code === 'KeyS') { setPartySize(partySize - 1); return; }
     if (isSelectPress(e) || e.code === 'KeyF') { chooseLevel(); return; }
-    return;
-  }
-  // Finishing a level: OK goes on to the picker, where the era just
-  // unlocked is already highlighted — or, mid-multiplayer-game, on to the
-  // next player's turn (or the final leaderboard, for the last one).
-  if (state.phase === 'levelComplete' && (isSelectPress(e) || e.code === 'KeyF')) {
-    if (multiplayer.active) advanceMultiplayerTurn(); else openLevelSelect();
     return;
   }
   if (state.phase === 'leaderboard' && (isSelectPress(e) || e.code === 'KeyF')) {
@@ -4235,7 +4270,7 @@ window.addEventListener('keydown', (e) => {
 let lastT = performance.now();
 
 function currentSpeed() {
-  const base = Math.min(MAX_SPEED, BASE_SPEED + state.distance * SPEED_RAMP);
+  const base = Math.min(MAX_SPEED, eraBaseSpeed(currentEra()) + state.distance * SPEED_RAMP);
   // The star deliberately breaks the MAX_SPEED ceiling — going faster than
   // the game normally allows is the whole point of it.
   return state.starT > 0 ? base * STAR_SPEED_MULT : base;
@@ -4250,10 +4285,18 @@ function updatePlaying(dt) {
   state.runTime += dt;
   updateProgressBar();
   updateFinishPortal(dt);
-  // The finish line. Checked before anything else this frame can spawn or
-  // collide, so the run ends cleanly on the metre rather than a hazard
-  // landing in the same frame as the win.
-  if (state.distance >= currentEra().goal) { levelComplete(); return; }
+  // The unlock threshold. 2026-09-10: this used to end the run outright
+  // ("levelComplete()"); now it fires once, announces whatever it opened,
+  // and lets the run carry straight on — see announceUnlock().
+  if (!state.unlockAnnounced && state.distance >= currentEra().goal) {
+    state.unlockAnnounced = true;
+    announceUnlock();
+  }
+
+  // Keep the corner table built out ahead of wherever the player has
+  // actually reached — a run has no fixed length any more, so this has to
+  // keep extending for as long as the run does, not just once at the start.
+  if (terrainActive()) extendCornersTo(state.distance + CORNER_LOOKAHEAD);
 
   // The path table is what every position below is read out of, so it has to
   // be rebuilt for this frame's distance before anything consults it.
@@ -4467,7 +4510,7 @@ function updatePlaying(dt) {
   state.spawnTimer -= dt;
   if (state.spawnTimer <= 0) {
     if (obstacleSpawnEnabled) spawnObstacle();
-    const interval = Math.max(MIN_SPAWN_INTERVAL, BASE_SPAWN_INTERVAL - state.distance * SPAWN_RAMP);
+    const interval = Math.max(MIN_SPAWN_INTERVAL, eraBaseSpawnInterval(currentEra()) - state.distance * SPAWN_RAMP);
     state.spawnTimer = interval * (0.8 + Math.random() * 0.4);
   }
 
@@ -4784,10 +4827,11 @@ function animate() {
     if (state.gameOverT >= GAMEOVER_RESTART_DELAY) startCountdown();
   }
 
-  // Multiplayer: each turn's result screen (finished or not) clears itself
-  // after a few seconds, same idea as the auto-restart above but advancing
-  // to the next player (or the leaderboard) instead of retrying.
-  if (multiplayer.active && (state.phase === 'gameover' || state.phase === 'levelComplete')) {
+  // Multiplayer: each turn's result screen clears itself after a few
+  // seconds, same idea as the auto-restart above but advancing to the next
+  // player (or the leaderboard) instead of retrying. gameover is the only
+  // way a turn ends now (2026-09-10) — there is no more mid-turn "finished".
+  if (multiplayer.active && state.phase === 'gameover') {
     state.turnEndT += dt;
     if (state.turnEndT >= TURN_END_AUTO_DELAY) advanceMultiplayerTurn();
   }
@@ -4941,6 +4985,17 @@ window.__mrDebug = {
   playerX: () => player.position.x,
   playerY: () => player.position.y,
   groundTilt: () => ({ y: ground.position.y, rotX: ground.rotation.x, rotZ: ground.rotation.z }),
+  // --- 2026-09-10: endless levels + per-era difficulty ---------------
+  unlockAnnounced: () => state.unlockAnnounced,
+  cornerCount: () => corners.length,
+  cornerFrontier: () => cornerD,
+  extendCornersTo: (d) => extendCornersTo(d),
+  unlockToastText: () => (unlockToastEl ? unlockToastEl.textContent : ''),
+  unlockToastVisible: () => !!(unlockToastEl && unlockToastEl.classList.contains('show')),
+  eraTier: (id) => eraTier(ERA_BY_ID[id] || currentEra()),
+  eraBaseSpeed: (id) => eraBaseSpeed(ERA_BY_ID[id] || currentEra()),
+  eraBaseSpawnInterval: (id) => eraBaseSpawnInterval(ERA_BY_ID[id] || currentEra()),
+  best: (id) => loadProgress().best[id] || 0,
 };
 
 // Paint the initial (pairing) state once before the loop starts. Without

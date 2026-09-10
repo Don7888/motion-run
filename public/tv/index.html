@@ -565,6 +565,12 @@
     background: linear-gradient(90deg, var(--cyan), var(--mint));
     transition: width 0.18s linear;
   }
+  /* Once the unlock threshold is passed the bar has nothing left to climb
+     toward — held full and gold rather than sitting at a permanent 100%
+     that invites the question of why the run hasn't ended. */
+  .progress-fill.endless {
+    background: linear-gradient(90deg, var(--gold), #fff2b8);
+  }
   .progress-label {
     position: absolute; inset: 0; display: flex;
     align-items: center; justify-content: center;
@@ -703,17 +709,12 @@
     75% { transform: translateY(-10px) scale(1.045) translateX(9px); }
   }
 
-  /* ---- Level complete -------------------------------------------------- */
-  /* Star rating and the run breakdown, taking the idea from the results
-     mockup in the UI pack but driving it from real values — the pack's own
-     PNG has the numbers painted into the image. */
-  .rating { margin: 0 0 6px; line-height: 1; }
-  .rating .rating-star {
-    font-size: 44px; color: var(--gold);
-    text-shadow: 0 4px 0 var(--gold-dk);
-    margin: 0 4px;
-  }
-  .rating .rating-star.empty { color: #5B4B8A; text-shadow: 0 4px 0 #3A2E5C; }
+  /* ---- Run-over stats ---------------------------------------------------
+     The run breakdown, taking the idea from the results mockup in the UI
+     pack but driving it from real values — the pack's own PNG has the
+     numbers painted into the image. Used on the game-over screen, the one
+     screen every run ends on since reaching an era's unlock threshold
+     stopped ending runs (2026-09-10). */
   /* Four tiles on ONE row: wrapping them onto a second row pushed the
      panel past the bottom of a 720p screen, which a Fire TV cannot scroll. */
   .result-stats {
@@ -733,15 +734,27 @@
     display: block; font-size: 22px; font-weight: 900; color: #fff;
     text-shadow: 0 3px 0 rgba(11,4,26,0.6);
   }
-  #levelCompletePanel { padding: 22px 40px 26px; }
-  #levelCompletePanel .score-big { font-size: 46px; margin: 6px 0; }
-  .unlock-banner {
-    display: inline-block; margin: 12px auto 0;
-    background: var(--mint); color: #06301A;
-    border-radius: 20px; padding: 10px 26px 13px;
-    font-size: 24px; font-weight: 900; letter-spacing: 0.5px;
-    box-shadow: 0 7px 0 var(--mint-dk);
+  #gameOverPanel .score-big { font-size: 46px; margin: 6px 0; }
+
+  /* ---- Unlock toast (2026-09-10) ---------------------------------------
+     Reaching an era's threshold no longer stops the run for a results
+     screen — it just banks the unlock and puts this up for a few seconds
+     while play carries straight on. Sits below the HUD chips, well clear
+     of the road ahead, and never intercepts input (pointer-events: none). */
+  #unlockToast {
+    position: fixed; top: 108px; left: 50%;
+    transform: translate(-50%, -14px);
+    background: var(--gold); color: var(--ink);
+    border: 4px solid var(--gold-dk);
+    border-radius: 999px;
+    padding: 14px 32px 16px;
+    font-size: 20px; font-weight: 900; letter-spacing: 0.4px;
+    text-transform: uppercase; white-space: nowrap;
+    box-shadow: 0 7px 0 var(--gold-dk), 0 20px 40px rgba(11,4,26,0.5);
+    z-index: 32; pointer-events: none;
+    opacity: 0; transition: opacity 0.25s ease, transform 0.25s ease;
   }
+  #unlockToast.show { opacity: 1; transform: translate(-50%, 0); }
 
   /* TVs at 720p, and the phone screens that share this stylesheet, can't
      fit four full-size cards side by side. */
@@ -778,7 +791,6 @@
     .moves-strip .move-tile { padding: 6px 8px 5px; min-width: 54px; }
     .moves-strip .move-icon { font-size: 24px; }
     .result-stats > div { padding: 4px 9px 6px; min-width: 72px; }
-    .rating .rating-star { font-size: 32px; }
     .score-big { font-size: 48px; margin: 4px 0 10px; }
   }
 
@@ -986,6 +998,12 @@
   <canvas id="gameCanvas"></canvas>
   <div id="vignette"></div>
   <div id="flash"></div>
+  <!-- 2026-09-10 ("no end, but tell the player when the next level is
+       unlocked"): a run keeps going right through the old finish line, so
+       this is a toast, not a screen — shown by showUnlockToast() in
+       game.js, sitting just below the score/lives chips so it never
+       obstructs the road ahead. -->
+  <div id="unlockToast"></div>
 
   <div id="hud">
     <div class="top-bar">
@@ -1174,15 +1192,6 @@
     <p class="hint pulse">🎮 ◀ ▶ + OK · 📱 step + jump — either picks a level</p>
   </div>
 
-  <div id="levelCompletePanel" class="overlay-panel" style="display:none;">
-    <h1 id="levelCompleteTitle">Era complete!</h1>
-    <div class="rating" id="levelCompleteStars"></div>
-    <div class="score-big"><span id="levelCompleteScore">0</span> pts</div>
-    <div class="result-stats" id="levelCompleteStats"></div>
-    <div class="unlock-banner" id="levelCompleteUnlock">🔓 Next era unlocked</div>
-    <p class="hint pulse" id="levelCompleteHint">🎮 Press OK on your remote (or tap Jump/Punch on your phone) to continue</p>
-  </div>
-
   <!-- Multiplayer: shown for a moment between turns, then the countdown
        starts on its own — see TURN_INTRO_DELAY in game.js. No button press
        needed, since the phone that needs to see this is whichever one is
@@ -1214,7 +1223,10 @@
              mr_test_orientation.js), so it stays a real, visible line
              rather than getting folded into the artwork. -->
         <p class="placement-hint" id="placementOrientationHint">📱↔️ Make sure your phone is propped up sideways (landscape), facing you</p>
-        <p class="hint pulse sr-only">🎮 Step back, then press OK</p>
+        <!-- The actual "what do I do" instruction lives in the control badge
+             at the top of the screen now (see CONTROL_BADGE_TEXT.placement
+             in game.js) — it used to be a line here too, but marked
+             sr-only, so nobody watching the TV could actually see it. -->
       </div>
     </div>
   </div>
@@ -1233,7 +1245,7 @@
 
   <div id="calibrationPanel" class="overlay-panel" style="display:none;">
     <h1>Quick Setup</h1>
-    <p class="cal-step-counter" id="calStepCounter">Step 1 of 4</p>
+    <p class="cal-step-counter" id="calStepCounter">Move 1 of 4</p>
     <div class="cal-move-icon" id="calMoveIcon">⬅️</div>
     <div class="cal-move-text" id="calMoveText">Step LEFT</div>
     <p class="hint">📱 Copy the move · 🎮 Press OK to skip ahead</p>
@@ -1251,6 +1263,11 @@
     <h1 id="gameOverTitle">Run Over!</h1>
     <div class="score-big"><span id="finalScore">0</span> pts</div>
     <p class="new-high-score" id="newHighScoreNote" style="display:none;">🏆 New High Score!</p>
+    <!-- 2026-09-10: this is now the ONE screen every run ends on — reaching
+         an era's unlock threshold no longer stops the run, so the little
+         breakdown that used to live on that separate results screen moved
+         here instead. -->
+    <div class="result-stats" id="gameOverStats"></div>
     <p class="hint pulse" id="gameOverHint">🎮 Press OK on your remote (or tap Jump/Punch on your phone) to run again</p>
     <p class="hint" id="gameOverSubHint">🎮 Press Back to pick a different era</p>
   </div>
