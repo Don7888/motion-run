@@ -1,0 +1,1281 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MotionQuest — TV</title>
+<link rel="manifest" href="./manifest.json" />
+<link rel="icon" type="image/png" href="./icons/favicon-64.png" />
+<meta name="theme-color" content="#0B1046" />
+<!-- Self-hosted (2026-09-08): the Join screen redesign below is the one
+     screen in the game that leans on real display type instead of the
+     system-font stack the rest of the CSS deliberately sticks to (see the
+     "NO WEB FONT" note further down). Self-hosting keeps that a same-origin,
+     no-third-party-CDN fetch — and these two files are variable fonts (one
+     file covers every weight actually used), so it's one small request per
+     family, cached by the existing service worker after the first load. -->
+<link rel="preload" href="./fonts/Fredoka-Variable.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="./fonts/Nunito-Variable.woff2" as="font" type="font/woff2" crossorigin>
+<style>
+  /* =====================================================================
+     2026-09-03 "make it look like a real published TV game" pass.
+     Replaces the previous dark-navy frosted-glass treatment with the
+     chunky, candy-coloured arcade language of the reference screens Don
+     sent: flat saturated blocks, hard offset shadows instead of soft
+     blurs, big rounded-rect cards, extruded "press-down" buttons, and
+     pill badges with heavy white type.
+
+     Two deliberate constraints carried over from earlier rounds:
+
+     1. NO WEB FONT. Same reasoning as the round-5 pass — a Fire TV Stick
+        doesn't need a render-blocking font fetch and a flash of unstyled
+        text on every menu. The chunky look here comes from weight 900,
+        tightened letter-spacing and hard text shadows on the system
+        stack. (A self-hosted font file in the repo is the option if the
+        exact reference typeface is ever wanted — no third-party CDN.)
+
+     2. THIS IS CHEAPER TO RENDER THAN WHAT IT REPLACES, which matters on
+        this hardware. Every `backdrop-filter: blur()` is gone — those
+        are genuinely expensive per-frame on a weak mobile GPU — and the
+        big soft `box-shadow` blurs are now mostly hard offsets (no blur
+        radius), which cost almost nothing. Animations stay on transform
+        and opacity only.
+
+     Pure CSS/markup: game.js is untouched by this pass, and every id and
+     class it reads or writes (#scoreVal, .heart.lost, .control-badge
+     .remote/.phone, body.badge-visible, #countdown.tick, .silhouette.good,
+     …) is preserved.
+     ===================================================================== */
+  :root {
+    /* Candy-arcade palette. Each "solid" colour has a matching darker
+       shade used as its extruded underside, so buttons and pills read as
+       physical objects rather than flat rectangles. */
+    --ink:        #1B0B3B;
+    --grape-900:  #240D4A;
+    --grape-800:  #331466;
+    --grape-700:  #421C82;
+    --violet:     #7C3AED;
+    --violet-dk:  #5418B8;
+    --magenta:    #FF2D95;
+    --magenta-dk: #C10E6C;
+    --mint:       #4ADE80;
+    --mint-dk:    #1FA457;
+    --cyan:       #22D3EE;
+    --cyan-dk:    #0B94AF;
+    --gold:       #FFD93D;
+    --gold-dk:    #D3A400;
+    --coral:      #FF5A5F;
+
+    /* Kept as aliases so any stray older rule still resolves to something
+       sensible in the new palette rather than to nothing. */
+    --accent: var(--cyan);
+    --accent-2: var(--violet);
+  }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: var(--grape-800); color: #fff;
+    font-family: system-ui, 'Segoe UI', Roboto, -apple-system, sans-serif;
+    overflow: hidden;
+  }
+  #gameCanvas { display: block; width: 100vw; height: 100vh; }
+
+  /* Depth vignette, now tinted to the grape palette so gameplay sits in
+     the same world as the menus. Decorative only; above the canvas,
+     below every HUD/panel element. */
+  #vignette {
+    position: fixed; inset: 0; pointer-events: none;
+    background: radial-gradient(ellipse at center, transparent 48%, rgba(27, 11, 59, 0.55) 100%);
+  }
+
+  /* ---------------------------------------------------------------
+     HUD — three chunky pills across the top
+     --------------------------------------------------------------- */
+  #hud {
+    position: fixed; inset: 0; pointer-events: none;
+    display: flex; flex-direction: column; justify-content: space-between;
+  }
+  .top-bar {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    padding: 26px 40px; font-size: 15px; font-weight: 900;
+  }
+  .top-bar > div {
+    background: var(--grape-900);
+    border: 4px solid var(--violet);
+    border-radius: 22px;
+    padding: 10px 22px 12px;
+    box-shadow: 0 6px 0 rgba(11, 4, 26, 0.55);
+    text-transform: uppercase; letter-spacing: 1.6px;
+    line-height: 1.15;
+  }
+  .top-bar .stat-value {
+    display: block; font-size: 40px; font-weight: 900;
+    letter-spacing: -1px; text-transform: none;
+    text-shadow: 0 3px 0 rgba(11, 4, 26, 0.6);
+  }
+  .top-bar .score-pill { color: #fff; }
+  .top-bar .score-pill .stat-value { color: var(--gold); }
+  .lives {
+    display: flex; gap: 10px; font-size: 34px; align-items: center;
+    letter-spacing: 0 !important;
+  }
+  .heart.lost { opacity: 0.22; filter: grayscale(1); }
+  .high-score { text-align: center; color: #fff; border-color: var(--gold) !important; }
+  .high-score .stat-value { color: var(--gold); }
+
+  /* ---------------------------------------------------------------
+     Panels — solid cards with a bright border and a hard underside
+     --------------------------------------------------------------- */
+  .overlay-panel {
+    pointer-events: auto;
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    background: var(--grape-700);
+    border: 6px solid var(--violet);
+    border-radius: 36px;
+    padding: 34px 54px 40px;
+    text-align: center;
+    box-shadow:
+      0 14px 0 var(--violet-dk),
+      0 26px 50px rgba(11, 4, 26, 0.55),
+      0 4px 0 rgba(255, 255, 255, 0.18) inset;
+    max-width: 660px;
+    max-height: 82vh;
+    overflow-y: auto;
+    animation: panelIn 0.34s cubic-bezier(0.2, 0.9, 0.3, 1.1);
+  }
+  /* The control badge is a fixed pill near the top of the screen; a tall
+     centred panel (the calibration one especially) used to run straight
+     underneath it, so the pill sat on top of the panel's heading. Nudge
+     panels down whenever a badge is showing. Toggled by
+     updateControlBadge() in game.js. */
+  body.badge-visible .overlay-panel {
+    top: calc(50% + 38px);
+    max-height: 72vh;
+  }
+  @keyframes panelIn {
+    from { opacity: 0; transform: translate(-50%, -50%) scale(0.9); }
+    to   { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  }
+
+  /* Panel titles are banners, like the reference screens' headline
+     ribbons — a solid magenta block with its own extruded underside. */
+  .overlay-panel h1 {
+    display: inline-block;
+    font-size: 34px; font-weight: 900;
+    letter-spacing: 0.5px; text-transform: uppercase;
+    margin: 0 0 18px;
+    padding: 12px 30px 14px;
+    background: var(--magenta);
+    color: #fff;
+    border-radius: 20px;
+    box-shadow: 0 7px 0 var(--magenta-dk);
+    text-shadow: 0 3px 0 rgba(0, 0, 0, 0.22);
+  }
+  .overlay-panel p {
+    font-size: 20px; line-height: 1.5; margin: 10px 0;
+    font-weight: 700; color: #E9DDFF;
+  }
+  /* Kept deliberately bright: this is read from a sofa, several feet away,
+     so the usual "muted secondary text" contrast is too low here. */
+  .hint { font-size: 17px !important; color: #D6C6FF !important; font-weight: 700 !important; }
+  .pulse { animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+
+  /* The room code reads as a physical key-cap: white face, dark type,
+     hard underside. Highest-contrast thing on the pairing screen, which
+     is what you want someone squinting at it from a sofa to find. */
+  .room-code {
+    display: inline-block; margin: 18px 0; padding: 12px 26px 14px;
+    font-size: 46px; font-weight: 900; letter-spacing: 7px;
+    background: #fff; color: var(--ink);
+    border-radius: 20px;
+    box-shadow: 0 8px 0 rgba(11, 4, 26, 0.45);
+  }
+
+  .score-big {
+    font-size: 72px; font-weight: 900; letter-spacing: -2px;
+    margin: 6px 0 20px; color: var(--gold);
+    text-shadow: 0 5px 0 rgba(11, 4, 26, 0.5);
+  }
+
+  /* Extruded press-down button: the face lifts off a solid darker slab,
+     and pressing sinks it into that slab. */
+  .action-btn {
+    margin-top: 16px; font-size: 20px; padding: 16px 34px;
+    border-radius: 18px; border: none;
+    background: var(--mint); color: var(--ink);
+    font-weight: 900; cursor: pointer; letter-spacing: 0.4px;
+    text-transform: uppercase;
+    box-shadow: 0 7px 0 var(--mint-dk);
+    transition: transform 0.06s, box-shadow 0.06s;
+  }
+  .action-btn:active {
+    transform: translateY(5px);
+    box-shadow: 0 2px 0 var(--mint-dk);
+  }
+
+  #combo {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    font-size: 46px; font-weight: 900; color: var(--gold);
+    text-shadow: 0 4px 0 rgba(11, 4, 26, 0.7);
+    opacity: 0; transition: opacity 0.15s;
+  }
+  #flash {
+    position: fixed; inset: 0; background: var(--coral); opacity: 0;
+    pointer-events: none; transition: opacity 0.1s;
+  }
+
+  /* ---------------------------------------------------------------
+     Pre-run countdown — a sticker-style outlined numeral
+     --------------------------------------------------------------- */
+  #countdown {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    font-size: 200px; font-weight: 900; letter-spacing: -6px; color: #fff;
+    /* Layered offsets fake a thick outline far more cheaply than an SVG
+       stroke or a filter would on this hardware. */
+    text-shadow:
+      -6px -6px 0 var(--ink),  6px -6px 0 var(--ink),
+      -6px  6px 0 var(--ink),  6px  6px 0 var(--ink),
+       0px  14px 0 var(--violet-dk);
+    z-index: 26; pointer-events: none; line-height: 1;
+  }
+  #countdown.tick { animation: countPop 0.5s cubic-bezier(0.2, 0.9, 0.3, 1); }
+  @keyframes countPop {
+    from { opacity: 0.2; transform: translate(-50%, -50%) scale(1.7); }
+    to   { opacity: 1;   transform: translate(-50%, -50%) scale(1); }
+  }
+  #countdownHint {
+    position: fixed; top: calc(50% + 140px); left: 50%; transform: translateX(-50%);
+    font-size: 22px; font-weight: 900; z-index: 26; pointer-events: none;
+    text-transform: uppercase; letter-spacing: 1.5px;
+    background: var(--grape-900); color: #fff;
+    border: 4px solid var(--cyan);
+    border-radius: 999px; padding: 10px 26px 12px;
+    box-shadow: 0 6px 0 rgba(11, 4, 26, 0.55);
+  }
+
+  /* ---------------------------------------------------------------
+     Guided setup
+     --------------------------------------------------------------- */
+  #calibrationPanel { padding-top: 28px; padding-bottom: 30px; }
+  .cal-move-icon { font-size: 82px; line-height: 1; margin: 6px 0 2px; }
+  .cal-move-text {
+    font-size: 46px; font-weight: 900; letter-spacing: -0.5px;
+    margin: 2px 0 10px; color: var(--mint);
+    text-shadow: 0 4px 0 rgba(11, 4, 26, 0.5);
+    text-transform: uppercase;
+  }
+  /* Progress tiles: done / doing now / still to come, as three clearly
+     different shapes rather than three similar dots. Built by
+     renderCalDots() in game.js. */
+  .cal-dots { display: flex; gap: 12px; justify-content: center; margin-top: 16px; }
+  .cal-tile {
+    width: 54px; height: 54px; border-radius: 16px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 24px; font-weight: 900; color: #fff;
+    background: var(--grape-900);
+    border: 4px solid transparent;
+    box-shadow: 0 5px 0 rgba(11, 4, 26, 0.55);
+  }
+  .cal-tile.done {
+    background: var(--mint); color: var(--ink);
+    box-shadow: 0 5px 0 var(--mint-dk);
+  }
+  .cal-tile.current {
+    border-color: var(--cyan); color: var(--cyan);
+    animation: tileBob 1s ease-in-out infinite;
+  }
+  .cal-tile.todo { opacity: 0.45; }
+  @keyframes tileBob {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-5px); }
+  }
+  /* Small dark counter chip on its own line under the title, like the
+     reference screens' level/step tags. */
+  .overlay-panel p.cal-step-counter {
+    display: block; width: fit-content; margin: 0 auto 8px;
+    font-size: 14px !important; font-weight: 900 !important;
+    text-transform: uppercase; letter-spacing: 2px;
+    background: var(--grape-900); color: var(--cyan) !important;
+    border-radius: 999px; padding: 7px 18px 8px;
+    box-shadow: 0 4px 0 rgba(11, 4, 26, 0.5);
+  }
+
+  .setup-icon { font-size: 76px; line-height: 1; margin: 2px 0 10px; }
+  .silhouette-wrap { margin: 6px 0 10px; }
+  .silhouette {
+    fill: none; stroke: var(--sil-color, #ff8a8a); stroke-width: 7;
+    stroke-linejoin: round; stroke-linecap: round;
+    transition: stroke 0.2s ease;
+  }
+  .silhouette.good { animation: silPulse 1s ease-in-out infinite; }
+  @keyframes silPulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.55; }
+  }
+  .overlay-panel p.setup-status-text {
+    font-size: 36px !important; font-weight: 900 !important;
+    letter-spacing: -0.5px; margin: 8px 0 10px;
+    color: var(--cyan) !important;
+    text-shadow: 0 4px 0 rgba(11, 4, 26, 0.5);
+    text-transform: uppercase;
+  }
+
+  /* Gold callout chip for the one instruction that must not be missed. */
+  .overlay-panel p.setup-callout {
+    display: inline-block; margin: 12px 0; padding: 12px 24px 14px;
+    background: var(--gold); color: var(--ink) !important;
+    border-radius: 16px; font-weight: 900 !important; font-size: 19px !important;
+    box-shadow: 0 6px 0 var(--gold-dk);
+  }
+
+  /* ---------------------------------------------------------------
+     Moves-at-a-glance strip — replaces a sentence of prose on the Ready
+     screen with four small icon tiles, one per move. Built from CAL_META
+     in game.js (renderMovesStrip()) so the icons never drift out of sync
+     with the ones the guided setup itself uses.
+     --------------------------------------------------------------- */
+  .moves-strip { display: flex; justify-content: center; gap: 10px; margin: 12px 0; }
+  .moves-strip .move-tile {
+    background: var(--grape-900); border: 3px solid var(--violet);
+    border-radius: 16px; padding: 8px 10px 6px; min-width: 64px;
+    box-shadow: 0 5px 0 rgba(11,4,26,0.55);
+  }
+  .moves-strip .move-icon { font-size: 30px; line-height: 1; }
+  .moves-strip .move-label {
+    display: block; margin-top: 4px; font-size: 11px; font-weight: 900;
+    text-transform: uppercase; letter-spacing: 0.5px; color: #C7B8F5;
+  }
+
+  /* ---------------------------------------------------------------
+     Multiplayer roster — up to 4 small slots, filled in as phones join.
+     Deliberately tiny: this sits on the tallest screens in the game (the
+     ready panel), so it earns its place in one compact row rather than a
+     full list. --------------------------------------------------------- */
+  .roster-row { display: flex; justify-content: center; gap: 8px; margin: 4px 0 14px; }
+  .roster-slot {
+    width: 40px; height: 40px; border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 17px; font-weight: 900; color: #fff;
+    background: var(--grape-900); border: 3px solid #5B4B8A;
+    box-shadow: 0 4px 0 rgba(11,4,26,0.5);
+    opacity: 0.4;
+  }
+  .roster-slot.filled { opacity: 1; border-color: var(--slot-color, var(--cyan)); }
+  .overlay-panel p.hint#readyJoinHint { font-size: 15px !important; }
+
+  .turn-swatch {
+    width: 46px; height: 46px; border-radius: 14px; margin: 8px auto 4px;
+    background: var(--slot-color, var(--cyan)); border: 3px solid #fff;
+    box-shadow: 0 5px 0 rgba(11,4,26,0.5);
+  }
+
+  /* ---------------------------------------------------------------
+     Leaderboard — ranked rows, gold for the winner. Times/DNF come from
+     game.js's formatTime()/multiplayer.results, same source as the
+     single-player result stats.
+     --------------------------------------------------------------- */
+  .leaderboard-list { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; min-width: 340px; }
+  .leaderboard-row {
+    display: flex; align-items: center; gap: 12px;
+    background: var(--grape-900); border: 3px solid var(--violet);
+    border-radius: 16px; padding: 8px 16px;
+    box-shadow: 0 4px 0 rgba(11,4,26,0.5);
+  }
+  .leaderboard-row.winner { border-color: var(--gold); box-shadow: 0 4px 0 var(--gold-dk); }
+  .leaderboard-rank { font-size: 20px; font-weight: 900; color: var(--gold); width: 28px; }
+  .leaderboard-swatch { width: 20px; height: 20px; border-radius: 6px; background: var(--slot-color, var(--cyan)); flex-shrink: 0; }
+  .leaderboard-name { flex: 1; text-align: left; font-weight: 900; font-size: 17px; }
+  .leaderboard-time { font-weight: 900; font-size: 17px; color: var(--cyan); }
+  .leaderboard-time.dnf { color: #C7B8F5; font-size: 13px; }
+
+  /* ---------------------------------------------------------------
+     "What do I use right now?" badge — see updateControlBadge()
+     --------------------------------------------------------------- */
+  .control-badge {
+    position: fixed; top: 26px; left: 50%; transform: translateX(-50%);
+    background: var(--grape-900);
+    border: 4px solid var(--violet);
+    border-radius: 999px;
+    padding: 11px 28px 13px; font-size: 17px; font-weight: 900;
+    letter-spacing: 0.6px; color: #fff;
+    z-index: 30; pointer-events: none;
+    box-shadow: 0 6px 0 rgba(11, 4, 26, 0.55);
+  }
+  .control-badge.remote { border-color: var(--gold); color: var(--gold); }
+  .control-badge.phone { border-color: var(--cyan); color: var(--cyan); }
+
+  /* ---------------------------------------------------------------
+     Scan-to-join (2026-09-03)
+     A plain white card so the code keeps the quiet, high-contrast
+     border it needs to scan reliably. Sized by CSS, not by the SVG's
+     own intrinsic size, so it stays sharp (the SVG is drawn on a
+     1-unit-per-module grid — see lib/qrcode-lite.js's toSVG()).
+     Scan and type-the-code sit SIDE BY SIDE rather than stacked:
+     stacked, the pairing panel ran to ~930px tall, which overflows its
+     own max-height even on a 1080p TV — and an overflowing panel is
+     genuinely stuck there, since nothing on a Fire TV remote scrolls it.
+     --------------------------------------------------------------- */
+  #pairingPanel { max-width: 840px; }
+  .join-split {
+    display: flex; align-items: center; justify-content: center; gap: 26px;
+    margin: 12px 0 8px;
+  }
+  .join-col { flex: 0 1 auto; }
+  .join-col p { margin: 4px 0; }
+  .join-col.scan { width: 214px; }
+  .join-or {
+    font-size: 15px; font-weight: 900; text-transform: uppercase; letter-spacing: 2px;
+    color: var(--ink); background: var(--gold);
+    border-radius: 999px; padding: 8px 14px 9px;
+    box-shadow: 0 5px 0 var(--gold-dk);
+    align-self: center; flex-shrink: 0;
+  }
+  .qr-card {
+    width: 194px; height: 194px; margin: 10px auto 0;
+    background: #fff; border-radius: 20px; padding: 10px;
+    box-shadow: 0 8px 0 rgba(11, 4, 26, 0.45);
+  }
+  .qr-card img { display: block; width: 100%; height: 100%; }
+  /* Trimmed so six digits still fit the narrower column the side-by-side
+     layout gives them. */
+  .join-col .room-code { font-size: 38px; letter-spacing: 5px; margin: 10px 0 0; padding: 11px 20px 13px; }
+
+  .overlay-panel p.new-high-score {
+    display: inline-block;
+    color: var(--ink) !important; background: var(--gold);
+    font-weight: 900 !important; font-size: 20px !important;
+    margin: 2px 0 14px; padding: 10px 22px 12px;
+    border-radius: 999px; box-shadow: 0 6px 0 var(--gold-dk);
+  }
+
+  /* Star countdown (2026-09-04) — sits between the HUD pills and the timing
+     cue, and only ever appears while the star is running. The action prompt
+     is suppressed for that whole window (see updateActionPrompt), so these
+     two can never fight for the same strip of screen. */
+  #starTimer {
+    position: fixed; top: 140px; left: 50%; transform: translateX(-50%);
+    font-size: 30px; font-weight: 900; letter-spacing: 1px;
+    background: var(--gold); color: var(--ink);
+    border-radius: 999px; padding: 8px 28px 11px;
+    box-shadow: 0 7px 0 var(--gold-dk);
+    z-index: 27; pointer-events: none;
+    animation: starPulse 0.6s ease-in-out infinite;
+  }
+  @keyframes starPulse {
+    0%, 100% { transform: translateX(-50%) scale(1); }
+    50% { transform: translateX(-50%) scale(1.07); }
+  }
+
+  /* Timing cue — pulses shortly before an obstacle in the player's lane
+     reaches them, so jump/punch timing is learnable. See
+     updateActionPrompt() in game.js. */
+  #actionPrompt {
+    /* Clear of the HUD pills above it — they're taller now. */
+    position: fixed; top: 172px; left: 50%; transform: translateX(-50%);
+    font-size: 44px; font-weight: 900; color: #fff; letter-spacing: 1px;
+    z-index: 25; pointer-events: none; text-transform: uppercase;
+    background: var(--magenta);
+    border-radius: 20px; padding: 10px 28px 13px;
+    box-shadow: 0 7px 0 var(--magenta-dk);
+    animation: promptPulse 0.45s ease-in-out infinite;
+  }
+  @keyframes promptPulse {
+    0%, 100% { transform: translateX(-50%) scale(1); }
+    50% { transform: translateX(-50%) scale(1.1); }
+  }
+
+  /* =====================================================================
+     2026-09-04 — MOTIONQUEST
+     Rebrand, era picker and the finish-line progress bar. Same constraints
+     as the pass above: no web font, no backdrop-filter, transforms and
+     opacity only in animations.
+     ===================================================================== */
+
+  /* ---- The wordmark ---------------------------------------------------
+     Rebuilt in CSS from the key art rather than dropped in as an image:
+     it stays crisp at any TV resolution, costs no extra download, and
+     scales down for the phone screens. "MOTION" is the cool steel half,
+     "QUEST" the gold half, both with the hard extruded underside the rest
+     of this stylesheet already uses. */
+  /* The wordmark replaces the usual magenta title banner rather than
+     sitting inside one — a logo in a box reads as a label, not a logo. */
+  h1.wordmark {
+    display: flex; flex-direction: column; align-items: center;
+    gap: 2px; line-height: 0.92;
+    background: none; box-shadow: none; padding: 0;
+    margin: 0 0 18px; text-shadow: none;
+    text-transform: none; letter-spacing: normal;
+  }
+  .wordmark .wm-row { display: block; font-weight: 900; letter-spacing: 3px; }
+  /* Sized against viewport HEIGHT, not a fixed pixel size: the pairing
+     panel is the tallest screen in the game and a fixed 76/84px wordmark
+     pushed it past the bottom of a 720p TV, which has no way to scroll. */
+  .wordmark .wm-motion {
+    font-size: clamp(30px, 6.6vh, 76px); color: #EAF3FF;
+    text-shadow:
+      0 4px 0 #6C8FD6, 0 8px 0 #35509B,
+      0 11px 0 #1B2E63, 0 14px 18px rgba(0,0,0,0.5);
+  }
+  .wordmark .wm-quest {
+    font-size: clamp(34px, 7.4vh, 84px); color: var(--gold);
+    text-shadow:
+      0 4px 0 #C98F0B, 0 8px 0 #8A5F00,
+      0 11px 0 #4F3600, 0 14px 18px rgba(0,0,0,0.5);
+  }
+  .wordmark .wm-tagline {
+    margin-top: 10px; font-size: clamp(11px, 1.6vh, 17px); font-weight: 900;
+    letter-spacing: 6px; color: #8FD8FF; text-transform: uppercase;
+    text-shadow: 0 2px 0 rgba(11,4,26,0.6);
+  }
+  /* The pairing screen gets the key art behind it, dimmed hard so the QR
+     code and room code stay the most legible things on screen — the art is
+     scene-setting, not the message. */
+  #pairingPanel {
+    background-image:
+      linear-gradient(rgba(12,8,42,0.88), rgba(12,8,42,0.95)),
+      url('./art/keyart.jpg');
+    background-size: cover; background-position: center;
+  }
+  /* The pairing panel carries the most content of any screen (logo, QR,
+     URL, code, two hints) and was overflowing 720p. Tightened here rather
+     than globally so the other panels keep their generous padding. */
+  #pairingPanel { padding: 22px 44px 26px; }
+  #pairingPanel .hint { margin-top: 8px; }
+
+  /* ---- HUD: era badge + distance to the finish line ------------------- */
+  .bottom-bar {
+    display: flex; align-items: center; justify-content: center;
+    gap: 18px; padding: 0 40px 26px;
+  }
+  .era-badge {
+    background: var(--grape-900); border: 4px solid var(--violet);
+    border-radius: 20px; padding: 8px 18px 10px;
+    font-size: 18px; font-weight: 900; color: #fff;
+    letter-spacing: 1px; white-space: nowrap;
+    box-shadow: 0 6px 0 rgba(11,4,26,0.55);
+  }
+  .progress-track {
+    position: relative; width: min(46vw, 620px); height: 34px;
+    background: var(--grape-900); border: 4px solid var(--violet);
+    border-radius: 20px; overflow: hidden;
+    box-shadow: 0 6px 0 rgba(11,4,26,0.55);
+  }
+  .progress-fill {
+    position: absolute; inset: 0 auto 0 0; width: 0%;
+    background: linear-gradient(90deg, var(--cyan), var(--mint));
+    transition: width 0.18s linear;
+  }
+  .progress-label {
+    position: absolute; inset: 0; display: flex;
+    align-items: center; justify-content: center;
+    font-size: 15px; font-weight: 900; color: #fff;
+    letter-spacing: 1.4px;
+    text-shadow: 0 2px 0 rgba(11,4,26,0.85);
+  }
+
+  .mute-btn {
+    position: fixed; left: 26px; bottom: 24px; z-index: 40;
+    width: 54px; height: 54px; font-size: 24px; line-height: 1;
+    background: var(--grape-900); color: #fff;
+    border: 4px solid var(--violet); border-radius: 18px;
+    box-shadow: 0 5px 0 rgba(11,4,26,0.55);
+    cursor: pointer; padding: 0;
+  }
+  .mute-btn:active { transform: translateY(3px); box-shadow: 0 2px 0 rgba(11,4,26,0.55); }
+  .mute-btn.muted { opacity: 0.55; border-color: #5B4B8A; }
+
+  /* Sits directly to the right of the mute button, same baseline, so it
+     reads as a label on it rather than as another piece of HUD. */
+  #soundHint {
+    position: fixed; left: 92px; bottom: 24px; z-index: 40;
+    display: flex; align-items: center; height: 54px;
+    padding: 0 18px; border-radius: 16px;
+    background: var(--grape-900); color: #ffe9a8;
+    border: 4px solid var(--violet);
+    box-shadow: 0 5px 0 rgba(11,4,26,0.55);
+    font-size: 17px; font-weight: 800; white-space: nowrap;
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+
+  /* Party-size picker on the ready screen. Sits with the hint stack, so it
+     reads as part of "here is what happens next" rather than as a setting. */
+  .party-row {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    margin-bottom: 4px;
+  }
+  .party-label {
+    font-size: clamp(9px, 1.2vw, 12px); font-weight: 800; color: #ffe9a8;
+    text-shadow: 0 2px 6px rgba(11,4,26,0.85); letter-spacing: 0.5px;
+  }
+  .party-chip {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: clamp(18px, 2.4vh, 24px); height: clamp(18px, 2.4vh, 24px);
+    margin: 0 2px; border-radius: 7px;
+    border: 2px solid rgba(255,255,255,0.35);
+    background: rgba(11,4,26,0.55); color: #fff;
+    font-size: clamp(9px, 1.3vh, 12px); font-weight: 900;
+  }
+  .party-chip.on { background: #ffd166; color: #2a1a08; border-color: #fff; }
+
+  /* The bend-ahead sign. Top-centre, under the HUD pills, in road-sign
+     yellow/black so it reads as signage rather than as a prompt. */
+  #turnSign {
+    position: fixed; left: 50%; top: 96px; transform: translateX(-50%); z-index: 35;
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 20px; border-radius: 14px;
+    background: #ffd166; color: #2a1a08;
+    border: 4px solid #2a1a08;
+    box-shadow: 0 5px 0 rgba(11,4,26,0.45);
+    font-size: 20px; font-weight: 900; letter-spacing: 0.5px;
+    white-space: nowrap;
+  }
+  #turnSignArrow { font-size: 28px; line-height: 1; }
+
+  /* ---- Era picker ----------------------------------------------------- */
+  /* The picker is the one panel that wants to be wide: four cards side by
+     side is what makes it read as a timeline. .overlay-panel is
+     shrink-to-fit, so the width has to come from the grid itself. */
+  #levelSelectPanel { max-width: 94vw; padding: 24px 34px 28px; }
+  .level-grid {
+    display: flex; justify-content: center; align-items: stretch;
+    gap: 16px; margin: 18px 0 22px;
+    width: min(86vw, 1120px);
+  }
+  .level-card {
+    position: relative; flex: 1 1 0; min-width: 0;
+    background: var(--grape-800);
+    border: 5px solid var(--grape-700);
+    border-radius: 26px; overflow: hidden;
+    padding-bottom: 16px;
+    box-shadow: 0 8px 0 rgba(11,4,26,0.6);
+    /* Only transform/opacity animate — see the stylesheet header. */
+    transition: transform 0.14s ease-out, border-color 0.14s ease-out;
+  }
+  /* Each card is topped with the matching slice of Don's key art. */
+  .level-card::before {
+    content: ''; display: block; height: 168px;
+    background-size: cover; background-position: center;
+    background-color: var(--grape-900);
+  }
+  .level-card[data-era="dino"]::before    { background-image: url('./art/era-dino.jpg'); }
+  .level-card[data-era="rome"]::before    { background-image: url('./art/era-rome.jpg'); }
+  .level-card[data-era="present"]::before { background-image: url('./art/era-present.jpg'); }
+  .level-card[data-era="future"]::before  { background-image: url('./art/era-future.jpg'); }
+  /* The artwork already identifies each era, so an emoji on top of it is
+     just clutter — only the padlock earns its place, and only on the cards
+     that are actually locked. */
+  .level-card .level-icon { display: none; }
+  .level-card.locked .level-icon {
+    display: block;
+    position: absolute; top: 108px; left: 50%;
+    transform: translateX(-50%);
+    font-size: 48px; line-height: 1;
+    filter: drop-shadow(0 4px 6px rgba(11,4,26,0.9));
+  }
+  .level-card .level-name {
+    margin-top: 28px; padding: 0 8px;
+    font-size: 23px; font-weight: 900; color: #fff; letter-spacing: 0;
+    line-height: 1.1;
+    text-shadow: 0 3px 0 rgba(11,4,26,0.6);
+  }
+  .level-card .level-sub {
+    margin-top: 4px; padding: 0 10px;
+    font-size: 15px; font-weight: 700; color: #C7B8F5;
+  }
+  .level-card .level-meta {
+    margin-top: 8px; font-size: 14px; font-weight: 900;
+    color: var(--gold); letter-spacing: 1px; min-height: 17px;
+  }
+  .level-card.selected {
+    border-color: var(--gold);
+    transform: translateY(-10px) scale(1.045);
+    box-shadow: 0 14px 0 rgba(11,4,26,0.6), 0 0 0 6px rgba(255,217,61,0.28);
+  }
+  .level-card.locked { opacity: 0.55; }
+  .level-card.locked::before { filter: grayscale(1) brightness(0.5); }
+  .level-card.locked .level-icon { font-size: 44px; }
+  /* A locked card that's been pressed shakes rather than doing nothing, so
+     it's clear the button registered and the level didn't. */
+  .level-card.shake { animation: cardShake 0.3s ease-in-out; }
+  @keyframes cardShake {
+    0%, 100% { transform: translateY(-10px) scale(1.045) translateX(0); }
+    25% { transform: translateY(-10px) scale(1.045) translateX(-9px); }
+    75% { transform: translateY(-10px) scale(1.045) translateX(9px); }
+  }
+
+  /* ---- Level complete -------------------------------------------------- */
+  /* Star rating and the run breakdown, taking the idea from the results
+     mockup in the UI pack but driving it from real values — the pack's own
+     PNG has the numbers painted into the image. */
+  .rating { margin: 0 0 6px; line-height: 1; }
+  .rating .rating-star {
+    font-size: 44px; color: var(--gold);
+    text-shadow: 0 4px 0 var(--gold-dk);
+    margin: 0 4px;
+  }
+  .rating .rating-star.empty { color: #5B4B8A; text-shadow: 0 4px 0 #3A2E5C; }
+  /* Four tiles on ONE row: wrapping them onto a second row pushed the
+     panel past the bottom of a 720p screen, which a Fire TV cannot scroll. */
+  .result-stats {
+    display: flex; justify-content: center; gap: 8px;
+    margin: 10px 0 4px; flex-wrap: nowrap;
+  }
+  .result-stats > div {
+    background: var(--grape-900); border: 3px solid var(--violet);
+    border-radius: 16px; padding: 6px 12px 8px; min-width: 88px;
+    box-shadow: 0 4px 0 rgba(11,4,26,0.55);
+  }
+  .result-stats span {
+    display: block; font-size: 11px; font-weight: 900;
+    text-transform: uppercase; letter-spacing: 1.4px; color: #C7B8F5;
+  }
+  .result-stats b {
+    display: block; font-size: 22px; font-weight: 900; color: #fff;
+    text-shadow: 0 3px 0 rgba(11,4,26,0.6);
+  }
+  #levelCompletePanel { padding: 22px 40px 26px; }
+  #levelCompletePanel .score-big { font-size: 46px; margin: 6px 0; }
+  .unlock-banner {
+    display: inline-block; margin: 12px auto 0;
+    background: var(--mint); color: #06301A;
+    border-radius: 20px; padding: 10px 26px 13px;
+    font-size: 24px; font-weight: 900; letter-spacing: 0.5px;
+    box-shadow: 0 7px 0 var(--mint-dk);
+  }
+
+  /* TVs at 720p, and the phone screens that share this stylesheet, can't
+     fit four full-size cards side by side. */
+  @media (max-width: 1100px), (max-height: 620px) {
+    .wordmark .wm-motion { font-size: 52px; }
+    .wordmark .wm-quest { font-size: 58px; }
+    .wordmark .wm-tagline { font-size: 13px; letter-spacing: 4px; }
+    .level-card::before { height: 108px; }
+    .level-card .level-icon { top: 78px; font-size: 30px; }
+    .level-card .level-name { margin-top: 22px; font-size: 18px; }
+    .level-card .level-sub { font-size: 12px; }
+    .level-grid { gap: 10px; }
+    .progress-track { width: 52vw; height: 28px; }
+  }
+
+  /* ---------------------------------------------------------------
+     Short-screen safety net. Every panel is built to fit without this —
+     the fix for "had to scroll" was shortening the copy, not shrinking
+     type — but a Fire TV Stick genuinely cannot scroll a panel, so this
+     is a second line of defence on the shortest real screens (720p and
+     the odd oversized-UI TV) rather than something to rely on instead.
+     --------------------------------------------------------------- */
+  @media (max-height: 740px) {
+    .overlay-panel { padding: 22px 40px 26px; max-height: 94vh; }
+    body.badge-visible .overlay-panel { max-height: 88vh; }
+    .overlay-panel h1 { font-size: 26px; padding: 9px 22px 11px; margin-bottom: 12px; }
+    .overlay-panel p { font-size: 16px; margin: 7px 0; }
+    .setup-icon { font-size: 54px; margin: 0 0 6px; }
+    .silhouette-wrap svg { width: 84px; height: 140px; }
+    .cal-move-icon { font-size: 58px; margin: 2px 0 0; }
+    .cal-move-text { font-size: 32px; margin: 0 0 6px; }
+    .roster-row { margin: 2px 0 10px; }
+    .roster-slot { width: 34px; height: 34px; font-size: 15px; }
+    .moves-strip .move-tile { padding: 6px 8px 5px; min-width: 54px; }
+    .moves-strip .move-icon { font-size: 24px; }
+    .result-stats > div { padding: 4px 9px 6px; min-width: 72px; }
+    .rating .rating-star { font-size: 32px; }
+    .score-big { font-size: 48px; margin: 4px 0 10px; }
+  }
+
+  /* =====================================================================
+     2026-09-08 — Join screen redesign
+     Matches the "MotionQuest visual design system" mockup: a full-bleed
+     illustrated world instead of a centred card, self-hosted display type
+     (see the <link rel="preload"> pair in <head> and the "NO WEB FONT"
+     note way up at the top of this stylesheet — this screen is the one
+     deliberate exception), and copy reframed around the body as the
+     controller rather than the phone.
+
+     Appended at the end of the stylesheet on purpose: every rule below
+     targets #pairingPanel or a "pq-" prefixed class found ONLY in this
+     screen, so it can freely win the cascade over the older, more
+     generic #pairingPanel/.overlay-panel rules earlier in this file
+     without deleting or renegotiating them — nothing else in the game
+     shares these selectors.
+     ===================================================================== */
+  @font-face {
+    font-family: 'Fredoka';
+    src: url('./fonts/Fredoka-Variable.woff2') format('woff2-variations'), url('./fonts/Fredoka-Variable.woff2') format('woff2');
+    font-weight: 400 700;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: 'Nunito';
+    src: url('./fonts/Nunito-Variable.woff2') format('woff2-variations'), url('./fonts/Nunito-Variable.woff2') format('woff2');
+    font-weight: 400 900;
+    font-display: swap;
+  }
+
+  #pairingPanel {
+    position: fixed; inset: 0; z-index: 5;
+    width: 100%; height: 100%;
+    max-width: none; max-height: none;
+    margin: 0; padding: 0; border: none; border-radius: 0;
+    background: linear-gradient(180deg,#1c1140 0%,#2a1a52 38%,#241548 62%,#170f30 100%);
+    box-shadow: none; overflow: hidden;
+    animation: pqFadeIn 0.4s ease both;
+  }
+  @keyframes pqFadeIn { from { opacity: 0; } to { opacity: 1; } }
+  #pqBgSvg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+
+  .pq-content {
+    position: relative; width: 100%; height: 100%;
+    display: flex; flex-direction: column; align-items: center;
+    padding: clamp(18px, 3.2vh, 40px) clamp(20px, 4vw, 56px);
+    box-sizing: border-box;
+  }
+  /* The control badge ("Use your phone to join") sits fixed near the top
+     of every pre-game screen; nudge our own header down to clear it
+     rather than let the two collide, same idea as body.badge-visible
+     .overlay-panel elsewhere in this file. */
+  body.badge-visible .pq-content { padding-top: clamp(46px, 8vh, 78px); }
+
+  .pq-header { display: flex; align-items: center; gap: 10px; align-self: flex-start; }
+  .pq-logo-text { font-family: 'Fredoka', sans-serif; font-weight: 700; font-size: clamp(16px, 2.4vh, 22px); line-height: 1; letter-spacing: 0.3px; }
+  .pq-logo-motion { color: #fff; text-shadow: 0 2px 0 #1a1030; }
+  .pq-logo-quest { color: #ffd166; text-shadow: 0 2px 0 #1a1030; }
+
+  .pq-hero { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 8px; margin-top: clamp(6px, 1.6vh, 16px); max-width: 720px; }
+  .pq-hero h1 {
+    font-family: 'Fredoka', sans-serif; font-weight: 700;
+    font-size: clamp(22px, 4.4vh, 36px); color: #fff; margin: 0;
+    text-shadow: 0 3px 0 rgba(20,12,40,0.6); line-height: 1.1;
+  }
+  .pq-hero p {
+    font-family: 'Nunito', sans-serif; font-weight: 700;
+    font-size: clamp(13px, 1.9vh, 16px); color: #c9b8f0; margin: 0;
+  }
+
+  .pq-join-card {
+    display: flex; flex-direction: row; align-items: stretch;
+    background: #241548; border: 2px solid rgba(255,255,255,0.1);
+    border-radius: 22px; box-shadow: 0 8px 0 rgba(10,6,24,0.5);
+    margin-top: clamp(10px, 2.4vh, 24px); overflow: hidden;
+  }
+  .pq-join-col { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: clamp(14px, 2.4vh, 26px) clamp(18px, 2.8vw, 32px); }
+  .pq-join-label { font-family: 'Nunito', sans-serif; font-weight: 800; font-size: clamp(10px, 1.5vh, 13px); letter-spacing: 1px; color: #e9defc; text-transform: uppercase; }
+  .pq-play-url { font-family: 'Fredoka', sans-serif; font-weight: 600; font-size: clamp(14px, 2.2vh, 19px); color: #ffd166; }
+  .pq-join-divider { display: flex; align-items: center; justify-content: center; padding: 0 4px; position: relative; }
+  .pq-join-divider::before, .pq-join-divider::after { content: ''; position: absolute; left: 50%; width: 2px; background: rgba(196,181,253,0.18); }
+  .pq-join-divider::before { top: 0; height: 38%; }
+  .pq-join-divider::after { bottom: 0; height: 38%; }
+  .pq-join-divider span { font-family: 'Fredoka', sans-serif; font-weight: 600; font-size: 12px; color: #8b7fb0; background: #241548; padding: 4px 0; z-index: 1; }
+
+  .pq-join-card .qr-card {
+    width: clamp(132px, 15vh, 150px); height: clamp(132px, 15vh, 150px);
+    margin: 0; background: #f4f0ff; border-radius: 14px; padding: 8px;
+    box-shadow: 0 6px 0 rgba(10,6,24,0.35);
+  }
+
+  .pq-code-row { display: flex; flex-direction: row; gap: 6px; }
+  .pq-tile {
+    width: clamp(26px, 4vh, 40px); height: clamp(34px, 5.2vh, 52px);
+    border-radius: 9px; background: #2f2058; border: 2px solid rgba(255,255,255,0.14);
+    display: flex; align-items: center; justify-content: center;
+    font-family: 'Fredoka', sans-serif; font-weight: 700; color: #fff;
+    font-size: clamp(16px, 2.8vh, 26px);
+    box-shadow: 0 4px 0 rgba(10,6,24,0.4);
+  }
+
+  .pq-capacity { display: flex; flex-direction: row; align-items: center; gap: clamp(8px, 1.6vw, 16px); margin-top: clamp(10px, 2.2vh, 20px); }
+  .pq-slot { width: clamp(14px, 2vh, 20px); height: clamp(14px, 2vh, 20px); border-radius: 50%; border: 2px dashed rgba(196,181,253,0.4); background: rgba(255,255,255,0.04); }
+  .pq-capacity-label { font-family: 'Nunito', sans-serif; font-weight: 800; font-size: clamp(10px, 1.5vh, 12px); letter-spacing: 1px; color: #8b7fb0; text-transform: uppercase; margin-left: 4px; }
+
+  #pairingHint {
+    font-family: 'Nunito', sans-serif; font-weight: 800;
+    font-size: clamp(13px, 1.9vh, 16px); color: #e9defc;
+    background: rgba(18,12,36,0.6); border: 2px solid rgba(196,181,253,0.25);
+    border-radius: 999px; padding: 10px 22px; margin-top: auto;
+  }
+
+  /* =====================================================================
+     Ready & Placement screens (2026-09-08 art pass).
+     Same idea as the phone Join screen: Don's illustrated background
+     (art/ready-bg.jpg, art/placement-bg.jpg) carries the header, the
+     step chrome and all the decorative "button" art; the bits that
+     actually change at runtime (who's connected, the move icons, the
+     remote/phone hint copy) stay real DOM text laid over it as opaque
+     chips, never baked into the picture.
+
+     The art is 1536x1024 (3:2) but the TV viewport is 16:9, so rather
+     than cropping it edge to edge — which would cut into the header row
+     or the button right at the image's own edges — it's letterboxed:
+     .tv-frame is sized to the exact 3:2 shape of the art via
+     aspect-ratio, scaled with min() to fit whichever dimension the
+     viewport is tighter on, and centred over a dark fill that matches
+     the art's own palette. Same technique as .pq-content's fixed
+     background, just image-backed instead of SVG-drawn.
+     ===================================================================== */
+  #readyPanel, #placementPanel {
+    position: fixed; inset: 0; z-index: 5;
+    background: linear-gradient(180deg,#1c1140 0%,#2a1a52 45%,#1c1140 100%);
+    animation: pqFadeIn 0.4s ease both;
+  }
+  .tv-frame-wrap {
+    position: absolute; inset: 0; display: flex;
+    align-items: center; justify-content: center;
+  }
+  /* Same "make room for the control badge" nudge as body.badge-visible
+     .pq-content — both Ready and Placement always show a badge. Sized via
+     height (not a translate/padding on a fixed-height box) so the frame
+     actually shrinks to fit the remaining space instead of just moving
+     down and overflowing the bottom of the screen. */
+  body.badge-visible .tv-frame-wrap {
+    align-items: flex-start; padding-top: clamp(58px, 10vh, 104px);
+  }
+  .tv-frame { position: relative; width: min(100%, 150vh); aspect-ratio: 3 / 2; }
+  body.badge-visible .tv-frame { width: auto; height: 100%; max-width: 100%; }
+  .tv-frame > img {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    object-fit: fill; /* the frame is already cut to the art's own ratio */
+    user-select: none; -webkit-user-drag: none; pointer-events: none;
+  }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
+
+  /* Ready: roster + move icons sit as one compact opaque-chip row in the
+     gap between the tip cards and the "Let's Go!" button, rather than
+     bare text, so they read clearly whatever's behind them in the art
+     (same .roster-slot / .move-tile chips as before, just shrunk to fit
+     this one slim strip and laid out side by side instead of stacked). */
+  #readyPanel .tv-overlay-row {
+    position: absolute; left: 4%; right: 4%; top: 65.5%;
+    display: flex; flex-direction: row; align-items: center; justify-content: center;
+    gap: clamp(10px, 2vw, 22px);
+  }
+  #readyPanel .tv-overlay-row .roster-row { margin: 0; gap: 5px; }
+  #readyPanel .tv-overlay-row .moves-strip { margin: 0; gap: 6px; }
+  #readyPanel .tv-overlay-row .roster-slot {
+    width: clamp(18px, 2.6vh, 24px); height: clamp(18px, 2.6vh, 24px);
+    font-size: clamp(9px, 1.4vh, 12px); border-width: 2px; border-radius: 7px;
+  }
+  #readyPanel .tv-overlay-row .move-tile { padding: 3px 6px 3px; min-width: 40px; border-width: 2px; border-radius: 9px; }
+  #readyPanel .tv-overlay-row .move-icon { font-size: clamp(13px, 2vh, 17px); }
+  #readyPanel .tv-overlay-row .move-label { font-size: 7px; margin-top: 1px; }
+
+  /* The two lines the test suite (and real multi-phone UX) need stay real
+     text, squeezed into the strip between the button and the baked-in
+     camera-privacy note at the very bottom. */
+  #readyPanel .hint-stack {
+    position: absolute; left: 6%; right: 6%; top: 85.5%;
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+  }
+  #readyPanel .hint-stack p.hint {
+    margin: 0; font-size: clamp(9px, 1.3vw, 12px); line-height: 1.3;
+    text-shadow: 0 2px 6px rgba(11,4,26,0.85);
+  }
+
+  /* Placement: one real line for the phone-orientation instruction the
+     test suite (and camera tracking itself) depends on, tucked into the
+     gap between the tips card and the "I'm in position" button. */
+  #placementPanel .placement-hint {
+    position: absolute; left: 8%; right: 8%; top: 65.5%; text-align: center;
+    margin: 0; font-size: clamp(10px, 1.4vw, 13px); font-weight: 800;
+    color: #ffe9a8; text-shadow: 0 2px 6px rgba(11,4,26,0.85);
+  }
+</style>
+</head>
+<body>
+  <canvas id="gameCanvas"></canvas>
+  <div id="vignette"></div>
+  <div id="flash"></div>
+
+  <div id="hud">
+    <div class="top-bar">
+      <div class="score-pill">Score<span class="stat-value" id="scoreVal">0</span></div>
+      <div class="high-score">🏆 Best<span class="stat-value" id="highScoreVal">0</span></div>
+      <div class="lives" id="lives"></div>
+    </div>
+    <!-- Era name and distance to the finish line. A level with an end has
+         to show how far away that end is, or it plays as endless anyway. -->
+    <div class="bottom-bar">
+      <div id="eraBadge" class="era-badge">🏙️ Present Day</div>
+      <div class="progress-track">
+        <div id="progressFill" class="progress-fill"></div>
+        <div id="progressLabel" class="progress-label">0 / 1100 m</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Sound toggle. Bottom-left so it never overlaps the HUD pills, and
+       clickable for anyone playing in a desktop browser; from the sofa the
+       remote's M key does the same thing. -->
+  <button id="muteBtn" class="mute-btn" title="Sound on/off">🔊</button>
+
+  <!-- Shown only when the browser is refusing to start the music because it
+       has not seen a user gesture on the TV itself (2026-09-09 — see the
+       long note above tryStartMusic() in audio.js). A player who drives the
+       whole game from their phone can otherwise sit through a completely
+       silent level with nothing telling them why, or what to do about it.
+       One press of the remote clears both the block and this hint. -->
+  <div id="soundHint" style="display:none;">🔊 Press OK on your remote for sound</div>
+
+  <!-- "Bend ahead" road sign (2026-09-09). The corner itself is visible in
+       the road from a long way off, which is the real answer to "the player
+       should be able to see as this comes up" — this is the belt-and-braces
+       version for a player who is watching their own feet. Deliberately
+       styled as a road sign rather than as one of the action prompts: a
+       corner needs NO input, and dressing it like a jump/duck cue would tell
+       the player to do something there is nothing to do. -->
+  <div id="turnSign" style="display:none;"><span id="turnSignArrow">↰</span> Bend ahead</div>
+
+  <div id="controlBadge" class="control-badge" style="display:none;"></div>
+  <div id="actionPrompt" style="display:none;"></div>
+  <div id="starTimer" style="display:none;">⭐ 10</div>
+  <div id="countdown" style="display:none;"></div>
+  <div id="countdownHint" style="display:none;">Get into position!</div>
+
+  <div id="combo"></div>
+
+  <div id="pairingPanel">
+    <svg id="pqBgSvg" viewBox="0 0 1280 720" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+      <defs>
+        <linearGradient id="pqSkyFar" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#3a2566"/>
+          <stop offset="100%" stop-color="#1c1140" stop-opacity="0"/>
+        </linearGradient>
+        <radialGradient id="pqLavaGlow" cx="50%" cy="30%" r="70%">
+          <stop offset="0%" stop-color="#ffb347" stop-opacity="0.85"/>
+          <stop offset="55%" stop-color="#ff7a3d" stop-opacity="0.35"/>
+          <stop offset="100%" stop-color="#ff7a3d" stop-opacity="0"/>
+        </radialGradient>
+        <linearGradient id="pqMtnBack" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#4b3480"/>
+          <stop offset="100%" stop-color="#382a63"/>
+        </linearGradient>
+        <linearGradient id="pqMtnFront" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#2e2054"/>
+          <stop offset="100%" stop-color="#211840"/>
+        </linearGradient>
+        <linearGradient id="pqGroundGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#241a48"/>
+          <stop offset="100%" stop-color="#140c2b"/>
+        </linearGradient>
+      </defs>
+      <rect x="0" y="0" width="1280" height="720" fill="#170f30"/>
+      <rect x="0" y="0" width="1280" height="460" fill="url(#pqSkyFar)"/>
+      <g fill="#e9defc" opacity="0.55">
+        <circle cx="90" cy="70" r="2"/><circle cx="180" cy="40" r="1.6"/><circle cx="260" cy="95" r="2.2"/>
+        <circle cx="1020" cy="55" r="2"/><circle cx="1110" cy="90" r="1.6"/><circle cx="1180" cy="50" r="2.2"/>
+        <circle cx="980" cy="120" r="1.4"/><circle cx="140" cy="130" r="1.4"/>
+      </g>
+      <g opacity="0.5">
+        <g fill="#8a76c2"><rect x="60" y="110" width="120" height="26" rx="13"/><rect x="90" y="96" width="70" height="26" rx="13"/></g>
+        <g fill="#9683c9"><rect x="1040" y="150" width="140" height="28" rx="14"/><rect x="1075" y="134" width="80" height="28" rx="14"/></g>
+      </g>
+      <g>
+        <circle cx="1150" cy="330" r="150" fill="url(#pqLavaGlow)"/>
+        <polygon points="1050,470 1150,270 1250,470" fill="url(#pqMtnBack)"/>
+        <polygon points="1120,320 1150,270 1180,320 1160,300 1140,300" fill="#ffb14d"/>
+        <rect x="1143" y="292" width="14" height="30" fill="#ff9142"/>
+      </g>
+      <polygon points="0,460 140,330 260,410 400,300 560,420 700,340 860,430 1000,360 1150,440 1280,380 1280,460 0,460" fill="url(#pqMtnBack)"/>
+      <polygon points="0,470 180,380 340,450 520,360 680,460 880,390 1060,470 1280,410 1280,470 0,470" fill="url(#pqMtnFront)"/>
+      <rect x="0" y="460" width="1280" height="260" fill="url(#pqGroundGrad)"/>
+      <g opacity="0.55" fill="#33255e">
+        <rect x="0" y="460" width="62" height="34"/><rect x="66" y="460" width="62" height="34"/>
+        <rect x="200" y="460" width="62" height="34"/><rect x="330" y="460" width="62" height="34"/>
+        <rect x="520" y="460" width="62" height="34"/><rect x="720" y="460" width="62" height="34"/>
+        <rect x="900" y="460" width="62" height="34"/><rect x="1080" y="460" width="62" height="34"/>
+        <rect x="1210" y="460" width="70" height="34"/>
+      </g>
+      <g fill="#2b1f52"><rect x="30" y="392" width="20" height="72"/><rect x="18" y="356" width="44" height="42" rx="4"/><rect x="10" y="326" width="60" height="36" rx="4"/></g>
+      <g fill="#251a48"><rect x="1198" y="404" width="18" height="60"/><rect x="1186" y="372" width="42" height="38" rx="4"/></g>
+    </svg>
+
+    <div class="pq-content">
+      <div class="pq-header">
+        <svg class="pq-logo" width="34" height="34" viewBox="0 0 40 40" aria-hidden="true">
+          <rect x="14" y="4" width="10" height="10" rx="2" fill="#ffb347"/>
+          <rect x="10" y="16" width="18" height="12" rx="2" fill="#ff8a3d"/>
+          <rect x="8" y="28" width="9" height="10" rx="2" fill="#3b82f6"/>
+          <rect x="22" y="26" width="9" height="12" rx="2" fill="#2563eb"/>
+        </svg>
+        <div class="pq-logo-text"><span class="pq-logo-motion">Motion</span><span class="pq-logo-quest">Quest</span></div>
+      </div>
+
+      <div class="pq-hero">
+        <h1>Your Body Is the Controller</h1>
+        <p>Grab your phone just to connect the room — you won't need your Fire TV remote until it's time to pick an era. Once you're in, running, jumping and punching are all you.</p>
+      </div>
+
+      <div class="pq-join-card">
+        <div class="pq-join-col">
+          <span class="pq-join-label">Scan to join</span>
+          <div class="qr-card"><img id="joinQr" alt="Scan with your phone's camera to join" /></div>
+        </div>
+        <div class="pq-join-divider"><span>or</span></div>
+        <div class="pq-join-col">
+          <span class="pq-join-label">Open on your phone</span>
+          <span class="pq-play-url" id="playUrl">…/play</span>
+          <span class="pq-join-label" style="margin-top:10px;">Enter this code</span>
+          <div class="pq-code-row" id="roomCode"><span class="pq-tile">·</span><span class="pq-tile">·</span><span class="pq-tile">·</span><span class="pq-tile">·</span><span class="pq-tile">·</span><span class="pq-tile">·</span></div>
+        </div>
+      </div>
+
+      <div class="pq-capacity">
+        <span class="pq-slot"></span><span class="pq-slot"></span><span class="pq-slot"></span><span class="pq-slot"></span>
+        <span class="pq-capacity-label">Up to 4 explorers can join</span>
+      </div>
+
+      <p class="pulse" id="pairingHint">Waiting for your phone to connect…</p>
+    </div>
+  </div>
+
+  <div id="readyPanel" style="display:none;">
+    <div class="tv-frame-wrap">
+      <div class="tv-frame">
+        <img src="./art/ready-bg.jpg" alt="Ready? Get into position and prepare to start your adventure." draggable="false" />
+        <h1 class="sr-only">Player connected! 🎉</h1>
+        <div class="tv-overlay-row">
+          <div class="roster-row" id="rosterRow"></div>
+          <div class="moves-strip" id="movesStrip"></div>
+        </div>
+        <div class="hint-stack">
+          <!-- Party size (2026-09-10). The game used to need one phone per
+               player to be anything but solo; a group with a single phone
+               now says how many of them there are here and passes it round.
+               Driven by the remote's arrows or by stepping left/right. -->
+          <div class="party-row">
+            <span class="party-label">Players</span>
+            <span id="partyChips"></span>
+          </div>
+          <p class="hint" id="readyJoinHint">👥 More can join — code <b id="roomCodeMini">······</b></p>
+          <!-- Rewritten by renderReadyHint() (tv/game.js): until every
+               connected phone reports setup finished, this says who is still
+               setting up rather than inviting a start that would skip it. -->
+          <p class="hint pulse" id="readyStartHint">🎮 Press OK on your remote (or tap Jump/Punch on your phone) to start</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- The era picker. Four cards side by side, read left to right as a
+       timeline — which is the premise of the game, so the menu shows it. -->
+  <div id="levelSelectPanel" class="overlay-panel" style="display:none;">
+    <h1>Choose Your Era</h1>
+    <div id="levelGrid" class="level-grid"></div>
+    <!-- Party size lives here as well as on the ready screen, because
+         finishing setup opens this picker directly and most players never
+         see the ready screen at all on a first run. Up/down, so it doesn't
+         fight left/right browsing the eras. -->
+    <div class="party-row">
+      <span class="party-label">Players</span>
+      <span id="partyChipsLevel"></span>
+      <span class="party-label" style="opacity:.7">▲▼</span>
+    </div>
+    <p class="hint pulse">🎮 ◀ ▶ + OK · 📱 step + jump — either picks a level</p>
+  </div>
+
+  <div id="levelCompletePanel" class="overlay-panel" style="display:none;">
+    <h1 id="levelCompleteTitle">Era complete!</h1>
+    <div class="rating" id="levelCompleteStars"></div>
+    <div class="score-big"><span id="levelCompleteScore">0</span> pts</div>
+    <div class="result-stats" id="levelCompleteStats"></div>
+    <div class="unlock-banner" id="levelCompleteUnlock">🔓 Next era unlocked</div>
+    <p class="hint pulse" id="levelCompleteHint">🎮 Press OK on your remote (or tap Jump/Punch on your phone) to continue</p>
+  </div>
+
+  <!-- Multiplayer: shown for a moment between turns, then the countdown
+       starts on its own — see TURN_INTRO_DELAY in game.js. No button press
+       needed, since the phone that needs to see this is whichever one is
+       about to play, not necessarily the one anyone is holding. -->
+  <div id="turnIntroPanel" class="overlay-panel" style="display:none;">
+    <h1 id="turnIntroTitle">Player 2's turn</h1>
+    <div class="turn-swatch" id="turnIntroSwatch"></div>
+    <p class="setup-callout" id="turnIntroCallout">Get ready!</p>
+    <p class="hint">Same level, racing the clock — starting…</p>
+  </div>
+
+  <!-- Multiplayer: final ranking once every player has had their turn. -->
+  <div id="leaderboardPanel" class="overlay-panel" style="display:none;">
+    <h1>🏁 Results</h1>
+    <div class="leaderboard-list" id="leaderboardList"></div>
+    <p class="hint pulse">🎮 Press OK on your remote (or tap Jump/Punch on your phone) to continue</p>
+  </div>
+
+  <div id="placementPanel" style="display:none;">
+    <div class="tv-frame-wrap">
+      <div class="tv-frame">
+        <img src="./art/placement-bg.jpg" alt="Find your spot. Stand 2 to 3 metres from the TV so we can see your full body." draggable="false" />
+        <h1 class="sr-only">Set Up Your Phone</h1>
+        <p class="setup-icon sr-only">📱📺</p>
+        <!-- The framing/tracking checklist baked into the art doesn't
+             mention which way up the phone goes, but this is the one
+             screen that has to — camera tracking only works with the
+             phone propped up sideways in landscape (see
+             mr_test_orientation.js), so it stays a real, visible line
+             rather than getting folded into the artwork. -->
+        <p class="placement-hint" id="placementOrientationHint">📱↔️ Make sure your phone is propped up sideways (landscape), facing you</p>
+        <p class="hint pulse sr-only">🎮 Step back, then press OK</p>
+      </div>
+    </div>
+  </div>
+
+  <div id="framingPanel" class="overlay-panel" style="display:none;">
+    <h1>Get In Frame</h1>
+    <div class="silhouette-wrap">
+      <svg id="framingSilhouette" class="silhouette" viewBox="0 0 120 200" width="112" height="186">
+        <circle cx="60" cy="28" r="20" />
+        <path d="M60 50 C34 54 26 88 30 136 L42 136 L46 188 L58 188 L60 140 L62 140 L64 188 L76 188 L80 136 L92 136 C96 88 88 54 60 50 Z" />
+      </svg>
+    </div>
+    <p class="setup-status-text" id="framingStatusText">Step into frame</p>
+    <p class="hint" id="framingSubHint">Stand 2–3m back to fit the outline</p>
+  </div>
+
+  <div id="calibrationPanel" class="overlay-panel" style="display:none;">
+    <h1>Quick Setup</h1>
+    <p class="cal-step-counter" id="calStepCounter">Step 1 of 4</p>
+    <div class="cal-move-icon" id="calMoveIcon">⬅️</div>
+    <div class="cal-move-text" id="calMoveText">Step LEFT</div>
+    <p class="hint">📱 Copy the move · 🎮 Press OK to skip ahead</p>
+    <div class="cal-dots" id="calDots"></div>
+  </div>
+
+  <div id="pausedPanel" class="overlay-panel" style="display:none;">
+    <h1>Paused ⏸</h1>
+    <div class="score-big" style="font-size:52px;"><span id="pausedScoreVal">0</span> pts</div>
+    <p class="hint pulse">🎮 Press OK on your remote (or tap ▶ on your phone) to resume</p>
+    <p class="hint">🎮 Press Back again (or tap ✕ Exit on your phone) to end this run</p>
+  </div>
+
+  <div id="gameOverPanel" class="overlay-panel" style="display:none;">
+    <h1 id="gameOverTitle">Run Over!</h1>
+    <div class="score-big"><span id="finalScore">0</span> pts</div>
+    <p class="new-high-score" id="newHighScoreNote" style="display:none;">🏆 New High Score!</p>
+    <p class="hint pulse" id="gameOverHint">🎮 Press OK on your remote (or tap Jump/Punch on your phone) to run again</p>
+    <p class="hint" id="gameOverSubHint">🎮 Press Back to pick a different era</p>
+  </div>
+
+  <script type="module" src="./game.js"></script>
+  <script>
+    // Registers the minimal service worker in manifest.json / sw.js - this
+    // is what makes the page count as an installable PWA (both for a
+    // browser's own "Add to Home Screen"/"Install app" prompt, and for
+    // packaging tools like PWABuilder that require an installable PWA as
+    // their starting point for a Fire TV / Android app package).
+    //
+    // Skipped when the page is being served from a bare IP address, which is
+    // what LAN mode looks like (https://192.168.x.x:3000/tv). That origin is
+    // on a self-signed certificate, and Chrome refuses to register a service
+    // worker on an origin with a certificate error even after you have
+    // clicked through the warning - so the registration cannot succeed there,
+    // and attempting it only prints an SSL error to the console. Nothing is
+    // lost: you would never install the LAN address as an app anyway.
+    const isBareIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(location.hostname);
+    if ('serviceWorker' in navigator && !isBareIp) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js').catch(() => {});
+      });
+    }
+  </script>
+</body>
+</html>

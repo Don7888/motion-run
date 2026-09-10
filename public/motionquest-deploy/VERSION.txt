@@ -1,0 +1,35 @@
+MotionQuest — deploy folder version marker
+============================================
+
+This folder is the ONE folder to use for uploading to GitHub from now on.
+Every time Claude finishes a round of changes, this same folder gets
+overwritten with the complete, tested "public" tree — so you never have to
+guess which of your Desktop folders is current.
+
+Sandbox commit: d43df91dcf2c1c8611cf23f03b2c2edc9b0b9821
+Built:          2026-09-10
+
+Contains everything up to and including:
+  c58b9cf  One-phone multiplayer, sharper resolution, better 3D models,
+           ground/hill sightline fix, punch timing + animation fix
+  d43df91  Corrected app icon (the real MotionQuest icon, transparent
+           background) — replaces the placeholder icon from the previous
+           round
+
+Status: NOT YET on GitHub / NOT YET deployed as of this build.
+
+How to use this folder
+-----------------------
+1. Open this folder's "public" subfolder.
+2. Drag the whole "public" folder onto:
+   https://github.com/Don7888/motion-run/upload/main
+3. Click "Commit changes".
+4. Tell Claude it's uploaded — it will verify the upload matches this
+   build and trigger the live deploy.
+
+Your other Desktop folders (motionquest-round2, motionquest-update,
+motionquest-upload, motionquest-join-screen-update, motionquest,
+motion-run, motion-run-icons, motion-run-lan) are all leftovers from
+earlier rounds. They are now obsolete — everything in them is already
+included here, up to date. Safe to delete once this one is confirmed
+uploaded, to stop the desktop clutter that caused a bad upload before.
