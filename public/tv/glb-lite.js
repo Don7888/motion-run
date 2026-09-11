@@ -144,13 +144,23 @@ function buildNode(json, bin, nodeIndex, materialCache) {
 /**
  * Fetches and parses a .glb into a THREE.Group, normalised for this game:
  *
- *   - rotated from glTF/Blender Z-up into three's Y-up
+ *   - rotated from glTF/Blender Z-up into three's Y-up (unless the asset is
+ *     already Y-up — see `options.yUp` below)
  *   - centred on x/z and sat on the ground, so position.y = 0 means "feet
  *     on the floor" for every model regardless of how it was authored
  *   - scaled so its height matches `height` in game units, if given
  *
  * Normalising here rather than at each call site is what lets the game treat
  * a downloaded model and a hand-built box as interchangeable.
+ *
+ * `options.yUp`: 2026-09-10 (roman_legionary.glb, condensed from a Meshy AI
+ * scan — see motionquest-roman-legionary-condense.md) — every model in the
+ * pack up to now has been authored Z-up (Blender's convention), so the
+ * rotation above was written unconditionally. A Meshy export is Y-up
+ * already; applying that same rotation to one lays it on its back/side
+ * (the same class of bug that made time_portal render as a "puddle" before
+ * that model's own fix). Set `yUp: true` in a model's MODEL_SPECS entry to
+ * skip the rotation for assets that already arrive upright.
  */
 export async function loadModel(url, options = {}) {
   const response = await fetch(url);
@@ -164,9 +174,9 @@ export async function loadModel(url, options = {}) {
   for (const nodeIndex of scene.nodes) root.add(buildNode(json, bin, nodeIndex, materialCache));
 
   // Z-up -> Y-up. Applied to a wrapper so the measurement below sees the
-  // model the way the game will.
+  // model the way the game will. Skipped for assets that are already Y-up.
   const oriented = new THREE.Group();
-  root.rotation.x = -Math.PI / 2;
+  if (!options.yUp) root.rotation.x = -Math.PI / 2;
   oriented.add(root);
 
   const box = new THREE.Box3().setFromObject(oriented);

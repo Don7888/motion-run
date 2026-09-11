@@ -2,8 +2,21 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>MotionQuest — TV</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>MotionQuest — Solo</title>
+<!-- 2026-09-10 ("a mobile version without a TV connected"): this page is
+     the TV page's game engine (game.js) and every TV asset (art/models/
+     audio/fonts), reused as-is with an on-screen gamepad bar bolted on
+     instead of a second device sending input over the network — see the
+     big header comment in game.js's WebSocket section for the SOLO_MODE
+     branch that makes one page do both jobs. Everything in game.js reaches
+     its assets with paths like './art/...', written expecting to be loaded
+     from /tv/ — rather than fork a second copy of every asset into /solo/,
+     this <base> tag makes every relative URL on the page (this file's own
+     links below, and every fetch()/Image()/THREE loader call inside
+     game.js) resolve against /tv/ instead of /solo/, so the exact same
+     game.js and asset tree serve both pages with zero duplication. -->
+<base href="/tv/">
 <link rel="manifest" href="./manifest.json" />
 <link rel="icon" type="image/png" href="./icons/favicon-64.png" />
 <meta name="theme-color" content="#0B1046" />
@@ -17,6 +30,124 @@
 <link rel="preload" href="./fonts/Fredoka-Variable.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="./fonts/Nunito-Variable.woff2" as="font" type="font/woff2" crossorigin>
 <style>
+  /* ===================================================================
+     SOLO MODE ADDITIONS — the on-screen gamepad bar and its supporting
+     button/panel tweaks. Everything else in this <style> block below is
+     copied verbatim from tv/index.html; keep additions here, at the top,
+     so a future re-sync from the TV page is a clean diff. */
+  body[data-mode="solo"] #soloGamepad {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+    display: none; /* toggled to 'flex' by game.js while a run is live */
+    flex-direction: column; gap: 8px;
+    padding: 10px 14px calc(10px + env(safe-area-inset-bottom, 0px));
+    background: linear-gradient(180deg, rgba(10,12,30,0) 0%, rgba(10,12,30,.85) 22%, rgba(8,10,26,.94) 100%);
+    -webkit-user-select: none; user-select: none; touch-action: manipulation;
+  }
+  body[data-mode="solo"] #soloGamepad .solo-row { display: flex; gap: 10px; }
+  body[data-mode="solo"] #soloGamepad button {
+    flex: 1 1 0; border: none; border-radius: 16px; cursor: pointer;
+    font: 700 15px/1.15 system-ui, sans-serif; color: #fff;
+    padding: 14px 6px; -webkit-tap-highlight-color: transparent;
+    background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.22);
+    transition: transform .08s ease, background .08s ease;
+  }
+  body[data-mode="solo"] #soloGamepad button:active { transform: scale(.93); background: rgba(255,255,255,.28); }
+  body[data-mode="solo"] #soloGamepad .solo-action { font-size: 20px; padding: 16px 6px; }
+  body[data-mode="solo"] #soloGamepad #soloJumpBtn { background: rgba(59,130,246,.35); border-color: rgba(147,197,253,.5); }
+  body[data-mode="solo"] #soloGamepad #soloDuckBtn { background: rgba(168,85,247,.35); border-color: rgba(216,180,254,.5); }
+  body[data-mode="solo"] #soloGamepad #soloPunchBtn { background: rgba(239,68,68,.35); border-color: rgba(252,165,165,.5); }
+  /* Small persistent pause control — the solo player's only stand-in for a
+     Fire TV remote's Back button. Top-right, near the existing mute/
+     difficulty pills (both top-corners already) rather than the bottom,
+     which belongs entirely to the gamepad bar while a run is live. */
+  #soloPauseBtn {
+    display: none; position: fixed; top: calc(10px + env(safe-area-inset-top, 0px)); right: 14px;
+    z-index: 41; border: none; border-radius: 999px; padding: 8px 16px;
+    background: rgba(20,20,40,.6); color: #fff; font: 700 13px system-ui, sans-serif;
+    border: 1px solid rgba(255,255,255,.25); cursor: pointer;
+  }
+  body[data-mode="solo"] #soloPauseBtn.show { display: block; }
+  /* Extra tappable buttons on the paused/game-over overlay panels — the TV
+     build only ever needed to print instructions here ("press OK on your
+     remote"), since a real remote or phone always existed to act on them.
+     Solo has neither, so these panels need real buttons of their own. */
+  .solo-panel-actions { display: none; gap: 12px; justify-content: center; margin-top: 18px; flex-wrap: wrap; }
+  body[data-mode="solo"] .solo-panel-actions { display: flex; }
+  .solo-panel-actions button {
+    border: none; border-radius: 999px; padding: 14px 26px; cursor: pointer;
+    font: 700 16px system-ui, sans-serif; color: #fff;
+    background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.3);
+  }
+  .solo-panel-actions button.primary { background: #3b82f6; border-color: #93c5fd; }
+  /* Level cards become real tap targets in solo mode (they're keyboard/
+     remote-only on the TV) — a visible press state says so. */
+  body[data-mode="solo"] .level-card { cursor: pointer; }
+  body[data-mode="solo"] .level-card:active:not(.locked) { transform: scale(.97); }
+  /* Mute, difficulty and the era-progress bar all normally sit flush
+     against the bottom edge (the TV has nothing else living down there).
+     The gamepad bar now owns that edge in solo mode — left as-is these
+     three rendered UNREACHABLE underneath it (same z-index, later in the
+     DOM). The era-progress bar is lifted clear of the gamepad's ~172px
+     height (it stays meaningful mid-run — "how far to the next era").
+     Mute and difficulty move up beside the score/lives row instead of
+     also competing for that same narrow strip — three separate pills
+     packed into ~190px above a full-width gamepad on a ~400px-wide
+     screen had nowhere to go without overlapping. */
+  body[data-mode="solo"] .mute-btn { bottom: auto; top: 178px; left: 14px; width: 42px; height: 42px; font-size: 18px; }
+  body[data-mode="solo"] .diff-badge { bottom: auto; top: 178px; right: 14px; height: 38px; padding: 0 12px; font-size: 12px; }
+  body[data-mode="solo"] .bottom-bar {
+    padding: 0 14px 188px; gap: 8px;
+    /* min(46vw, 620px) assumes a wide TV; on a ~400px phone that plus the
+       era-badge pill next to it is wider than the screen, wrapping the
+       "114 / 1100 m" label mid-number. Solo needs its own narrower cap. */
+  }
+  body[data-mode="solo"] .era-badge { font-size: 14px; padding: 6px 12px 8px; }
+  body[data-mode="solo"] .progress-track { width: 44vw; height: 28px; }
+  body[data-mode="solo"] .progress-label { font-size: 12px; }
+  /* These panels' own hint lines ("Press OK on your remote... or tap ▶ on
+     your phone") describe devices that don't exist in this build — the
+     real Resume/Exit and Play again/Choose era buttons above replace them
+     rather than sit underneath equally-prominent wrong instructions. */
+  body[data-mode="solo"] #pausedPanel .hint,
+  body[data-mode="solo"] #gameOverHint,
+  body[data-mode="solo"] #gameOverSubHint {
+    /* !important: gameOver() (game.js) sets subHintEl.style.display =
+       'block' directly as an inline style for the non-multiplayer case,
+       which otherwise beats any plain stylesheet rule here. */
+    display: none !important;
+  }
+  /* The control badge ("🎮 ◀ ▶ to choose · OK to travel", "Remote OK to
+     resume", ...) is JS-driven text written for a Fire TV remote and/or a
+     second phone — neither exists in this build, and every screen it would
+     appear on already has its own tap targets (cards, or the buttons
+     above), so the badge is just wrong/confusing here rather than useful. */
+  body[data-mode="solo"] #controlBadge { display: none !important; }
+  /* Era picker: the TV lays five cards out in one wide row — a "timeline"
+     that reads fine on a 16:9 screen but overflows and truncates on a
+     ~400px-wide phone (see the header comment). Solo re-flows the exact
+     same cards into a single scrollable column instead — same card
+     internals (art on top, name/sub/meta below), just stacked instead of
+     side by side, and shorter art so five of them fit without the list
+     feeling like an overwhelming scroll. */
+  body[data-mode="solo"] #levelSelectPanel { width: 92vw; max-width: 92vw; padding: 22px 18px 24px; }
+  body[data-mode="solo"] .level-grid {
+    /* The base rule sets justify-content:center for the TV's horizontal
+       row of cards. In a row that centers them sideways; reused as-is on a
+       flex-direction:column stack, "center" instead centers the whole
+       overflowing column VERTICALLY — with 5 cards taller than the
+       scroll box, that pushed the top ones above the visible area before
+       a single touch, looking like they'd vanished. flex-start makes it
+       scroll from the first card like any normal list. */
+    flex-direction: column; justify-content: flex-start;
+    width: 100%; max-height: 56vh; overflow-y: auto; gap: 14px;
+  }
+  body[data-mode="solo"] .level-card { flex: 0 0 auto; width: 100%; }
+  body[data-mode="solo"] .level-card::before { height: 104px; }
+  body[data-mode="solo"] .level-card .level-name { margin-top: 12px; font-size: 20px; }
+  /* Party-size picker (multiplayer only — solo is always 1 player) and the
+     old remote/phone hint line beneath the grid don't apply here. */
+  body[data-mode="solo"] #levelSelectPanel .party-row,
+  body[data-mode="solo"] #levelSelectPanel > .hint { display: none; }
   /* =====================================================================
      2026-09-03 "make it look like a real published TV game" pass.
      Replaces the previous dark-navy frosted-glass treatment with the
@@ -1061,7 +1192,7 @@
   }
 </style>
 </head>
-<body>
+<body data-mode="solo">
   <canvas id="gameCanvas"></canvas>
   <div id="vignette"></div>
   <div id="flash"></div>
@@ -1345,6 +1476,13 @@
     <div class="score-big" style="font-size:52px;"><span id="pausedScoreVal">0</span> pts</div>
     <p class="hint pulse">🎮 Press OK on your remote (or tap ▶ on your phone) to resume</p>
     <p class="hint">🎮 Press Back again (or tap ✕ Exit on your phone) to end this run</p>
+    <!-- Solo-only: there is no remote and no second phone here, so this
+         panel needs real buttons rather than instructions naming a device
+         that doesn't exist in this build. See SOLO_MODE in game.js. -->
+    <div class="solo-panel-actions">
+      <button class="primary" id="soloResumeBtn" type="button">▶ Resume</button>
+      <button id="soloExitBtn" type="button">✕ Exit to menu</button>
+    </div>
   </div>
 
   <div id="gameOverPanel" class="overlay-panel" style="display:none;">
@@ -1358,29 +1496,35 @@
     <div class="result-stats" id="gameOverStats"></div>
     <p class="hint pulse" id="gameOverHint">🎮 Press OK on your remote (or tap Jump/Punch on your phone) to run again</p>
     <p class="hint" id="gameOverSubHint">🎮 Press Back to pick a different era</p>
+    <div class="solo-panel-actions">
+      <button class="primary" id="soloRetryBtn" type="button">▶ Play again</button>
+      <button id="soloBackToMenuBtn" type="button">🗺️ Choose era</button>
+    </div>
   </div>
 
+  <!-- 2026-09-10 solo build ("a mobile version without a TV connected"):
+       the touch gamepad. Same 3-lane + jump/duck/punch vocabulary as the
+       phone controller's existing "🎮 Buttons" mode (public/play/), just
+       wired straight into this page's own copy of the game instead of
+       relaying over WebSocket to a separate TV — see the SOLO_MODE block
+       at the bottom of game.js. Hidden by default; shown only while a run
+       is actually live (playing/paused/countdown) — see syncSoloGamepad()
+       in game.js — so it never competes with tapping a level card or the
+       paused/game-over buttons above for the same screen space. -->
+  <div id="soloGamepad">
+    <div class="solo-row">
+      <button id="soloLaneLeftBtn" type="button">◀<br>left</button>
+      <button id="soloLaneCentreBtn" type="button">●<br>centre</button>
+      <button id="soloLaneRightBtn" type="button">▶<br>right</button>
+    </div>
+    <div class="solo-row">
+      <button class="solo-action" id="soloJumpBtn" type="button">⬆<br>JUMP</button>
+      <button class="solo-action" id="soloDuckBtn" type="button">⬇<br>DUCK</button>
+      <button class="solo-action" id="soloPunchBtn" type="button">👊<br>PUNCH</button>
+    </div>
+  </div>
+  <button id="soloPauseBtn" type="button">⏸ Pause</button>
+
   <script type="module" src="./game.js"></script>
-  <script>
-    // Registers the minimal service worker in manifest.json / sw.js - this
-    // is what makes the page count as an installable PWA (both for a
-    // browser's own "Add to Home Screen"/"Install app" prompt, and for
-    // packaging tools like PWABuilder that require an installable PWA as
-    // their starting point for a Fire TV / Android app package).
-    //
-    // Skipped when the page is being served from a bare IP address, which is
-    // what LAN mode looks like (https://192.168.x.x:3000/tv). That origin is
-    // on a self-signed certificate, and Chrome refuses to register a service
-    // worker on an origin with a certificate error even after you have
-    // clicked through the warning - so the registration cannot succeed there,
-    // and attempting it only prints an SSL error to the console. Nothing is
-    // lost: you would never install the LAN address as an app anyway.
-    const isBareIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(location.hostname);
-    if ('serviceWorker' in navigator && !isBareIp) {
-      window.addEventListener('load', () => {
-        navigator.serviceWorker.register('./sw.js').catch(() => {});
-      });
-    }
-  </script>
 </body>
 </html>

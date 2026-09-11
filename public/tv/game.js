@@ -397,6 +397,29 @@ function limb(w, h, d, color, pivotYOffset, cap) {
 
 const player = new THREE.Group();
 
+// 2026-09-10 ("he is facing the player but you should see his back since
+// he's running"): every body part built below puts its "front" (eyes, hair
+// fringe, hat peak) at +z, on the stated assumption that +z faces away from
+// the camera. That assumption was backwards — the camera sits at a HIGHER
+// z than the player (camera z=8.2 looking toward z=-13; player at z=0), so
+// away-from-camera, the direction the player is actually running, is -z,
+// not +z. That made the whole rig face the camera: the player was looking
+// at their own character's face instead of watching its back recede down
+// the track, which is what every reference for this genre (including
+// Danny Go, the game this project is modelled on) actually shows.
+//
+// Rather than hunt down and flip every individual +z offset scattered
+// through the head/hair/hat-building code below — easy to do half-heartedly
+// and leave one accessory facing the old way — every part of the body goes
+// into this one group, turned around 180° as a whole. `player` itself keeps
+// its own rotation.y free for the run-cycle lean animation further down
+// (see updatePlaying()), which composes correctly with this since it's a
+// separate parent: the lean still swings the character based on running,
+// just now on top of the corrected base facing rather than instead of it.
+const characterModel = new THREE.Group();
+characterModel.rotation.y = Math.PI;
+player.add(characterModel);
+
 // =====================================================================
 // The character (2026-09-04 rebuild, Crossy-Road-style blocky proportions)
 //
@@ -427,7 +450,7 @@ const SKIN = 0xffc08a;
 // Upper body (body + head + arms) is its own group so the run cycle can
 // bob it while the legs stay planted on the ground — see updatePlaying().
 const upper = new THREE.Group();
-player.add(upper);
+characterModel.add(upper);
 
 const torso = new THREE.Mesh(
   new THREE.BoxGeometry(0.86, 0.72, 0.58),
@@ -462,6 +485,7 @@ head.add(hairGroup);
 const hatGroup = new THREE.Group();
 head.add(hatGroup);
 let propellerBlade = null; // spun each frame in updatePlaying() when present
+let boatPropeller = null; // the Lagoon era's boat motor — spun the same way, independently
 
 function clearGroup(group) {
   while (group.children.length) {
@@ -561,10 +585,10 @@ upper.add(armR);
 
 const legL = limb(0.28, 0.46, 0.30, 0x2b2f45, 0.58, { w: 0.30, h: 0.14, d: 0.40, color: 0x1c1f2e, z: 0.05 });
 legL.position.x = -0.20;
-player.add(legL);
+characterModel.add(legL);
 const legR = limb(0.28, 0.46, 0.30, 0x2b2f45, 0.58, { w: 0.30, h: 0.14, d: 0.40, color: 0x1c1f2e, z: 0.05 });
 legR.position.x = 0.20;
-player.add(legR);
+characterModel.add(legR);
 
 // Dressed only once the limbs exist: dressPlayer() tints the sleeves too,
 // so calling it any earlier hits armL/armR in their temporal dead zone and
@@ -592,6 +616,56 @@ const starAura = new THREE.Mesh(
 starAura.position.y = 1.06;
 starAura.visible = false;
 player.add(starAura);
+
+// 2026-09-10 (Don: "Create another level at see where the character is
+// driving a small speed boat"): a small hull that seats the character for
+// the Tropical Lagoon era only. It's a child of characterModel rather than
+// player, so it picks up the same 180° base rotation the 2026-09-10
+// facing fix applies there for free — built with the bow at local +z,
+// same "+z is the face/front" convention as the eyes and hair on this
+// group, so it ends up pointing the right way without its own fix-up.
+// Legs are hidden and this shown only while the lagoon era is current
+// (see setLagoonMode() below) — everything else (jump raising player.
+// position.y, duck's squash-and-stretch on player.scale, the run-lean on
+// player.rotation.y) already applies to the whole player group, so the
+// boat rides along with all of it for free; no new animation plumbing.
+const boatHull = new THREE.Group();
+{
+  const HULL = 0xf5f0e0, STRIPE = 0xff5a5f, TRIM = 0xeafcff, MOTOR = 0x2a2f3a;
+  part(boatHull, 1.3, 0.45, 1.8, HULL, 0, 0.225, 0);          // main hull
+  part(boatHull, 1.3, 0.14, 1.8, STRIPE, 0, 0.08, 0);         // racing stripe along the waterline
+  part(boatHull, 1.0, 0.4, 0.5, HULL, 0, 0.2, 1.1);           // bow taper, step 1
+  part(boatHull, 0.55, 0.32, 0.4, HULL, 0, 0.16, 1.5);        // bow taper, step 2 (the point)
+  [-1, 1].forEach((side) => {
+    part(boatHull, 0.08, 0.1, 1.8, TRIM, side * 0.65, 0.5, 0); // gunwale trim, both sides
+  });
+  // Windshield, right in front of where the character stands — the single
+  // biggest thing that reads as "driving" rather than "standing in a tub".
+  const windshield = new THREE.Mesh(
+    new THREE.BoxGeometry(0.85, 0.4, 0.06),
+    new THREE.MeshBasicMaterial({ color: 0x8fd8ff, transparent: true, opacity: 0.55 })
+  );
+  windshield.position.set(0, 0.68, 0.5);
+  boatHull.add(windshield);
+  part(boatHull, 0.9, 0.16, 0.14, TRIM, 0, 0.46, 0.5);        // console below it
+  // Outboard motor at the stern, with a small spinning prop for flair —
+  // same trick as the hat's propeller (see propellerBlade above), just a
+  // second instance so the hat and the boat can both spin independently.
+  part(boatHull, 0.5, 0.35, 0.3, MOTOR, 0, 0.2, -1.05);
+  boatPropeller = part(boatHull, 0.06, 0.3, 0.06, 0x8c9098, 0, 0.2, -1.24);
+  boatHull.visible = false;
+  characterModel.add(boatHull);
+}
+
+// Swaps between "standing/running" and "seated in the lagoon speedboat":
+// hides the legs (the hull's sides come up to hip height, same as the
+// gunwale of a real small boat) and shows the hull, or the reverse.
+// Called from applyEra() — the only thing that changes per era here.
+function setLagoonMode(active) {
+  legL.visible = !active;
+  legR.visible = !active;
+  boatHull.visible = active;
+}
 
 player.position.set(0, 0, 0);
 scene.add(player);
@@ -808,6 +882,32 @@ function makeTower() {
   }
   return g;
 }
+// 2026-09-10 (Don: "boost the games 3D models using Kenney.nl/Quaternius"):
+// a chunk of the future skyline is a real downloaded building instead of
+// the hand-built neon tower. The Kenney Space Kit's grey/white/gold look
+// doesn't match the neon palette closely enough to use for anything the
+// player has to react to (see the research note from this round — a
+// side-by-side render showed it clashing badly on the obstacles/portal),
+// but roadside scenery is already the thing this game fades into the sky
+// in the distance to hide recycling, and at that range a differently-lit
+// building just reads as "a different building in the skyline" rather
+// than breaking the look — Don's call after seeing the comparison was to
+// use these packs for background set-dressing only, never gameplay
+// objects. Both files are Kenney's Space Kit (CC0), structurally already
+// exactly what glb-lite.js expects (flat colours, no textures, no
+// interleaving) — no conversion needed.
+function makeFutureBuilding() {
+  if (Math.random() < 0.35) {
+    const name = Math.random() < 0.5 ? 'future_hangar' : 'future_dome';
+    const m = modelInstance(name);
+    if (m) {
+      m.scale.multiplyScalar(0.8 + Math.random() * 0.6);
+      m.rotation.y = Math.random() * Math.PI * 2;
+      return m;
+    }
+  }
+  return makeTower();
+}
 // A short holographic advert pylon at ground level.
 function makeHoloSign() {
   // Half the future's "signs" are now the pack's drone, hung in the air
@@ -821,7 +921,7 @@ function makeHoloSign() {
     }
   }
   const g = new THREE.Group();
-  const post = boxMesh(0.16, 2.2, 0.16, 0x2a3350);
+  const post = boxMesh(0.16, 2.2, 0.16, 0x3e4d80);
   post.position.y = 1.1;
   const neon = [0x36e0ff, 0xff4fd8, 0xffe14f][Math.floor(Math.random() * 3)];
   const panel = new THREE.Mesh(
@@ -833,11 +933,48 @@ function makeHoloSign() {
   return g;
 }
 
+// Tropical Lagoon: a sandy islet with one or two palms — reuses makePalm()
+// wholesale (it was always a generic palm, just described as Dino's "tree
+// fern" before) rather than building a new tree from scratch.
+function makePalmIsland() {
+  const g = new THREE.Group();
+  const w = 1.5 + Math.random() * 0.7, d = 1.2 + Math.random() * 0.6;
+  const sand = boxMesh(w, 0.3, d, jitterColor(0xe9d9a8, 0.05));
+  sand.position.y = 0.15;
+  g.add(sand);
+  const palm = makePalm();
+  palm.position.set((Math.random() - 0.5) * 0.4, 0.3, (Math.random() - 0.5) * 0.3);
+  g.add(palm);
+  if (Math.random() < 0.5) {
+    const palm2 = makePalm();
+    palm2.position.set((Math.random() - 0.5) * 0.5 + 0.5, 0.3, (Math.random() - 0.5) * 0.3);
+    g.add(palm2);
+  }
+  return g;
+}
+// A bare sandbar breaking the surface — low, wide, no tree — so not every
+// bit of land in the lagoon reads as a full island.
+function makeSandbar() {
+  const g = new THREE.Group();
+  const w = 1.3 + Math.random() * 0.8, d = 0.8 + Math.random() * 0.5;
+  const sand = boxMesh(w, 0.18, d, jitterColor(0xf0e2b8, 0.05));
+  sand.position.y = 0.09;
+  g.add(sand);
+  const tuftN = 2 + Math.floor(Math.random() * 3);
+  for (let i = 0; i < tuftN; i++) {
+    const tuft = boxMesh(0.1, 0.3 + Math.random() * 0.2, 0.1, jitterColor(0x7fd68a, 0.1));
+    tuft.position.set((Math.random() - 0.5) * w * 0.7, 0.18, (Math.random() - 0.5) * d * 0.6);
+    g.add(tuft);
+  }
+  return g;
+}
+
 const SCENERY_MAKERS = {
   tree: makeTree, bush: makeBush, rock: makeRock,
   palm: makePalm, fern: makeFern, bones: makeBones,
   cypress: makeCypress, column: makeColumn, banner: makeArchOrBanner,
-  tower: makeTower, holo: makeHoloSign,
+  tower: makeFutureBuilding, holo: makeHoloSign,
+  palmIsland: makePalmIsland, sandbar: makeSandbar,
 };
 
 // Rebuilds the roadside scenery for an era. Old props are removed and their
@@ -1090,7 +1227,14 @@ function makeLegionary() {
 
 function makeSentryBot() {
   const g = new THREE.Group();
-  const SHELL = 0x2f3a63, TRIM = 0x4a5891, NEON = 0x36e0ff, HOT = 0xff4fd8;
+  // 2026-09-10 ("the future level is a bit too dark, hard to see the
+  // obstacles"): SHELL/TRIM were a noticeably darker navy before — fine
+  // under normal lighting, but under the Future era's dim ambient light
+  // (see the era's own note on this) the chassis was reading almost
+  // black, leaving only the neon visor/core/muzzles visible and the
+  // punchable body itself hard to make out. Lightened both; the neon
+  // parts are unaffected (MeshBasicMaterial, always full brightness).
+  const SHELL = 0x45538c, TRIM = 0x6478b8, NEON = 0x36e0ff, HOT = 0xff4fd8;
   part(g, 0.9, 0.8, 0.6, SHELL, 0, 1.35, 0);              // chassis
   part(g, 0.96, 0.1, 0.64, TRIM, 0, 1.72, 0);
   part(g, 0.7, 0.3, 0.5, TRIM, 0, 0.95, 0);               // waist
@@ -1375,7 +1519,20 @@ function obRomeHurdle() {
   part(g, 0.24, 0.2, 0.2, 0xd8cfb6, -0.8, 0.1, -0.4);
   return g;
 }
-function obRomeCrate() { return makeLegionary(); }
+function obRomeCrate() {
+  const m = modelInstance('roman_legionary');
+  if (m) {
+    // updateObstacleIdle()'s 'legionary' case reads mesh.userData.idle/
+    // .parts — the crest-sway and spear-shift lines both no-op safely when
+    // .parts has no crest/spear (this model has neither, just one static
+    // mesh per flat-colour part), but the plain body sway underneath them
+    // is unconditional, so the model still reads as "waiting for you"
+    // rather than a static prop.
+    m.userData.idle = 'legionary';
+    return m;
+  }
+  return makeLegionary();
+}
 function obRomeCrateBoxes() {
   const g = new THREE.Group();
   const legs = boxMesh(0.5, 0.5, 0.34, 0x8a6a4a);
@@ -1452,8 +1609,8 @@ function obFutureHurdle() {
   under.position.y = 0.3;
   g.add(under);
   [-1, 1].forEach((side) => {
-    part(g, 0.16, 0.6, 0.16, 0x2a3350, side * 0.88, 0.3, 0);
-    part(g, 0.34, 0.1, 0.42, 0x39456b, side * 0.88, 0.05, 0);   // clamp foot
+    part(g, 0.16, 0.6, 0.16, 0x3e4d80, side * 0.88, 0.3, 0);
+    part(g, 0.34, 0.1, 0.42, 0x54649c, side * 0.88, 0.05, 0);   // clamp foot
     const cap = neonBox(0.2, 0.12, 0.2, 0x36e0ff);
     cap.position.set(side * 0.88, 0.66, 0);
     g.add(cap);
@@ -1463,13 +1620,13 @@ function obFutureHurdle() {
 function obFutureCrate() { return makeSentryBot(); }
 function obFutureCrateBoxes() {
   const g = new THREE.Group();
-  const body = boxMesh(1.0, 0.7, 0.8, 0x39456b);
+  const body = boxMesh(1.0, 0.7, 0.8, 0x54649c);
   body.position.y = 0.9;
   const eye = neonBox(0.4, 0.24, 0.06, 0xff4fd8);
   eye.position.set(0, 0.98, 0.42);
   const fin = neonBox(1.3, 0.08, 0.1, 0x36e0ff);
   fin.position.y = 0.52;
-  const skirt = boxMesh(0.5, 0.3, 0.5, 0x2a3350);
+  const skirt = boxMesh(0.5, 0.3, 0.5, 0x3e4d80);
   skirt.position.y = 0.4;
   g.add(body, eye, fin, skirt);
   return g;
@@ -1477,9 +1634,9 @@ function obFutureCrateBoxes() {
 function obFutureWall() {
   const g = new THREE.Group();
   // A shield emitter: heavy posts top and bottom, energy field between.
-  part(g, 2.0, 0.34, 0.4, 0x2a3350, 0, 0.17, 0);
-  part(g, 2.0, 0.3, 0.4, 0x2a3350, 0, 2.75, 0);
-  [-1, 1].forEach((side) => part(g, 0.22, 2.6, 0.34, 0x39456b, side * 0.9, 1.45, 0));
+  part(g, 2.0, 0.34, 0.4, 0x3e4d80, 0, 0.17, 0);
+  part(g, 2.0, 0.3, 0.4, 0x3e4d80, 0, 2.75, 0);
+  [-1, 1].forEach((side) => part(g, 0.22, 2.6, 0.34, 0x54649c, side * 0.9, 1.45, 0));
   const field = neonBox(1.6, 2.3, 0.1, 0x9b6bff, 0.55);
   field.position.y = 1.45;
   g.add(field);
@@ -1501,10 +1658,103 @@ function obFutureLowbar() {
   beam.position.y = LOWBAR_UNDERSIDE + 0.13;
   const glow = neonBox(2.2, 0.6, 0.06, 0xff4fd8, 0.28);
   glow.position.y = LOWBAR_UNDERSIDE + 0.3;
-  const emitterA = boxMesh(0.28, LOWBAR_UNDERSIDE + 0.26, 0.28, 0x2a3350);
+  const emitterA = boxMesh(0.28, LOWBAR_UNDERSIDE + 0.26, 0.28, 0x3e4d80);
   emitterA.position.set(-1.1, (LOWBAR_UNDERSIDE + 0.26) / 2, 0);
   const emitterB = emitterA.clone(); emitterB.position.x = 1.1;
   g.add(beam, glow, emitterA, emitterB);
+  return g;
+}
+
+// --- Tropical Lagoon (speedboat, 2026-09-10) --------------------------
+// A jagged coral ridge breaking the surface — jump it like Dino's log.
+function obLagoonHurdle() {
+  const g = new THREE.Group();
+  part(g, 1.9, 0.42, 0.5, 0xd97a5a, 0, 0.28, 0);            // base coral mass
+  part(g, 0.5, 0.22, 0.52, 0xe8a06b, -0.55, 0.5, 0);         // higher knuckle
+  part(g, 0.4, 0.16, 0.5, 0xf2c08a, 0.4, 0.44, 0.02);
+  // Foam where the water breaks against it, both sides.
+  [-1, 1].forEach((side) => {
+    const foam = new THREE.Mesh(
+      new THREE.BoxGeometry(0.5, 0.06, 0.7),
+      new THREE.MeshBasicMaterial({ color: 0xeafcff, transparent: true, opacity: 0.75 })
+    );
+    foam.position.set(side * 1.05, 0.05, 0);
+    g.add(foam);
+  });
+  return g;
+}
+// The punch target: a shark breaking the surface, per Don's call.
+function obLagoonCrate() {
+  const g = new THREE.Group();
+  const BODY = 0x5c7a8c, BELLY = 0xd9e6ea, FIN = 0x4a6373;
+  part(g, 0.85, 0.6, 1.5, BODY, 0, 0.55, 0);                // body
+  part(g, 0.7, 0.3, 1.0, BELLY, 0, 0.32, 0.05);             // pale belly
+  // Dorsal fin — a stack of shrinking boxes fakes a triangular fin in the
+  // same stepped-voxel language as everything else in this game.
+  part(g, 0.14, 0.3, 0.46, FIN, 0, 1.0, -0.1);
+  part(g, 0.1, 0.16, 0.3, FIN, 0, 1.2, -0.1);
+  // Head/snout pushed toward the player with a hint of open jaw.
+  part(g, 0.6, 0.5, 0.6, BODY, 0, 0.55, 0.75);
+  const jaw = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.1, 0.3), new THREE.MeshLambertMaterial({ color: 0xfff2ee }));
+  jaw.position.set(0, 0.32, 0.95);
+  g.add(jaw);
+  for (let i = 0; i < 4; i++) {
+    const tooth = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.08, 0.04), new THREE.MeshLambertMaterial({ color: 0xffffff }));
+    tooth.position.set(-0.16 + i * 0.11, 0.38, 1.06);
+    g.add(tooth);
+  }
+  const eye = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, 0.04), new THREE.MeshLambertMaterial({ color: 0x111418 }));
+  eye.position.set(0.24, 0.7, 1.0);
+  g.add(eye);
+  // A ring of foam/spray around the base — sells "just broke the surface"
+  // rather than "sitting on the road", which the other obstacles get for
+  // free from the ground texture alone.
+  const spray = new THREE.Mesh(
+    new THREE.RingGeometry(0.55, 0.95, 12),
+    new THREE.MeshBasicMaterial({ color: 0xeafcff, transparent: true, opacity: 0.55, side: THREE.DoubleSide })
+  );
+  spray.rotation.x = -Math.PI / 2;
+  spray.position.y = 0.03;
+  g.add(spray);
+  return g;
+}
+// A rock-and-coral outcrop spanning the lane — dodge sideways, same stakes
+// as every other era's `wall`.
+function obLagoonWall() {
+  const g = new THREE.Group();
+  part(g, 1.9, 2.3, 0.7, 0x8c9098, 0, 1.15, 0);              // main rock mass
+  part(g, 1.6, 0.7, 0.75, 0xe0966b, 0, 2.15, 0);             // coral crown
+  part(g, 0.7, 0.4, 0.8, 0xf0b47e, -0.4, 2.45, 0.05);
+  part(g, 1.95, 0.16, 0.85, 0xeafcff, 0, 0.1, 0);            // foam at the waterline
+  if (Math.random() < 0.4) {
+    const palm = makePalm();
+    palm.scale.setScalar(0.6);
+    palm.position.set(0.3, 2.45, 0);
+    g.add(palm);
+  }
+  return g;
+}
+// A fishing net strung between two floating buoy-posts — duck under it.
+function obLagoonLowbar() {
+  const g = new THREE.Group();
+  const net = new THREE.Mesh(
+    new THREE.BoxGeometry(2.1, 0.3, 0.1),
+    new THREE.MeshBasicMaterial({ color: 0xeafcff, transparent: true, opacity: 0.5, wireframe: true })
+  );
+  net.position.y = LOWBAR_UNDERSIDE + 0.15;
+  g.add(net);
+  const rope = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.08, 0.1), new THREE.MeshLambertMaterial({ color: 0xd9c79a }));
+  rope.position.y = LOWBAR_UNDERSIDE + 0.32;
+  g.add(rope);
+  [-1, 1].forEach((side) => {
+    part(g, 0.22, LOWBAR_UNDERSIDE + 0.4, 0.22, 0x8a6a3a, side * 1.05, (LOWBAR_UNDERSIDE + 0.4) / 2, 0); // post
+    part(g, 0.5, 0.2, 0.5, 0xffb347, side * 1.05, LOWBAR_UNDERSIDE + 0.5, 0);   // buoy ball on top
+  });
+  // Seaweed strands hanging off the net — reads as "in the water", and
+  // gives the same "get under this" read the other eras' hanging tapes do.
+  for (let i = 0; i < 5; i++) {
+    part(g, 0.1, 0.28, 0.03, 0x3a8a5c, -0.85 + i * 0.42, LOWBAR_UNDERSIDE - 0.1, 0.06);
+  }
   return g;
 }
 
@@ -1533,7 +1783,15 @@ function obFutureLowbar() {
 // gap, drone) were caught: scaled by height they came out tens of units
 // across. Those are normalised by width instead.
 const MODEL_SPECS = {
-  roman_soldier: { height: 2.0 },      // punchable, so player-sized
+  // 2026-09-11: Don's own condensed Meshy AI scan (see
+  // motionquest-roman-legionary-condense.md) — replaces makeLegionary() as
+  // the Rome era's punch obstacle. "Slightly bigger than the player's
+  // character" per Don's request, hence taller than roman_soldier's
+  // player-sized 2.0. `yUp: true` because this asset (unlike the rest of
+  // the pack) arrives already Y-up — see the note on that option in
+  // glb-lite.js's loadModel().
+  roman_legionary: { height: 2.3, yUp: true },
+  roman_soldier: { height: 2.0 },      // punchable, so player-sized — unused now, kept for reference
   roman_column: { height: 3.2 },       // a wall you must dodge — taller than you
   roman_arch: { height: 4.2 },         // scenery, overhead
   magic_potion: { height: 0.85 },      // "COLLECT MAGIC POTIONS", from the Rome art
@@ -1545,6 +1803,8 @@ const MODEL_SPECS = {
   future_drone: { width: 2.2 },        // long and flat — width is its real size
   road_gap: { width: 2.4 },            // one lane wide
   time_portal: { width: 7.0 },         // a gateway you run through
+  future_hangar: { height: 8.5 },      // Kenney Space Kit — background skyline only
+  future_dome: { height: 5.5 },        // Kenney Space Kit — background skyline only
 };
 const models = new Map();   // name -> loaded THREE.Group (the template)
 
@@ -1586,6 +1846,7 @@ const ERA_OBSTACLES = {
   dino: { hurdle: obDinoHurdle, crate: obDinoCrate, wall: obDinoWall, lowbar: obDinoLowbar },
   rome: { hurdle: obRomeHurdle, crate: obRomeCrate, wall: obRomeWall, lowbar: obRomeLowbar },
   future: { hurdle: obFutureHurdle, crate: obFutureCrate, wall: obFutureWall, lowbar: obFutureLowbar },
+  lagoon: { hurdle: obLagoonHurdle, crate: obLagoonCrate, wall: obLagoonWall, lowbar: obLagoonLowbar },
 };
 
 function buildObstacleMesh(type) {
@@ -1693,14 +1954,51 @@ const ERAS = [
     sky: ['#080b1f', '#1a1547', '#3d2170', '#6b2f8a'],
     glow: 'rgba(90,220,255,0.55)',
     fog: 0x2a1c4d, fogNear: 55, fogFar: 210,
-    // Deliberately dim: the neon materials are MeshBasicMaterial and stay at
-    // full brightness regardless, so lowering everything else is what makes
-    // them pop instead of sitting flat against an evenly-lit scene.
-    hemi: [0x4a5cff, 0x0d0a1f, 0.42], sun: [0x9fd8ff, 0.75, [-4, 7, -10]], rim: [0xff4fd8, 0.45],
+    // 2026-09-10 ("the future level is a bit too dark, it was hard to see
+    // all the obstacles clearly"): this used to be much dimmer on the
+    // theory that the neon materials are MeshBasicMaterial and stay at full
+    // brightness regardless, so lowering everything else would make them
+    // pop. In practice that left the STRUCTURAL parts of every obstacle
+    // (the hurdle's posts, the wall's frame, the sentry bot's body — all
+    // regular lit materials, not neon) sitting almost black against the
+    // dark fog, so only the thin glowing edges were readable and the actual
+    // shape/hitbox wasn't. Same lesson as the Dino era's earlier brightness
+    // pass: a level you can't read is worse than one that's a shade less
+    // moody. Raised enough that the dark navy obstacle bodies (also
+    // lightened below) show up clearly; the neon bits are still
+    // full-brightness MeshBasicMaterial, so they still pop the same as
+    // before, just against a scene where the rest of the shape is visible
+    // too.
+    hemi: [0x4a5cff, 0x1a1440, 0.58], sun: [0x9fd8ff, 1.05, [-4, 7, -10]], rim: [0xff4fd8, 0.5],
     ground: { verge: ['#141a33', '#11162c'], kerb: '#36e0ff', path: ['#1d2340', '#1a2039'], dash: '#36e0ff', slabs: 'rgba(54,224,255,0.10)' },
     scenery: ['tower', 'tower', 'holo', 'tower', 'holo'],
     obstacleTypes: ['hurdle', 'crate', 'wall', 'lowbar'],
     coin: [0x36e0ff, 0x08616b], gem: [0xff4fd8, 0x6b0a52],
+  },
+  {
+    // 2026-09-10 (Don: "Create another level at see where the character is
+    // driving a small speed boat"): a 5th era, unlocked after Neon Future.
+    // Same engine, same four moves — lane change steers the boat, jump
+    // hops a reef ridge, duck goes under a rope net, punch fends off a
+    // shark — reskinned as an open-water speedboat run. The "track" is
+    // just the road ground texture repainted as water (see `ground` below
+    // — no new rendering code, exactly like every other era's ground).
+    id: 'lagoon', name: 'Tropical Lagoon', sub: 'Gun it', icon: '🚤',
+    goal: 1500,
+    sky: ['#1f8fd6', '#5ec7e8', '#a7e8e0', '#eafbe8'],
+    glow: 'rgba(255,246,214,0.9)',
+    fog: 0xbdeee0, fogNear: 62, fogFar: 225,
+    hemi: [0xd8f6ff, 0x2f8a78, 0.66], sun: [0xfff6d8, 1.4, [-5, 8, -11]], rim: [0xfff0a0, 0.32],
+    // Reskinned water, not a new ground system: verge is open ocean either
+    // side of the boat's channel, kerb is the white foam edge, path is the
+    // lighter lagoon-blue channel itself, and dash becomes wake-foam
+    // streaks instead of lane paint — makeRoadTexture() already bands and
+    // scrolls whatever colours it's given, which reads as water with zero
+    // new code.
+    ground: { verge: ['#0f6fae', '#0d63a0'], kerb: '#eafcff', path: ['#2ec2d6', '#29b3c8'], dash: '#eafcff', slabs: null },
+    scenery: ['palmIsland', 'palmIsland', 'sandbar', 'rock', 'sandbar'],
+    obstacleTypes: ['hurdle', 'crate', 'wall', 'lowbar'],
+    coin: [0xffcf3d, 0x7a4a00], gem: [0x5df2c4, 0x0a6b4a],
   },
 ];
 
@@ -1907,8 +2205,29 @@ function horizonFuture(g) {
   }
 }
 
+// Tropical Lagoon: low islands and a couple of tall limestone-karst spires
+// (the single most recognisable silhouette of a tropical lagoon) breaking
+// the water on both sides, with distant hazy ones fading toward the fog.
+function horizonLagoon(g) {
+  const islands = [[-50, 14, 4], [-30, 9, 3], [-8, 11, 5], [18, 8, 3], [40, 15, 5], [58, 10, 3]];
+  for (const [x, h, w] of islands) {
+    horizonBox(g, w * 1.6, h * 0.35, w, x, h * 0.175, 0, 0x3a8a5c);   // low green mound
+    horizonBox(g, w * 0.9, h * 0.4, w * 0.7, x, h * 0.35 + h * 0.2, 0, 0x2f7048); // canopy
+  }
+  // Karst spires — tall, narrow, near-vertical, in a hazier green-grey so
+  // they recede into the fog rather than competing with the islands.
+  const spire = (x, h) => {
+    horizonBox(g, 3.2, h, 3.2, x, h / 2, -4, 0x4a6b5c);
+    horizonBox(g, 2.2, h * 0.4, 2.4, x, h * 0.85, -4, 0x5a7a68);
+  };
+  spire(-20, 26);
+  spire(28, 22);
+  spire(0, 18);
+}
+
 const ERA_HORIZONS = {
   dino: horizonDino, rome: horizonRome, present: horizonPresent, future: horizonFuture,
+  lagoon: horizonLagoon,
 };
 
 function buildHorizon(id) {
@@ -1973,7 +2292,12 @@ function currentEra() { return ERA_BY_ID[currentEraId] || ERA_BY_ID.present; }
 // to how the game reads now rather than a two-era experiment, and a player
 // working forward through the timeline shouldn't find the road stops turning
 // halfway. Narrow this set to scope it back.
-const TERRAIN_ERA_IDS = new Set(['dino', 'rome', 'present', 'future']);
+// 2026-09-10: Lagoon is in this set too — a speedboat winding around
+// islands and reef channels is at least as natural a fit for corners as
+// any of the other four, and it's what gives the gentle-swell hill profile
+// (HILL_PROFILES.lagoon) anywhere to apply, since hillOffset()/headingAt()
+// are both gated on the same terrainActive() flag as corners are.
+const TERRAIN_ERA_IDS = new Set(['dino', 'rome', 'present', 'future', 'lagoon']);
 function terrainActive() { return TERRAIN_ERA_IDS.has(currentEraId); }
 
 // Metres of track spent turning through the 90 degrees. At the game's
@@ -2140,6 +2464,11 @@ function terrainRamp(distanceAlong) {
 // amplitude. Verified against mr_test_sightlines.js, not just assumed.)
 const HILL_PROFILES = {
   dino: { freqMin: 0.0055, freqMax: 0.010, ampMin: 0.45, ampMax: 1.35, chaosMax: 0.34 },
+  // Lagoon (2026-09-10): a speedboat doesn't climb hills, but dead-flat
+  // water would look static next to the other eras' terrain. Low amplitude,
+  // higher frequency than the default — reads as gentle swells passing
+  // under the hull rather than the rolling hills every other era has.
+  lagoon: { freqMin: 0.03, freqMax: 0.05, ampMin: 0.08, ampMax: 0.2, chaosMax: 0.1 },
 };
 const DEFAULT_HILL_PROFILE = { freqMin: 0.011, freqMax: 0.02, ampMin: 0.25, ampMax: 0.75, chaosMax: 0.28 };
 function hillProfile() { return HILL_PROFILES[currentEraId] || DEFAULT_HILL_PROFILE; }
@@ -2395,6 +2724,8 @@ function applyEra(id) {
   const era = ERA_BY_ID[id] ? id : 'present';
   currentEraId = era;
   const e = ERA_BY_ID[era];
+
+  setLagoonMode(era === 'lagoon');
 
   scene.background?.dispose?.();
   scene.background = makeSkyTexture(e.sky, e.glow);
@@ -4167,9 +4498,30 @@ function exitToMenu() {
 
 // ---------------------------------------------------------------------
 // WebSocket — pairing + input relay
+//
+// 2026-09-10 ("a mobile game version without a TV"): public/solo/index.html
+// loads this exact file (via <base href="/tv/">, so every relative asset
+// path below still resolves — see that file's header comment) to run the
+// whole game on one phone, with an on-screen gamepad instead of a second
+// device relaying input over the network. SOLO_MODE is the one flag that
+// distinguishes the two: set by `data-mode="solo"` on that page's <body>,
+// completely absent (and therefore always false) on the real TV page.
+// Where it matters, it does two things: skip ever opening a real socket
+// (there is no server-side room to join — solo has no TV to pair with, so
+// `ws` becomes an inert stub whose .send()/.addEventListener() are no-ops
+// and whose .readyState never equals WebSocket.OPEN), and, right at the
+// bottom of this file, wire the solo page's own gamepad buttons straight
+// into handleInput() — the exact same function a real WebSocket 'input'
+// message would have reached, so every rule already written there (explicit
+// jump/punch to start a run, absolute lane_set for a 3-button pad, etc.)
+// applies identically whether the input came over the network or from a
+// tap two centimetres below the canvas.
 // ---------------------------------------------------------------------
+const SOLO_MODE = document.body?.dataset.mode === 'solo';
 const wsProtocol = location.protocol === 'https:' ? 'wss' : 'ws';
-const ws = new WebSocket(`${wsProtocol}://${location.host}`);
+const ws = SOLO_MODE
+  ? { readyState: -1, send() {}, addEventListener() {} }
+  : new WebSocket(`${wsProtocol}://${location.host}`);
 
 playUrlEl.textContent = `${location.host}/play`;
 
@@ -4673,6 +5025,7 @@ function updatePlaying(dt) {
   upper.rotation.x = duckAmt * 0.5;
 
   if (propellerBlade) propellerBlade.rotation.y += dt * 14;
+  if (boatHull.visible && boatPropeller) boatPropeller.rotation.z += dt * 26;
 
   // Tracks this frame's impact-bump strength (0 outside a punch) so the
   // camera-kick code after the follow-cam update below can react to it too.
@@ -5212,6 +5565,20 @@ window.__mrDebug = {
   duckRemaining: () => state.duckTimer,
   punch: () => { if (state.punchAnimTimer <= 0) { state.punchTimer = PUNCH_DURATION; state.punchAnimTimer = PUNCH_ANIM_DURATION; } },
   era: () => currentEraId,
+  // 2026-09-10 (Don: "driving a small speed boat") — lets a test confirm
+  // the lagoon era's player-rig swap (boat shown, legs hidden) actually
+  // happened, the same way characterFacingWorldZ() confirms the facing
+  // fix without eyeballing a screenshot.
+  lagoonRig: () => ({ boatVisible: boatHull.visible, legsVisible: legL.visible && legR.visible }),
+  // 2026-09-10 ("he is facing the player but you should see his back since
+  // he's running") — lets a test confirm the character-facing fix is
+  // actually in place without having to eyeball a screenshot. See the big
+  // comment above characterModel's declaration for the full reasoning.
+  characterFacingWorldZ: () => {
+    const eye = new THREE.Vector3();
+    eyeL.getWorldPosition(eye);
+    return +eye.z.toFixed(3);
+  },
   music: () => audio.musicState(),
   muted: () => audio.isMuted(),
   musicBlocked: () => audio.isMusicBlocked(),
@@ -5328,5 +5695,96 @@ renderParty();
 renderMovesStrip();
 syncPanel();
 animate();
+
+// ---------------------------------------------------------------------
+// SOLO_MODE — the mobile-only build (public/solo/index.html)
+//
+// Don: "a version on the game which can just be played on a mobile without
+// a tv connected... The player needs to control the characters using a
+// game pad at the bottom of the screen." No camera, no accelerometer, no
+// second device — a 3-lane + jump/duck/punch touch pad, same vocabulary as
+// the phone controller's existing "🎮 Buttons" mode, wired straight into
+// this page's own game instead of relaying over WebSocket to a TV.
+//
+// Everything below is additive and only ever runs when SOLO_MODE is true,
+// so the real TV+phone build (game.js loaded from tv/index.html, no
+// data-mode attribute) is completely unaffected.
+//
+// v1 scope, deliberately: single player only (no multiplayer turn-passing
+// — there's only one gamepad), and no character customization screen (that
+// lives entirely on the phone-controller page today — see dressPlayer() —
+// and porting it is a follow-up, not needed for "the same game without a
+// TV"). Every era, all difficulty settings, high scores and unlock
+// progress are full parity — they're already just localStorage and the
+// ERAS table, nothing phone/TV-specific about them.
+// ---------------------------------------------------------------------
+if (SOLO_MODE) {
+  // No pairing to wait for — a phone playing itself is always "connected".
+  // Go straight to the era picker instead of the TV's "waiting for your
+  // phone" screen, which would otherwise show forever (no real socket is
+  // ever going to report a roster here).
+  openLevelSelect();
+
+  const soloTap = (id, msg) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    // touchstart (not click) so a tap registers immediately rather than
+    // waiting out the ~300ms ghost-click delay some mobile browsers still
+    // apply to plain click events — the same reason a game controller
+    // reacts to a button press, not its release.
+    const fire = (e) => { e.preventDefault(); handleInput(msg); };
+    el.addEventListener('touchstart', fire, { passive: false });
+    el.addEventListener('click', fire);
+  };
+  soloTap('soloLaneLeftBtn', { action: 'lane_set', value: -1, explicit: true });
+  soloTap('soloLaneCentreBtn', { action: 'lane_set', value: 0, explicit: true });
+  soloTap('soloLaneRightBtn', { action: 'lane_set', value: 1, explicit: true });
+  soloTap('soloJumpBtn', { action: 'jump', explicit: true });
+  soloTap('soloDuckBtn', { action: 'duck', explicit: true });
+  soloTap('soloPunchBtn', { action: 'punch', explicit: true });
+  soloTap('soloPauseBtn', { action: 'pause_toggle' });
+  soloTap('soloExitBtn', { action: 'exit_to_menu' });
+  soloTap('soloBackToMenuBtn', { action: 'exit_to_menu' });
+  soloTap('soloResumeBtn', { action: 'pause_toggle' });
+  // Jump is as good as Punch for "confirm" everywhere handleInput already
+  // treats them interchangeably (starting a run, retrying after game over)
+  // — see the ready/gameover branches above.
+  soloTap('soloRetryBtn', { action: 'jump', explicit: true });
+
+  // Tapping a level card selects AND launches it in one tap — there's no
+  // remote to press OK with afterwards, so the two steps every other build
+  // does separately (browse, then confirm) collapse into the one gesture a
+  // touchscreen menu normally uses.
+  levelGridEl?.addEventListener('click', (e) => {
+    const card = e.target.closest('.level-card');
+    if (!card || !levelGridEl.contains(card)) return;
+    const idx = Array.from(levelGridEl.children).indexOf(card);
+    if (idx < 0) return;
+    levelSelectIndex = idx;
+    renderLevelSelect();
+    chooseLevel();
+  });
+
+  // The gamepad bar and the pause pill only make sense while a run is
+  // actually live — level-select uses card taps, and the paused/game-over
+  // panels have their own buttons (above). Driven by its own rAF loop
+  // rather than hooked into every place state.phase changes (there are a
+  // couple of dozen of those), which keeps this whole feature a single,
+  // easily-removable block rather than scattered edits through the file.
+  const soloGamepadEl = document.getElementById('soloGamepad');
+  const soloPauseBtnEl = document.getElementById('soloPauseBtn');
+  (function syncSoloChrome() {
+    // Strictly 'playing' only — not paused/countdown/gameover. The paused
+    // and game-over panels are centred overlays with their own buttons
+    // (Resume/Exit, Play again/Choose era), and this bar is fixed to the
+    // bottom of the whole screen at a higher z-index than they are, so
+    // leaving it up during those phases visually overlapped their buttons
+    // and ate the taps meant for the panel underneath.
+    const live = state.phase === 'playing';
+    if (soloGamepadEl) soloGamepadEl.style.display = live ? 'flex' : 'none';
+    if (soloPauseBtnEl) soloPauseBtnEl.classList.toggle('show', live);
+    requestAnimationFrame(syncSoloChrome);
+  })();
+}
 
 
