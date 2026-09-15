@@ -62,6 +62,28 @@
 // easily rather than not at all) since this is a fun family game, not a
 // precision instrument. The calibration screen exists specifically so you
 // can see what still needs adjusting on your actual device before playing.
+//
+// KEEPING THE PHONE ALIVE IN CAMERA MODE — 2026-09-14, after an iPhone 13
+// report ("didn't work when doing the motion capture": camera picture looked
+// fine, the character on the TV never moved once). Camera mode asks the player
+// to prop the phone up and then never touch it again, which from the phone's
+// side is minutes of no input — so it locks its screen, the OS stops the camera
+// track, and every pose frame after that fails. Chrome on Android had been
+// masking this by holding a wake lock of its own for the playing <video>
+// element; iOS Safari doesn't, and an iPhone's Auto-Lock can be 30 seconds.
+// Three things came out of that round, and they are separate concerns worth
+// keeping separate:
+//   1. SCREEN WAKE LOCK — hold one while the camera runs, re-acquire it on
+//      return to the foreground, and warn up front on browsers without the API
+//      (see the SCREEN WAKE LOCK block).
+//   2. FAILURE HAS TO BE VISIBLE — poseLoop()'s catch used to discard every
+//      error, so a permanently dead tracker and a player who hadn't stepped
+//      into frame yet produced the same screen forever. Failure is now timed,
+//      recovered from once automatically, and reported to the phone AND the TV
+//      (see the POSE-LOOP HEALTH block).
+//   3. DIAGNOSTICS ON THE DEVICE — every candidate cause of that report looked
+//      identical from the outside, so the numbers that tell them apart are now
+//      readable on the phone itself (see the TRACKING DIAGNOSTICS block).
 
 (() => {
   // ==== Tunable thresholds ================================================
@@ -224,6 +246,67 @@
   // never hurt, and 45 is still comfortably under what a modern phone
   // GPU/WebGL backend can sustain alongside MoveNet Lightning.
   const POSE_TARGET_FPS = 45;
+  // =======================================================================
+  // PARTIAL-BODY TRACKING — 2026-09-15
+  // =======================================================================
+  // "In landscape it's rare that the player's full body will be visible."
+  // Correct — and the old code depended on it being visible: a gesture was
+  // only detected once BOTH a shoulder and a hip were tracked, and every
+  // threshold was a fraction of the shoulder-to-hip distance. A phone propped
+  // up in landscape, at the sort of distance a living room allows, very often
+  // sees head and shoulders and nothing below — in which case nothing locked
+  // on and nothing was ever detected at all.
+  //
+  // Tracking now degrades instead of failing:
+  //   scale:     shoulder-to-hip distance -> shoulder WIDTH converted to an
+  //              equivalent torso length. Everything downstream stays in
+  //              "fractions of a torso", so none of the existing tuning has
+  //              to be re-derived.
+  //   reference: hip midpoint -> shoulder midpoint, as the one point that
+  //              lane / jump / duck are all measured from.
+  // A shoulder width is roughly three quarters of a torso length on an adult
+  // (rather less on a child); 1.35 is the reciprocal, biased slightly toward
+  // reading small, which makes gestures trigger a little more easily — the
+  // direction this file has always deliberately erred in.
+  const SHOULDER_WIDTH_TO_TORSO = 1.35;
+  // Switching the reference point mid-run moves it by most of a torso in a
+  // single frame, which is a bigger step than any real jump — so the
+  // baselines MUST be dropped when it happens, or the switch itself fires a
+  // phantom jump or duck. Switching back is also deliberately sticky: hips
+  // are adopted again only after being continuously present for this many
+  // frames, so hips that flicker in and out at the bottom edge of the frame
+  // (the common landscape case, and the exact one that would otherwise flap
+  // between references several times a second) settle on shoulders and stay.
+  // The delay deliberately does NOT apply to the FIRST acquisition: a player
+  // standing in full view should be on the hip reference from frame one, not
+  // half a second later via an avoidable baseline reset.
+  const REF_HIP_REACQUIRE_FRAMES = 25;
+  // A crouch folds the body, so the shoulders travel further down than the
+  // hips do — measuring a duck from the shoulders is therefore more sensitive
+  // than the hip-tuned threshold expects. Scaled back to compensate. A jump
+  // lifts the whole body uniformly, so it needs no such correction.
+  const SHOULDER_REF_DUCK_MULT = 1.3;
+  // Below this — equivalent torso length as a fraction of the frame's short
+  // side — the body is too small for the keypoints to be worth trusting.
+  // THAT, rather than "I can't see your legs", is what "too far" now means.
+  const FRAMING_MIN_SCALE_FRAC = 0.11;
+  // How close to the frame edge a landmark may sit before it counts as cut
+  // off, as a fraction of frame width/height.
+  const FRAMING_EDGE_MARGIN_FRAC = 0.03;
+  // 2026-09-14 ("iPhone 13 didn't work when doing the motion capture"). Three
+  // time budgets for noticing that pose detection has stopped working at all,
+  // rather than assuming every failed frame is a transient blip — see
+  // poseLoop() for the reasoning and what each one triggers.
+  const POSE_FAIL_WARN_MS = 1200;
+  const POSE_FAIL_RECOVER_MS = 3000;
+  const POSE_FAIL_GIVEUP_MS = 10000;
+  // How long the pose loop can go without producing a single successful frame
+  // before we treat the tracker as stalled rather than merely slow. A CPU
+  // backend on a phone can take well over a second per frame, so this has to
+  // be generous enough not to fire on "working, just far too slow" — that case
+  // is reported separately, by backend name.
+  const POSE_STALL_MS = 6000;
+  const DIAG_REFRESH_MS = 250;
 
   // Lane zones (hold-phone mode): same ENTER/EXIT hysteresis idea, in
   // degrees of phone tilt from the calibrated baseline.
@@ -264,8 +347,10 @@
   // the same physical distance in either orientation. That is why the
   // 2026-09-04 switch back to LANDSCAPE needed no change here, while the
   // lane thresholds above — which are fractions of WIDTH — did.
-  const FRAMING_TOO_CLOSE_FRAC = 0.34; // torso height / frame SHORT side
-  const FRAMING_TOO_FAR_FRAC = 0.15;
+  // 2026-09-15: FRAMING_TOO_CLOSE_FRAC / FRAMING_TOO_FAR_FRAC (0.34 / 0.15 of
+  // the frame's short side) are deliberately gone. They assumed a full body in
+  // shot, and in landscape they rejected the very framing that works best —
+  // see the rewritten computeFramingStatus() for what replaced them.
   const FRAMING_OFFCENTER_FRAC = 0.28; // |hip x offset| / frame width
   const FRAMING_GOOD_HOLD_MS = 900;
   const FRAMING_SEND_INTERVAL_MS = 200;
@@ -278,8 +363,12 @@
   // off a bit further than the trigger point before it clears, and the
   // interval below throttles how often we bother re-sending the same
   // still-bad status to the TV.
-  const LIVE_FRAMING_TOO_CLOSE_CLEAR_FRAC = FRAMING_TOO_CLOSE_FRAC * 0.88;
-  const LIVE_FRAMING_TOO_FAR_CLEAR_FRAC = FRAMING_TOO_FAR_FRAC * 1.2;
+  // 2026-09-15: the two value-based clearance bands that used to live here
+  // are gone with the torso-fraction test they belonged to — liveFramingCheck()
+  // now holds a verdict for a moment before acting on it instead. Raising a
+  // warning is deliberately slower than clearing one.
+  const LIVE_FRAMING_WARN_HOLD_MS = 600;
+  const LIVE_FRAMING_OK_HOLD_MS = 250;
   const LIVE_FRAMING_SEND_INTERVAL_MS = 400;
 
   const TFJS_URL = 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4/dist/tf.min.js';
@@ -376,6 +465,77 @@
   const cameraCtx = cameraCanvas.getContext('2d');
   const cameraStatus = document.getElementById('cameraStatus');
   const laneMarker = document.getElementById('laneMarker');
+  const camDiagBtn = document.getElementById('camDiagBtn');
+  const camDiag = document.getElementById('camDiag');
+  const motionPermBanner = document.getElementById('motionPermBanner');
+  const enableMotionBtn = document.getElementById('enableMotionBtn');
+
+  // =========================================================================
+  // TRACKING DIAGNOSTICS — 2026-09-14
+  // =========================================================================
+  // Added after an iPhone 13 report ("didn't work when doing the motion
+  // capture": camera picture fine, character on the TV never moved) that could
+  // not be narrowed down from the outside, because every plausible cause —
+  // screen lock ending the camera track, a zero-sized video frame, MoveNet
+  // silently landing on the CPU backend, the framing gate never passing —
+  // produced the identical screen. This is a plain readout of the numbers that
+  // tell those apart, on the phone itself, so one screenshot settles it.
+  // Deliberately always available rather than hidden behind a debug flag:
+  // the whole reason the earlier rounds took several passes each is that
+  // nothing could be observed on a real device.
+  const diag = {
+    backend: '',
+    backendError: '',
+    videoSize: '',
+    poseFps: 0,
+    poseError: '',
+    playError: '',
+    wakeLock: 'not requested',
+    wakeLockError: '',
+    trackEnded: false,
+    trackMuted: false,
+    recoveryAttempts: 0,
+    recoveryError: '',
+    hiddenCount: 0,
+    lastHiddenAt: '',
+    locked: false,
+    torsoFrac: 0,
+    framing: '',
+    view: '',
+    bodyRef: '',
+    refSwitches: 0,
+    motionPerm: '',
+  };
+  let diagVisible = false;
+  function showDiagnostics(on) {
+    diagVisible = !!on;
+    if (camDiag) camDiag.hidden = !diagVisible;
+    if (camDiagBtn) camDiagBtn.setAttribute('aria-expanded', String(diagVisible));
+    if (diagVisible) renderDiagnostics();
+  }
+  function renderDiagnostics() {
+    if (!camDiag || !diagVisible) return;
+    const track = cameraStream && cameraStream.getVideoTracks()[0];
+    const lines = [
+      `mode      ${currentMode || '-'}`,
+      `backend   ${diag.backend || '-'}${diag.backendError ? ` (${diag.backendError})` : ''}`,
+      `video     ${diag.videoSize || `${cameraVideo.videoWidth}x${cameraVideo.videoHeight}`}`,
+      `pose fps  ${diag.poseFps}`,
+      `track     ${track ? track.readyState : 'none'}${diag.trackMuted ? ' muted' : ''}${diag.trackEnded ? ' ENDED' : ''}`,
+      `wake lock ${diag.wakeLock}${diag.wakeLockError ? ` (${diag.wakeLockError})` : ''}`,
+      `body      ${diag.locked ? 'tracked' : 'NOT tracked'}  torso ${diag.torsoFrac.toFixed(3)}`,
+      `sees      ${diag.view || '-'}  via ${diag.bodyRef || '-'}${diag.refSwitches ? ` (${diag.refSwitches} switches)` : ''}`,
+      `framing   ${diag.framing || '-'}  gate ${inCameraSetupGate ? 'setup' : framingActive ? 'framing' : 'off'}`,
+      `backgrnd  ${diag.hiddenCount}x${diag.lastHiddenAt ? ` last ${diag.lastHiddenAt}` : ''}`,
+      `restarts  ${diag.recoveryAttempts}${diag.recoveryError ? ` (${diag.recoveryError})` : ''}`,
+    ];
+    if (diag.motionPerm) lines.push(`motion    ${diag.motionPerm}`);
+    if (diag.playError) lines.push(`play err  ${diag.playError}`);
+    if (diag.poseError) lines.push(`pose err  ${diag.poseError}`);
+    camDiag.textContent = lines.join('\n');
+  }
+  if (camDiagBtn) camDiagBtn.addEventListener('click', () => showDiagnostics(!diagVisible));
+  setInterval(renderDiagnostics, DIAG_REFRESH_MS);
 
   function showScreen(el) {
     [characterScreen, joinScreen, controlChoiceScreen, permScreen, calibrationScreen, playScreen]
@@ -544,6 +704,7 @@
         // The TV also drives WHICH move the walkthrough is currently asking
         // for, so we only accept that one — see handleCalStepRequest().
         else if (msg.action === 'step_request') handleCalStepRequest(msg);
+        else if (msg.action === 'step_arm') handleCalStepArm(msg);
         // The TV ends setup — either because the last move just got ticked
         // off, or because OK was pressed on the remote. Either way the
         // player doesn't have to come back to the phone to start.
@@ -606,7 +767,13 @@
   // =========================================================================
   // 3 & 4. CAMERA PERMISSION + CALIBRATION
   // =========================================================================
-  chooseMotionBtn.addEventListener('click', () => showScreen(permScreen));
+  chooseMotionBtn.addEventListener('click', () => {
+    // 2026-09-14: warn about Auto-Lock before the phone gets propped up — see
+    // #autoLockHint in index.html and the SCREEN WAKE LOCK block below.
+    const autoLockHint = document.getElementById('autoLockHint');
+    if (autoLockHint) autoLockHint.hidden = ('wakeLock' in navigator) && !!navigator.wakeLock;
+    showScreen(permScreen);
+  });
   choosePadBtn.addEventListener('click', () => beginPadMode());
   grantCameraBtn.addEventListener('click', () => beginCalibration('camera'));
   skipCameraBtn.addEventListener('click', () => beginCalibration('hold'));
@@ -683,6 +850,16 @@
   // fallback for a TV that hasn't sent us a step yet.
   let expectedCalStep = null;
   let lastCalStepAt = 0;
+  // 2026-09-15 ("there should always be a short countdown before doing a
+  // movement to allow the player to get in position"). The TV now counts the
+  // player in before each move, and a move must not be accepted while that
+  // countdown is still running — otherwise it registers whatever they happen
+  // to be doing as they walk back into position, which is exactly the sort of
+  // accidental early tick-off the 2026-09-03 ordering fix was about.
+  // `step_request` names the move and leaves us DISARMED; `step_arm` (sent by
+  // the TV when it says GO) is what opens detection. A TV that sends no
+  // countdown at all arms immediately, so an older TV build still works.
+  let calStepArmed = true;
   // A jump and a punch are both one sharp burst of motion, and the tail of
   // one can easily still be arriving when the next step appears. Without a
   // short deadline after each accepted step, a single physical movement
@@ -704,6 +881,8 @@
 
   function handleCalStepRequest(msg) {
     expectedCalStep = msg && msg.step ? msg.step : null;
+    // Armed only if this TV isn't going to count us in.
+    calStepArmed = !(msg && msg.countdown);
     calSkipStepBtn.style.display = 'none';
     if (calStuckTimer) clearTimeout(calStuckTimer);
     if (!expectedCalStep) {
@@ -723,8 +902,27 @@
     }, CAL_STUCK_HINT_MS);
   }
 
+  // Sent by the TV the moment its "3 - 2 - 1 - GO" reaches GO.
+  function handleCalStepArm(msg) {
+    if (msg && msg.step && msg.step !== expectedCalStep) return; // stale arm for a move we've moved past
+    calStepArmed = true;
+    // The stuck-skip clock starts from GO, not from the prompt appearing —
+    // counting the countdown against the player would offer them a skip
+    // before they'd had a fair chance to do the move.
+    if (calStuckTimer) clearTimeout(calStuckTimer);
+    if (expectedCalStep) {
+      const label = CAL_STEP_LABEL[expectedCalStep] || expectedCalStep;
+      calStuckTimer = setTimeout(() => {
+        calSkipStepBtn.textContent = 'Skip ' + label + ' \u203a';
+        calSkipStepBtn.style.display = 'block';
+      }, CAL_STUCK_HINT_MS);
+    }
+  }
+
   function markCalDone(key) {
     if (calState[key]) return;
+    // Not while the TV is still counting the player in — see calStepArmed.
+    if (!calStepArmed) return;
     // Only the move the TV is currently asking for counts.
     if (expectedCalStep && key !== expectedCalStep) return;
     const now = performance.now();
@@ -746,11 +944,13 @@
   calSkipStepBtn.addEventListener('click', () => {
     if (!expectedCalStep) return;
     lastCalStepAt = 0;
+    calStepArmed = true; // a deliberate tap is not an accidental early trigger
     markCalDone(expectedCalStep);
   });
   function resetCalibration() {
     Object.keys(calState).forEach((k) => (calState[k] = false));
     expectedCalStep = null;
+    calStepArmed = true;
     lastCalStepAt = 0;
     if (calStuckTimer) clearTimeout(calStuckTimer);
     calSkipStepBtn.style.display = 'none';
@@ -884,15 +1084,31 @@
     punch: () => firePunch(),
     duck: () => fireDuck(),
   };
+  // 2026-09-15 ("better to have the character there copying your movements").
+  // Every gesture detected during setup is now ALSO sent to the TV purely so
+  // the character can perform it, separately from whether it counts toward
+  // the move currently being asked for. That separation is the point: the
+  // player should see the character copy them the whole way through setup —
+  // including moves the walkthrough hasn't asked for yet, and including
+  // repeats of one it has already ticked off — while the strict one-move-at-
+  // a-time ordering that markCalDone() enforces stays exactly as it was.
+  //
+  // Deliberately a `calibration` event rather than a real `input` message:
+  // the TV starts a run on the first genuine jump/punch input, so sending
+  // these as ordinary input would launch the game from the setup screen.
+  function sendMirror(action, value) {
+    sendCalibration('mirror', value === undefined ? { action } : { action, value });
+  }
   const calHandlers = {
-    lane: (dir) => markCalDone(dir < 0 ? 'left' : 'right'),
+    lane: (dir) => { sendMirror('lane_set', dir < 0 ? -1 : 1); markCalDone(dir < 0 ? 'left' : 'right'); },
     laneZone: (zone) => {
+      sendMirror('lane_set', zone);
       if (zone === -1) markCalDone('left');
       else if (zone === 1) markCalDone('right');
     },
-    jump: () => markCalDone('jump'),
-    punch: () => markCalDone('punch'),
-    duck: () => markCalDone('duck'),
+    jump: () => { sendMirror('jump'); markCalDone('jump'); },
+    punch: () => { sendMirror('punch'); markCalDone('punch'); },
+    duck: () => { sendMirror('duck'); markCalDone('duck'); },
   };
   let actionHandlers = calHandlers;
 
@@ -916,7 +1132,14 @@
       try {
         await startCamera();
       } catch (e) {
-        showToast('Camera unavailable — using hold-phone mode.');
+        // 2026-09-14: say WHAT went wrong. "Camera unavailable" covered an
+        // insecure origin, a refused permission, a camera another app had
+        // taken and a pose library that wouldn't load, which made a real
+        // iPhone report impossible to act on. The reason is also kept in the
+        // diagnostics readout, which survives the toast.
+        diag.cameraError = String((e && e.message) || e);
+        showToast(`Camera unavailable (${diag.cameraError}) — switching to hold-phone mode.`);
+        showDiagnostics(true);
         mode = 'hold';
       }
     }
@@ -932,6 +1155,7 @@
 
     if (mode === 'camera') {
       stopMotionListeners();
+      hideMotionPermBanner();
     } else if (mode === 'hold') {
       stopCamera();
       startMotionListeners();
@@ -944,6 +1168,7 @@
       // Controller mode: no camera, no motion listeners, nothing to detect.
       stopCamera();
       stopMotionListeners();
+      hideMotionPermBanner();
       inCameraSetupGate = false;
       framingActive = false;
     }
@@ -1045,8 +1270,28 @@
       libsLoadedPromise = (async () => {
         await loadScript(TFJS_URL);
         await loadScript(POSE_DETECTION_URL);
-        await tf.setBackend('webgl');
+        // 2026-09-14: tf.setBackend() RESOLVES FALSE when a backend isn't
+        // available — it does not throw. The old code ignored that return
+        // value, so on any device where WebGL couldn't be acquired, TFJS
+        // quietly settled on the 'cpu' backend instead and MoveNet ran there:
+        // seconds per frame rather than tens of milliseconds. Every visible
+        // symptom of that is identical to "the camera works but the character
+        // never moves", because the gesture detectors need frame-to-frame
+        // deltas at something like a real frame rate to fire at all. Check the
+        // result, and record whatever we actually ended up on so the
+        // diagnostics readout (and therefore a bug report) can say so.
+        let ok = false;
+        try {
+          ok = await tf.setBackend('webgl');
+        } catch (e) {
+          diag.backendError = String((e && e.message) || e);
+        }
+        if (!ok) {
+          diag.backendError = diag.backendError || 'WebGL backend unavailable';
+          try { await tf.setBackend('cpu'); } catch {}
+        }
         await tf.ready();
+        diag.backend = (typeof tf.getBackend === 'function' && tf.getBackend()) || 'unknown';
       })();
     }
     return libsLoadedPromise;
@@ -1060,26 +1305,153 @@
     });
     return detector;
   }
+  // =========================================================================
+  // SCREEN WAKE LOCK — 2026-09-14, "iPhone 13 didn't work when doing the
+  // motion capture"
+  // =========================================================================
+  // Camera mode's entire premise is that the phone is propped up and then NOT
+  // touched again: the player walks back to their play space and looks at the
+  // TV for the rest of setup and the whole run. From the phone's point of view
+  // that is minutes of zero user input — and a phone receiving no input locks
+  // its screen. When it locks, the page is suspended, the OS stops the camera
+  // track, and every pose frame from then on fails. Nothing reaches the TV,
+  // but when you pick the phone up and unlock it the camera preview springs
+  // back looking perfectly healthy. That is precisely the reported symptom:
+  // camera fine, character never moved.
+  //
+  // Why this bit an iPhone when the Android phone this was built against was
+  // fine: Chrome on Android takes a display wake lock of its own while a
+  // visible <video> element is playing, and a camera preview counts — so
+  // Android had been staying awake by accident, for a reason nothing in this
+  // code asked for. iOS Safari does no such thing for muted inline video or a
+  // MediaStream, so an iPhone just follows its Auto-Lock setting, whose
+  // shortest option is 30 SECONDS — far less than camera setup takes on any
+  // device.
+  //
+  // Fix: hold a real Screen Wake Lock for as long as the camera is running
+  // (Safari 16.4+, Chrome 84+), re-acquire it whenever the page returns to the
+  // foreground — the platform releases it on hide, by spec, so this is not
+  // optional — and release it when the camera stops. Where the API isn't
+  // available at all, say so on screen: a page cannot override Auto-Lock
+  // without it, and the player needs to know to change that setting rather
+  // than discover it by having the game quietly stop.
+  let wakeLock = null;
+  async function acquireWakeLock() {
+    if (!('wakeLock' in navigator) || !navigator.wakeLock) {
+      diag.wakeLock = 'unsupported';
+      return false;
+    }
+    if (wakeLock) return true;
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+      diag.wakeLock = 'held';
+      wakeLock.addEventListener('release', () => {
+        wakeLock = null;
+        if (diag.wakeLock === 'held') diag.wakeLock = 'released';
+      });
+      return true;
+    } catch (e) {
+      // Thrown when the page is hidden, the battery is very low, or the
+      // platform simply refuses. Not fatal — worth reporting, not worth
+      // stopping over.
+      wakeLock = null;
+      diag.wakeLock = 'refused';
+      diag.wakeLockError = String((e && e.message) || e);
+      return false;
+    }
+  }
+  function releaseWakeLock() {
+    if (!wakeLock) return;
+    try { wakeLock.release(); } catch {}
+    wakeLock = null;
+    diag.wakeLock = 'released';
+  }
+
+  // A <video> fed by a MediaStream can report 0x0 for a short while after
+  // loadedmetadata on some platforms, and TFJS throws outright on a zero-sized
+  // input. Waiting for real dimensions once, here, is cheaper than letting
+  // every early frame fail and be swallowed — and it also means
+  // syncOverlayCanvas() below sizes itself against a frame that exists.
+  function waitForVideoDimensions(timeoutMs = 5000) {
+    if (cameraVideo.videoWidth > 0 && cameraVideo.videoHeight > 0) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const started = performance.now();
+      const tick = () => {
+        if (cameraVideo.videoWidth > 0 && cameraVideo.videoHeight > 0) return resolve(true);
+        if (performance.now() - started > timeoutMs) return resolve(false);
+        requestAnimationFrame(tick);
+      };
+      tick();
+    });
+  }
+
+  async function openCameraStream() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      // Nearly always an insecure origin: both iOS and Android hide
+      // mediaDevices entirely on plain http:// (localhost excepted), so this
+      // is worth naming rather than reporting as a generic camera failure.
+      throw new Error('This browser is not offering camera access (is the page on https?)');
+    }
+    cameraStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+      audio: false,
+    });
+    cameraVideo.srcObject = cameraStream;
+    await new Promise((resolve) => {
+      if (cameraVideo.readyState >= 1) return resolve();
+      cameraVideo.onloadedmetadata = () => resolve();
+    });
+    // play() returns a promise that can reject (autoplay policy, a stream
+    // pulled away mid-start). The old code ignored it, which turned a failed
+    // play into a permanently blank tracker with no message anywhere.
+    try {
+      await cameraVideo.play();
+    } catch (e) {
+      diag.playError = String((e && e.message) || e);
+    }
+    await waitForVideoDimensions();
+    // The camera track ending underneath us is the single most likely way
+    // camera mode dies in the field (screen lock, another app taking the
+    // camera, the OS reclaiming it). Listen for it directly rather than
+    // inferring it from failing inference.
+    const track = cameraStream.getVideoTracks()[0];
+    if (track) {
+      track.addEventListener('ended', () => {
+        diag.trackEnded = true;
+        noteCameraLost('The camera stopped — phone may have locked its screen.');
+      });
+      track.addEventListener('mute', () => { diag.trackMuted = true; });
+      track.addEventListener('unmute', () => { diag.trackMuted = false; });
+    }
+  }
+
   async function startCamera() {
     cameraStatus.textContent = 'Starting camera…';
     cameraView.style.display = 'block';
 
-    if (!cameraStream) {
-      cameraStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
-        audio: false,
-      });
-      cameraVideo.srcObject = cameraStream;
-      await new Promise((resolve) => {
-        cameraVideo.onloadedmetadata = () => { cameraVideo.play(); resolve(); };
-      });
-    }
+    if (!cameraStream) await openCameraStream();
     syncOverlayCanvas();
+    // Deliberately not awaited — the camera should never wait on this — but the
+    // result does matter to the player, because a phone that can't be kept
+    // awake will lock itself mid-run and take the camera with it.
+    acquireWakeLock().then((held) => {
+      if (held) return;
+      showToast(diag.wakeLock === 'unsupported'
+        ? "Can't stop this phone sleeping — set Auto-Lock to Never, or tracking will stop."
+        : "Couldn't keep the screen awake — if tracking stops, wake the phone and it'll pick back up.");
+    });
 
     cameraStatus.textContent = 'Loading pose tracker…';
     await ensureDetector();
+    if (diag.backend && diag.backend !== 'webgl') {
+      // Worth interrupting the player for: MoveNet on the CPU backend is far
+      // too slow for gesture detection, so this is a real "it will not work"
+      // rather than a curiosity.
+      showToast(`Pose tracking is running on the slow "${diag.backend}" mode — movements may not register.`);
+    }
     cameraStatus.textContent = 'Step into frame';
 
+    resetPoseHealth();
     if (!poseLoopRunning) {
       poseLoopRunning = true;
       poseLoop();
@@ -1087,11 +1459,121 @@
   }
   function stopCamera() {
     poseLoopRunning = false;
+    releaseWakeLock();
     if (cameraStream) {
       cameraStream.getTracks().forEach((t) => t.stop());
       cameraStream = null;
     }
   }
+
+  // =========================================================================
+  // POSE-LOOP HEALTH — 2026-09-14
+  // =========================================================================
+  // poseLoop()'s catch used to read `// transient — skip this frame` and
+  // discard the error. That is right for the occasional dropped frame and
+  // catastrophic for anything permanent: a tracker that has stopped working
+  // for good produces exactly the same screen as a player who simply isn't
+  // standing in frame yet — camera preview running, no skeleton, no messages,
+  // forever, on both the phone and the TV. Every candidate cause of the
+  // iPhone report (a stopped camera track, a zero-sized video, a WebGL
+  // context loss, a detector that won't run on this device) reached the
+  // player identically: as silence. So: count how LONG failure has been
+  // continuous, try one automatic recovery, and if that doesn't take, say
+  // plainly what happened and point at the fallback that always works.
+  let poseFailSince = 0;
+  let poseLastOkT = 0;
+  let poseRecoveryTried = false;
+  let poseGaveUp = false;
+  let poseFrameCount = 0;
+  let poseFpsWindowStart = 0;
+
+  function resetPoseHealth() {
+    poseFailSince = 0;
+    poseLastOkT = performance.now();
+    poseRecoveryTried = false;
+    poseGaveUp = false;
+    poseFrameCount = 0;
+    poseFpsWindowStart = performance.now();
+    diag.poseFps = 0;
+    diag.poseError = '';
+    diag.trackEnded = false;
+  }
+
+  // Called both by the track's own 'ended' event and by the failure path
+  // below — whichever notices first.
+  function noteCameraLost(message) {
+    if (currentMode !== 'camera' || poseGaveUp) return;
+    cameraStatus.textContent = message;
+    showDiagnostics(true);
+    tryCameraRecovery();
+  }
+
+  let recoveryInFlight = false;
+  async function tryCameraRecovery() {
+    if (recoveryInFlight || poseRecoveryTried || currentMode !== 'camera') return;
+    recoveryInFlight = true;
+    poseRecoveryTried = true;
+    diag.recoveryAttempts = (diag.recoveryAttempts || 0) + 1;
+    try {
+      cameraStatus.textContent = 'Restarting camera…';
+      if (cameraStream) {
+        cameraStream.getTracks().forEach((t) => t.stop());
+        cameraStream = null;
+      }
+      await openCameraStream();
+      syncOverlayCanvas();
+      acquireWakeLock();
+      resetPoseHealth();
+      cameraStatus.textContent = 'Step into frame';
+      if (!poseLoopRunning) { poseLoopRunning = true; poseLoop(); }
+      // Clear the TV's sticky "phone stopped tracking" banner — it doesn't
+      // clear itself (see updateTrackingWarning() in tv/game.js), because
+      // nothing but this actually fixes it.
+      sendCalibration('tracking', { status: 'ok' });
+    } catch (e) {
+      diag.recoveryError = String((e && e.message) || e);
+      giveUpOnCamera();
+    } finally {
+      recoveryInFlight = false;
+    }
+  }
+
+  function giveUpOnCamera() {
+    if (poseGaveUp) return;
+    poseGaveUp = true;
+    cameraStatus.textContent = 'Camera tracking has stopped';
+    showDiagnostics(true);
+    showToast('Camera tracking stopped working. Tap 🎮 Controller at the top to keep playing.');
+    // The TV is the only screen the player is actually looking at during a
+    // run, so it has to hear about this too — reuse the framing/tracking
+    // message the TV already understands and relays unconditionally.
+    sendCalibration('tracking', { status: 'camera_lost' });
+  }
+
+  // 2026-09-14: nothing in this file watched for the page being backgrounded.
+  // The wake lock is released by the platform on hide (by spec), and on iOS a
+  // screen lock also ends the camera track — so coming back to the foreground
+  // is exactly the moment to re-take the lock and check whether there is still
+  // a live camera to read from.
+  document.addEventListener('visibilitychange', () => {
+    diag.hiddenCount = diag.hiddenCount || 0;
+    if (document.hidden) {
+      diag.hiddenCount++;
+      diag.lastHiddenAt = new Date().toLocaleTimeString();
+      return;
+    }
+    if (currentMode !== 'camera') return;
+    acquireWakeLock();
+    const track = cameraStream && cameraStream.getVideoTracks()[0];
+    const dead = !track || track.readyState === 'ended';
+    if (dead) {
+      poseRecoveryTried = false; // a fresh chance now that we're visible again
+      poseGaveUp = false;
+      noteCameraLost('Camera stopped while the phone was asleep — restarting…');
+    } else if (cameraVideo.paused) {
+      cameraVideo.play().catch((e) => { diag.playError = String((e && e.message) || e); });
+    }
+  });
 
   let lastPoseT = 0;
   async function poseLoop() {
@@ -1104,12 +1586,49 @@
     lastPoseT = now;
     try {
       const poses = await detector.estimatePoses(cameraVideo, { maxPoses: 1, flipHorizontal: false });
+      // A successful call clears the failure streak — see the POSE-LOOP HEALTH
+      // block above for why a streak is tracked at all.
+      poseFailSince = 0;
+      poseLastOkT = now;
+      poseFrameCount++;
+      if (now - poseFpsWindowStart >= 1000) {
+        diag.poseFps = Math.round((poseFrameCount * 1000) / (now - poseFpsWindowStart));
+        poseFrameCount = 0;
+        poseFpsWindowStart = now;
+      }
+      diag.videoSize = `${cameraVideo.videoWidth}x${cameraVideo.videoHeight}`;
       processPose(poses[0]);
     } catch (e) {
-      // transient — skip this frame
+      // Still skip the frame — but no longer silently. One bad frame is
+      // ordinary; continuous failure is the bug that hid the iPhone problem.
+      if (!poseFailSince) poseFailSince = now;
+      diag.poseError = String((e && e.message) || e);
+      const failedFor = now - poseFailSince;
+      if (failedFor > POSE_FAIL_GIVEUP_MS) {
+        giveUpOnCamera();
+      } else if (failedFor > POSE_FAIL_RECOVER_MS) {
+        tryCameraRecovery();
+      } else if (failedFor > POSE_FAIL_WARN_MS) {
+        cameraStatus.textContent = 'Tracking trouble — hold on…';
+      }
     }
     requestAnimationFrame(poseLoop);
   }
+
+  // The stall watchdog has to live OUTSIDE poseLoop(). estimatePoses() can
+  // stop coming back entirely rather than rejecting — a lost WebGL context can
+  // leave that promise pending forever, and requestAnimationFrame stops firing
+  // altogether while the page is backgrounded — and in either case the loop is
+  // parked at its own `await`, so no check placed inside it can ever run. A
+  // plain interval keeps ticking regardless, which is the whole point.
+  setInterval(() => {
+    if (!poseLoopRunning || currentMode !== 'camera' || poseGaveUp) return;
+    if (document.hidden) return; // expected to be idle; visibilitychange handles the return
+    const since = performance.now() - poseLastOkT;
+    if (!poseLastOkT || since <= POSE_STALL_MS) return;
+    diag.poseError = diag.poseError || `no pose frame for ${Math.round(since / 1000)}s`;
+    if (poseRecoveryTried) giveUpOnCamera(); else tryCameraRecovery();
+  }, 1000);
 
   function kp(keypoints, name) {
     const p = keypoints.find((k) => k.name === name);
@@ -1120,6 +1639,86 @@
     return a || b || null;
   }
   function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+
+  // 2026-09-15. Works out, from whatever this frame's keypoints happen to
+  // contain, the two numbers the whole detector runs on: the point to measure
+  // movement FROM, and the yardstick to measure it AGAINST. Returns null when
+  // there isn't enough of a person to track at all — which now means "no
+  // shoulders", not "no full torso".
+  //
+  // Both shoulders are the real requirement, and that is a low bar by design:
+  // a camera that can see a person at all in a living room can almost always
+  // see their shoulders, and shoulders alone carry every gesture this game
+  // needs — sideways for lane, up for jump, down for duck, and they are the
+  // anchor a punch is measured from anyway.
+  let bodyRef = null;           // 'hips' | 'shoulders'
+  let hipsPresentFrames = 0;
+  let smoothedScale = null;
+  function resolveBody(shoulderMid, hipMid, lShoulder, rShoulder) {
+    // Scale first, since the reference choice doesn't change what a torso is
+    // worth. Prefer a real torso; fall back to shoulder width converted to an
+    // equivalent torso so every existing *_TORSO_FRAC constant keeps meaning
+    // the same physical distance.
+    let rawScale = null;
+    if (shoulderMid && hipMid) rawScale = dist(shoulderMid, hipMid);
+    else if (lShoulder && rShoulder) rawScale = dist(lShoulder, rShoulder) * SHOULDER_WIDTH_TO_TORSO;
+    if (!rawScale || !shoulderMid) {
+      bodyRef = null;
+      hipsPresentFrames = 0;
+      smoothedScale = null;
+      return null;
+    }
+    // Smoothed, because the thresholds derived from it are compared against
+    // per-frame movement: an unsmoothed scale makes every threshold jitter by
+    // a few percent each frame, which is the sort of thing that turns a
+    // borderline duck into an intermittent one.
+    rawScale = Math.max(20, rawScale);
+    smoothedScale = smoothedScale === null ? rawScale : smoothedScale * 0.85 + rawScale * 0.15;
+
+    // Reference point. Hips are preferred when genuinely available — they are
+    // what the thresholds were originally tuned against — but only after
+    // they've been steady for a while, so an intermittent hip can't drag the
+    // reference back and forth.
+    hipsPresentFrames = hipMid ? hipsPresentFrames + 1 : 0;
+    let nextRef;
+    if (!hipMid) nextRef = 'shoulders';
+    else if (bodyRef === null) nextRef = 'hips';   // first acquisition: take the best available at once
+    else if (bodyRef === 'hips') nextRef = 'hips';
+    else nextRef = hipsPresentFrames >= REF_HIP_REACQUIRE_FRAMES ? 'hips' : 'shoulders';
+
+    // First acquisition is not a "switch": there are no stale baselines to
+    // throw away, and counting it would put a misleading 1 in the diagnostics
+    // readout at the start of every single run.
+    const firstAcquisition = bodyRef === null;
+    if (nextRef !== bodyRef && firstAcquisition) {
+      bodyRef = nextRef;
+    } else if (nextRef !== bodyRef) {
+      // The reference just moved by most of a torso in one frame. Every
+      // baseline measured against the OLD reference is now meaningless, and
+      // leaving them in place is what would fire a phantom jump or duck at
+      // the exact moment the player's hips slipped out of frame. Same reset
+      // liveFramingCheck() does when the player changes distance, and for the
+      // same reason.
+      bodyRef = nextRef;
+      poseCenterX = null;
+      poseCenterSamples.length = 0;
+      poseHipYBaseline = null;
+      jumpArmed = true;
+      duckArmed = true;
+      punchPending = { left: null, right: null };
+      diag.refSwitches = (diag.refSwitches || 0) + 1;
+    }
+    diag.bodyRef = bodyRef;
+    return {
+      point: bodyRef === 'hips' ? hipMid : shoulderMid,
+      scale: smoothedScale,
+      ref: bodyRef,
+      hasHips: !!hipMid,
+      // What the player would say they can see of themselves — used for the
+      // framing advice and shown in the diagnostics readout.
+      view: hipMid ? 'full body' : 'head & shoulders',
+    };
+  }
 
   function processPose(pose) {
     clearOverlay();
@@ -1137,10 +1736,18 @@
     const rHip = kp(keypoints, 'right_hip');
     const shoulderMid = midpoint(lShoulder, rShoulder);
     const hipMid = midpoint(lHip, rHip);
-    // "Locked" = the tracker has a full torso, which is what every gesture
-    // is measured against. Drives the overlay colour so the player can see
-    // at a glance whether they're actually being tracked.
-    const locked = !!(shoulderMid && hipMid);
+    // 2026-09-15 ("in landscape it's rare that the player's full body will be
+    // visible"): "locked" used to mean a FULL TORSO — both a shoulder and a
+    // hip — and every threshold in this file was a fraction of the
+    // shoulder-to-hip distance. Propped up in landscape, a phone very often
+    // sees head and shoulders and no hips at all, and in that framing the old
+    // check never locked on: the overlay stayed red, the status stayed "Step
+    // into frame", and nothing was ever detected. Tracking now degrades
+    // instead of failing — see resolveBody() for what it falls back to and
+    // why switching reference mid-run has to reset the baselines.
+    const body = resolveBody(shoulderMid, hipMid, lShoulder, rShoulder);
+    const locked = !!body;
+    diag.locked = locked;
     drawFramingGuide(locked);
     drawSkeleton(keypoints, locked);
     if (!locked) {
@@ -1150,20 +1757,38 @@
     }
     cameraStatus.textContent = '';
 
-    const torsoScale = Math.max(20, dist(shoulderMid, hipMid));
+    // `refPoint` is the single point every gesture is measured from (hips when
+    // they're there, shoulders otherwise) and `torsoScale` is the yardstick
+    // every threshold is a fraction of — an EQUIVALENT torso length, so all
+    // the existing tuning keeps its meaning whichever source it came from.
+    const refPoint = body.point;
+    const torsoScale = body.scale;
+    // Recorded for the diagnostics readout: torso size as a fraction of the
+    // frame's short side is the number every framing decision turns on, so
+    // seeing it is what distinguishes "the framing gate is rejecting this
+    // player" from "pose detection isn't running at all".
+    {
+      const shortSide = Math.min(cameraVideo.videoWidth || 1, cameraVideo.videoHeight || 1);
+      diag.torsoFrac = torsoScale / shortSide;
+    }
+
+    // 2026-09-15: computed ONCE per frame and shared by the setup gate and
+    // the in-play drift check below, which used to run separate and (after
+    // this round) incompatible versions of the same judgement.
+    const framingStatus = computeFramingStatus(keypoints, refPoint, torsoScale, body);
 
     if (framingActive) {
       // Still working through the placement/framing handshake with the TV
       // — evaluate & report how well-framed the player is, but don't ALSO
       // run real lane/jump/punch detection on top of that (see the big
       // header comment for why).
-      evaluateFraming(keypoints, hipMid, torsoScale);
+      evaluateFraming(framingStatus);
       return;
     }
     if (inCameraSetupGate) return; // still on the "place your phone" step — camera's warming up, nothing to detect yet
     if (!detectionEnabled) return;
 
-    liveFramingCheck(torsoScale, cameraVideo.videoWidth, cameraVideo.videoHeight);
+    liveFramingCheck(framingStatus);
 
     // Lane (absolute: which zone is the player's body in right now).
     // NOTE the sign convention: the camera feed is mirrored for display
@@ -1189,7 +1814,7 @@
     // and a RIGHT step immediately beforehand, so being mid-step at that
     // moment was likely rather than unlucky).
     if (poseCenterX === null) {
-      poseCenterSamples.push(hipMid.x);
+      poseCenterSamples.push(refPoint.x);
       if (poseCenterSamples.length >= POSE_CENTER_SAMPLES) {
         const sorted = poseCenterSamples.slice().sort((a, b) => a - b);
         poseCenterX = sorted[sorted.length >> 1];
@@ -1199,7 +1824,7 @@
     // Jump/duck/punch below don't depend on the lane baseline, so they stay
     // live through those few frames — only lane reporting waits.
     if (poseCenterX !== null) {
-      const dx = hipMid.x - poseCenterX;
+      const dx = refPoint.x - poseCenterX;
       updateLaneMarker(dx, laneEnter);
 
       const nextZone = computeZone(dx, cameraLaneZone, laneEnter, laneExit);
@@ -1213,7 +1838,7 @@
       // are standing. The band keeps it from eroding a deliberate lean that
       // is sitting just inside the enter threshold.
       if (cameraLaneZone === 0 && Math.abs(dx) < laneEnter * POSE_CENTER_SETTLE_BAND) {
-        poseCenterX += (hipMid.x - poseCenterX) * POSE_CENTER_SETTLE;
+        poseCenterX += (refPoint.x - poseCenterX) * POSE_CENTER_SETTLE;
       }
     }
 
@@ -1221,12 +1846,16 @@
     // they are the same measurement in opposite directions. Screen y grows
     // downward, so `rise` is positive when the player goes UP and `drop`
     // is positive when they go DOWN.
-    if (poseHipYBaseline === null) poseHipYBaseline = hipMid.y;
-    const rise = poseHipYBaseline - hipMid.y;
-    const drop = hipMid.y - poseHipYBaseline;
+    if (poseHipYBaseline === null) poseHipYBaseline = refPoint.y;
+    const rise = poseHipYBaseline - refPoint.y;
+    const drop = refPoint.y - poseHipYBaseline;
     const now = performance.now();
     const inCalibration = actionHandlers === calHandlers;
-    const duckTrigger = (inCalibration ? CAL_DUCK_TRIGGER_TORSO_FRAC : DUCK_TRIGGER_TORSO_FRAC) * torsoScale;
+    // 2026-09-15: scaled up when measuring from the shoulders, which travel
+    // further into a crouch than the hips this threshold was tuned against —
+    // see SHOULDER_REF_DUCK_MULT.
+    const duckRefMult = body.ref === 'shoulders' ? SHOULDER_REF_DUCK_MULT : 1;
+    const duckTrigger = (inCalibration ? CAL_DUCK_TRIGGER_TORSO_FRAC : DUCK_TRIGGER_TORSO_FRAC) * torsoScale * duckRefMult;
     const duckCooldown = inCalibration ? CAL_DUCK_COOLDOWN_MS : DUCK_COOLDOWN_MS;
 
     // Re-arm once the hips have genuinely returned near baseline — i.e. the
@@ -1256,7 +1885,7 @@
       // baseline down with it (and the player would have to duck further
       // and further each time), or a long jump's hang time would slowly
       // pull the baseline up to meet it.
-      poseHipYBaseline = poseHipYBaseline * 0.94 + hipMid.y * 0.06;
+      poseHipYBaseline = poseHipYBaseline * 0.94 + refPoint.y * 0.06;
     }
 
     // Punch (fast wrist extension)
@@ -1287,20 +1916,47 @@
   // actually see the warning. Hysteresis (the *_CLEAR fractions) stops
   // this flapping on/off right at the boundary, same idea as
   // LANE_EXIT_TORSO_FRAC for lanes.
-  function liveFramingCheck(torsoScale, frameW, frameH) {
-    const torsoFrac = torsoScale / Math.min(frameW, frameH);
-    let status = liveFramingStatus;
-    if (liveFramingStatus === 'ok') {
-      if (torsoFrac > FRAMING_TOO_CLOSE_FRAC) status = 'too_close';
-      else if (torsoFrac < FRAMING_TOO_FAR_FRAC) status = 'too_far';
-    } else if (liveFramingStatus === 'too_close' && torsoFrac < LIVE_FRAMING_TOO_CLOSE_CLEAR_FRAC) {
-      status = 'ok';
-    } else if (liveFramingStatus === 'too_far' && torsoFrac > LIVE_FRAMING_TOO_FAR_CLEAR_FRAC) {
-      status = 'ok';
+  // 2026-09-15: now fed the SAME framing verdict the setup gate uses, rather
+  // than running its own copy of the distance maths against thresholds tuned
+  // for a full-body view. Keeping two implementations was how the setup gate
+  // and the in-play check could disagree — and once setup accepts an
+  // upper-body framing, a live check still using the old bounds would have
+  // spent the whole run insisting the player was too close.
+  //
+  // Hysteresis is now "hold the new verdict for a moment before acting on it"
+  // rather than a second set of clearance thresholds. It does the same job —
+  // stopping a player sitting right on a boundary from flapping in and out of
+  // the warning — and it works for every status, including the cut-off ones
+  // that have no single number to put a clearance band around.
+  let livePendingStatus = 'ok';
+  let livePendingSinceT = 0;
+  function liveFramingCheck(status) {
+    const now = performance.now();
+    // Only two of the framing verdicts mean anything DURING a run, and this
+    // mapping is load-bearing:
+    //   - 'good' is the setup gate's word for healthy; this check's word is
+    //     'ok'. Treating them as different statuses made the first
+    //     well-framed moment of every run look like a status CHANGE, which
+    //     dropped the lane/jump/duck baselines and re-armed everything —
+    //     silently eating whatever gesture was in progress. Caught by
+    //     mr_test_pose_gestures.js ("a second, genuine jump after landing").
+    //   - 'off_center' is a setup concern only. Mid-run, being off-centre IS
+    //     the game: it's how you change lane. Warning about it, or resetting
+    //     baselines over it, would fight the player constantly.
+    const settled = (status === 'too_close' || status === 'too_far') ? status : 'ok';
+    if (settled !== livePendingStatus) {
+      livePendingStatus = settled;
+      livePendingSinceT = now;
     }
+    // A verdict has to persist to count. 'ok' is allowed to take effect
+    // faster than a warning: clearing a warning the player has already acted
+    // on should feel immediate, while raising one should not fire on a single
+    // odd frame.
+    const holdMs = settled === 'ok' ? LIVE_FRAMING_OK_HOLD_MS : LIVE_FRAMING_WARN_HOLD_MS;
+    if (now - livePendingSinceT < holdMs) return;
 
-    const changed = status !== liveFramingStatus;
-    liveFramingStatus = status;
+    const changed = settled !== liveFramingStatus;
+    liveFramingStatus = settled;
 
     if (changed) {
       // Whichever way this just changed, the OLD baselines were measured
@@ -1317,10 +1973,9 @@
       punchPending = { left: null, right: null };
       if (cameraLaneZone !== 0) { cameraLaneZone = 0; actionHandlers.laneZone(0); }
     }
-    const now = performance.now();
-    if (changed || (status !== 'ok' && now - lastLiveFramingSentT > LIVE_FRAMING_SEND_INTERVAL_MS)) {
+    if (changed || (settled !== 'ok' && now - lastLiveFramingSentT > LIVE_FRAMING_SEND_INTERVAL_MS)) {
       lastLiveFramingSentT = now;
-      sendCalibration('tracking', { status });
+      sendCalibration('tracking', { status: settled });
     }
   }
 
@@ -1331,23 +1986,63 @@
   // focal length), so "too close/far" is inferred from torso height as a
   // fraction of the frame — untested against a real phone camera, same
   // caveat as the rest of this file's thresholds (see header comment).
-  function evaluateFraming(keypoints, hipMid, torsoScale) {
+  // 2026-09-15, rewritten for "in landscape it's rare that the player's full
+  // body will be visible".
+  //
+  // This used to judge distance purely by torso height as a fraction of the
+  // frame's short side, between two fixed bounds. That test assumes a full
+  // body in frame, and it actively REJECTED the framing Don describes: stand
+  // where a landscape phone can only see you from the waist up and your torso
+  // fills far more of the frame than 0.34, so the old check called it
+  // "too_close" and told you to back away — from a position that tracks
+  // perfectly well. Setup could not be completed from a normal living-room
+  // distance.
+  //
+  // What actually matters is not how much of you is in shot, it is:
+  //   1. can the tracker see enough of you to read a gesture (are you big
+  //      enough in frame, and are your shoulders there at all), and
+  //   2. are you being CUT OFF at the edges, so a movement would carry part
+  //      of you out of shot.
+  // Both are checked directly now, and an upper-body-only view passes.
+  function computeFramingStatus(keypoints, refPoint, torsoScale, body) {
     const frameW = cameraVideo.videoWidth;
     const frameH = cameraVideo.videoHeight;
     const nose = kp(keypoints, 'nose');
+    const lShoulder = kp(keypoints, 'left_shoulder');
+    const rShoulder = kp(keypoints, 'right_shoulder');
 
     let status;
-    // Short side, not height — see the FRAMING_* constants above for why
-    // this has to be orientation-independent now the phone stands upright.
+    // Still normalised against the SHORT side, so the number means the same
+    // physical distance whichever way up the phone is — the one part of the
+    // old approach that was orientation-independent and worth keeping.
     const torsoFrac = torsoScale / Math.min(frameW, frameH);
-    const centerOffsetFrac = Math.abs(hipMid.x - frameW / 2) / frameW;
+    const centerOffsetFrac = Math.abs(refPoint.x - frameW / 2) / frameW;
+    const marginX = frameW * FRAMING_EDGE_MARGIN_FRAC;
+    const marginY = frameH * FRAMING_EDGE_MARGIN_FRAC;
+    // "Cut off" = a landmark we depend on is sitting hard against an edge, so
+    // any movement toward it leaves the frame. The head and both shoulders
+    // are what's depended on; the legs explicitly are not.
+    const shoulderOffSide = (lShoulder && (lShoulder.x < marginX || lShoulder.x > frameW - marginX))
+      || (rShoulder && (rShoulder.x < marginX || rShoulder.x > frameW - marginX));
+    const headCutOff = nose && nose.y < marginY;
+    // Room to jump: the head needs somewhere to go. A player framed with
+    // their head already at the top of shot will leave the frame the moment
+    // they jump, and the jump will read as their head vanishing.
+    const noHeadroom = nose && nose.y < torsoScale * 0.45;
 
-    if (!nose) status = 'no_person';
-    else if (torsoFrac > FRAMING_TOO_CLOSE_FRAC) status = 'too_close';
-    else if (torsoFrac < FRAMING_TOO_FAR_FRAC) status = 'too_far';
+    if (!body || !nose) status = 'no_person';
+    else if (torsoFrac < FRAMING_MIN_SCALE_FRAC) status = 'too_far';
+    else if (shoulderOffSide || headCutOff || noHeadroom) status = 'too_close';
     else if (centerOffsetFrac > FRAMING_OFFCENTER_FRAC) status = 'off_center';
     else status = 'good';
+    diag.framing = status;
+    diag.view = body ? body.view : '-';
+    return status;
+  }
 
+  // The setup-gate half: how long has the player held a good framing, and is
+  // that long enough to tell the TV they're ready to move on.
+  function evaluateFraming(status) {
     const now = performance.now();
     if (status === 'good') {
       if (framingGoodStreakStart === null) framingGoodStreakStart = now;
@@ -1366,7 +2061,7 @@
     const now = performance.now();
     if (ready || now - lastFramingSentT > FRAMING_SEND_INTERVAL_MS) {
       lastFramingSentT = now;
-      sendCalibration('framing', { status, ready });
+      sendCalibration('framing', { status, ready, view: diag.view });
     }
   }
 
@@ -1578,8 +2273,31 @@
     return typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function';
   }
 
+  // 2026-09-14: iOS only grants motion access from a call made DIRECTLY inside
+  // a user gesture — once anything has been awaited, the gesture is spent and
+  // requestPermission() rejects outright. That is fine on the two paths that
+  // reach here straight from a tap (the "Hold my phone instead" button and the
+  // 📳 tab), and quietly fatal on the one that doesn't: setMode()'s camera
+  // fallback awaits the failed startCamera() first, so on an iPhone a camera
+  // problem used to take the hold-phone fallback down with it — no camera, no
+  // sensors, one toast, nothing working. Hence `motionPermBanner`: when the
+  // prompt can't be raised (or was refused), surface a button so the player
+  // can grant it from a fresh, real tap instead of being left with neither
+  // mode. Android never has the prompt at all and is unaffected throughout.
+  function showMotionPermBanner(reason) {
+    diag.motionPerm = reason;
+    if (!motionPermBanner) return;
+    motionPermBanner.hidden = false;
+    motionPermBanner.classList.add('show');
+  }
+  function hideMotionPermBanner() {
+    if (!motionPermBanner) return;
+    motionPermBanner.hidden = true;
+    motionPermBanner.classList.remove('show');
+  }
+
   async function startMotionListeners() {
-    if (motionListenersAttached) return;
+    if (motionListenersAttached) return true;
     if (needsIOSPermission()) {
       try {
         const motionResp = await DeviceMotionEvent.requestPermission();
@@ -1588,17 +2306,33 @@
           orientationResp = await DeviceOrientationEvent.requestPermission();
         }
         if (motionResp !== 'granted' || orientationResp !== 'granted') {
+          diag.motionPerm = 'denied';
           showToast('Motion permission denied — use tap-to-steer and the buttons.');
-          return;
+          showMotionPermBanner('denied');
+          return false;
         }
-      } catch {
-        showToast('Could not enable motion sensors — use tap-to-steer and the buttons.');
-        return;
+      } catch (e) {
+        // Overwhelmingly "not called from a user gesture" — recoverable with
+        // one tap, so offer that rather than writing the mode off.
+        diag.motionPermError = String((e && e.message) || e);
+        showToast('Tap “Turn on motion sensors” to let the phone feel your movements.');
+        showMotionPermBanner('needs a tap');
+        return false;
       }
     }
+    diag.motionPerm = 'granted';
+    hideMotionPermBanner();
     window.addEventListener('devicemotion', onDeviceMotion);
     window.addEventListener('deviceorientation', onDeviceOrientation);
     motionListenersAttached = true;
+    return true;
+  }
+  if (enableMotionBtn) {
+    enableMotionBtn.addEventListener('click', async () => {
+      // A genuine tap — the one context iOS will raise the prompt in.
+      const ok = await startMotionListeners();
+      if (ok) showToast('Motion sensors on.');
+    });
   }
   function stopMotionListeners() {
     if (!motionListenersAttached) return;
@@ -1795,6 +2529,67 @@
         poseHipYBaseline, poseCenterX, cameraLaneZone,
       };
     },
+    // 2026-09-14 additions. The wake-lock / camera-recovery / error-surfacing
+    // work of this round is all about what happens when the camera or the pose
+    // detector FAILS — and neither exists in an automated test environment, so
+    // the only way to cover these paths is to drive them directly. Same
+    // principle as injectPose() above: exercise the real functions, not a
+    // reimplementation of them.
+    diag() { return { ...diag }; },
+    diagVisible() { return diagVisible; },
+    // Pretends the pose detector is failing, for `ms` of simulated continuous
+    // failure, and returns what the health logic decided. Exercises the real
+    // thresholds (POSE_FAIL_WARN_MS / _RECOVER_MS / _GIVEUP_MS) without
+    // needing a camera to break.
+    simulatePoseFailure(ms) {
+      const now = performance.now();
+      poseFailSince = now - ms;
+      diag.poseError = 'simulated failure';
+      const failedFor = now - poseFailSince;
+      if (failedFor > POSE_FAIL_GIVEUP_MS) giveUpOnCamera();
+      else if (failedFor > POSE_FAIL_RECOVER_MS) tryCameraRecovery();
+      else if (failedFor > POSE_FAIL_WARN_MS) cameraStatus.textContent = 'Tracking trouble — hold on…';
+      return { status: cameraStatus.textContent, gaveUp: poseGaveUp, recoveryAttempts: diag.recoveryAttempts };
+    },
+    // Lets a test assert the mode-plumbing around the failure paths (which
+    // check currentMode) without a real getUserMedia call.
+    forceMode(mode) { currentMode = mode; },
+    // 2026-09-15: puts the detector into the setup FRAMING stage, where
+    // computeFramingStatus()/evaluateFraming() run and real gesture detection
+    // deliberately does not — the state the partial-body framing rules have to
+    // be asserted in. Same idea as enterRealPlay() above.
+    enterFramingCheck(opts) {
+      actionHandlers = calHandlers;
+      inCameraSetupGate = true;
+      framingActive = true;
+      detectionEnabled = true;
+      const frameW = (opts && opts.frameW) || 640;
+      const frameH = (opts && opts.frameH) || 480;
+      Object.defineProperty(cameraVideo, 'videoWidth', { value: frameW, configurable: true });
+      Object.defineProperty(cameraVideo, 'videoHeight', { value: frameH, configurable: true });
+    },
+    // Resets the partial-body reference tracking, so each test case starts
+    // from "nothing acquired yet" rather than inheriting the previous case's
+    // reference choice and its re-acquire counter.
+    resetBodyRef() {
+      bodyRef = null;
+      hipsPresentFrames = 0;
+      smoothedScale = null;
+      diag.refSwitches = 0;
+      livePendingStatus = 'ok';
+      livePendingSinceT = 0;
+      liveFramingStatus = 'ok';
+    },
+    bodyState() { return { ref: bodyRef, scale: smoothedScale, hipsPresentFrames, switches: diag.refSwitches }; },
+    poseHealth() {
+      return {
+        poseGaveUp, poseRecoveryTried, poseFailSince, poseLastOkT,
+        loopRunning: poseLoopRunning,
+      };
+    },
+    resetPoseHealth,
+    wakeLockState() { return diag.wakeLock; },
+    showDiagnostics,
   };
 
   // =========================================================================

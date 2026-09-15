@@ -3364,10 +3364,17 @@ const pairingPanel = document.getElementById('pairingPanel');
 const readyPanel = document.getElementById('readyPanel');
 const gameOverPanel = document.getElementById('gameOverPanel');
 const calibrationPanel = document.getElementById('calibrationPanel');
+const calReviewPanel = document.getElementById('calReviewPanel');
 const calStepCounter = document.getElementById('calStepCounter');
 const calMoveIcon = document.getElementById('calMoveIcon');
 const calMoveText = document.getElementById('calMoveText');
 const calDots = document.getElementById('calDots');
+const calCountdown = document.getElementById('calCountdown');
+const calCountdownNum = document.getElementById('calCountdownNum');
+const calCountdownNext = document.getElementById('calCountdownNext');
+const calMoveBlock = document.getElementById('calMoveBlock');
+const calSkipHint = document.getElementById('calSkipHint');
+const calReviewList = document.getElementById('calReviewList');
 const placementPanel = document.getElementById('placementPanel');
 const framingPanel = document.getElementById('framingPanel');
 const framingSilhouette = document.getElementById('framingSilhouette');
@@ -3433,6 +3440,7 @@ const PANELS = {
   gameover: gameOverPanel,
   paused: pausedPanel,
   calibrating: calibrationPanel,
+  calReview: calReviewPanel,
   placement: placementPanel,
   framing: framingPanel,
   levelSelect: levelSelectPanel,
@@ -3468,7 +3476,8 @@ const CONTROL_BADGE_TEXT = {
   ready: { text: '🎮 OK or 📱 jump/punch to start', cls: 'remote' },
   placement: { text: '🎮 Step back, then press OK', cls: 'remote' },
   framing: { text: '🎮 Get in frame — press OK to skip ahead', cls: 'remote' },
-  calibrating: { text: '📱 Copy the moves · 🎮 OK to start', cls: 'phone' },
+  calibrating: { text: '📱 Copy the moves · 🎮 ▶ skips one · OK starts', cls: 'phone' },
+  calReview: { text: '🎮 ▲▼ choose · OK to pick', cls: 'remote' },
   paused: { text: '🎮 Remote OK to resume, Back to exit', cls: 'remote' },
   gameover: { text: '🎮 Remote OK to retry · Back for levels', cls: 'remote' },
   levelSelect: { text: '🎮 ◀ ▶ to choose · OK to travel', cls: 'remote' },
@@ -3496,6 +3505,11 @@ function updateControlBadge(stageKey) {
 }
 function showPanel(which) {
   Object.entries(PANELS).forEach(([name, el]) => {
+    // Null-guarded since 2026-09-15: this file is shared by /tv and /solo, and
+    // a panel added to one page but not the other used to throw here on every
+    // call — which, because showPanel() runs during boot, stopped the page
+    // loading at all rather than merely missing a panel.
+    if (!el) return;
     el.style.display = name === which ? 'block' : 'none';
   });
 }
@@ -3524,7 +3538,12 @@ function syncPanel() {
   }
   if (setupStage === 'placement') { showPanel('placement'); updateControlBadge('placement'); return; }
   if (setupStage === 'framing') { showPanel('framing'); updateControlBadge('framing'); return; }
-  if (calibrating) { showPanel('calibrating'); updateControlBadge('calibrating'); return; }
+  if (calibrating) {
+    const which = calPhase === 'review' ? 'calReview' : 'calibrating';
+    showPanel(which);
+    updateControlBadge(which);
+    return;
+  }
   if (state.phase === 'pairing') { showPanel('pairing'); updateControlBadge('pairing'); }
   else if (state.phase === 'levelSelect') { showPanel('levelSelect'); updateControlBadge('levelSelect'); }
   else if (state.phase === 'ready') { showPanel('ready'); updateControlBadge('ready'); }
@@ -3767,6 +3786,17 @@ function updateTrackingWarning(status) {
   } else if (status === 'too_far') {
     trackingWarningEl.textContent = '↪ Come a bit closer';
     trackingWarningEl.style.display = 'flex';
+  } else if (status === 'camera_lost') {
+    // 2026-09-14 (iPhone 13, "didn't work when doing the motion capture"): the
+    // phone now reports when camera tracking has stopped for good rather than
+    // failing silently — most often because the phone locked its own screen
+    // while propped up and untouched. The player is looking at the TV, not at
+    // the phone lying across the room, so this is the only place they will see
+    // it. Deliberately sticky: unlike the framing nudges above, this does not
+    // clear itself, because nothing will fix it until the player goes and
+    // touches the phone.
+    trackingWarningEl.textContent = '📵 Phone stopped tracking — wake it up';
+    trackingWarningEl.style.display = 'flex';
   } else {
     trackingWarningEl.style.display = 'none';
   }
@@ -3833,37 +3863,408 @@ function renderCalDots() {
 // instead of merely reacting to it: every time the shown step changes, the
 // TV tells the phone which single move it is currently asking for, and the
 // phone ignores everything else (see expectedCalStep in controller.js).
-function requestCalStepOnPhone() {
+function requestCalStepOnPhone(countdown) {
   sendCalibrationControl('step_request', {
     step: calIndex < CAL_ORDER.length ? CAL_ORDER[calIndex] : null,
     index: calIndex,
     total: CAL_ORDER.length,
     mode: calMode,
+    // Tells the phone to hold its detectors until we say GO — see
+    // calStepArmed in controller.js. Without this an old phone build would
+    // never arm, so the flag is only set when we really are counting in.
+    countdown: !!countdown,
   });
 }
+
+// =========================================================================
+// PER-MOVE COUNTDOWN — 2026-09-15
+// =========================================================================
+// "There should always be a short countdown before doing a movement to allow
+// the player to get in position." Each move now runs in two beats: a counted
+// "Get ready... 3, 2, 1" during which the phone is NOT listening for the
+// move, then GO, at which point the phone is armed and the prompt is shown.
+//
+// The phone being disarmed for the count is the substantive half. Without it
+// the walkthrough registers whatever the player happens to be doing as they
+// walk back into position — which is the same class of bug as the 2026-09-03
+// ordering fix, where a move got ticked off before it was ever asked for.
+const CAL_COUNTDOWN_SECS = 3;
+const CAL_GO_HOLD_SECS = 0.45;      // how long "GO!" stays up before the prompt
+// How long a move can go unregistered before the remote is offered as a way
+// past it. Matches the phone's own on-screen skip (CAL_STUCK_HINT_MS).
+const CAL_SKIP_OFFER_SECS = 6;
+let calPhase = 'idle';              // 'idle' | 'countdown' | 'live' | 'review'
+// True while re-running a single move picked from the review screen. That move
+// returns to the review as soon as it's dealt with, rather than carrying on
+// through moves that are already done.
+//
+// Deliberately an explicit flag rather than "skip any step already marked
+// done" — that was the 2026-09-03 bug, where a move ticked off in the
+// background got silently skipped and its prompt never appeared. A redo is
+// the one case where moving straight on is genuinely correct, so it says so.
+let calRedoing = false;
+let calCountdownT = 0;
+let calLiveT = 0;
+// Per move: true once it actually registered, false if it was skipped.
+let calSkipped = Object.fromEntries(CAL_ORDER.map((k) => [k, false]));
+
+function moveLabel(key) {
+  const meta = CAL_META[key];
+  return calMode === 'hold' ? meta.textHold : meta.textCamera;
+}
+
 function showCalibrationStep() {
   if (calIndex >= CAL_ORDER.length) {
-    calMoveIcon.textContent = '🎉';
-    calMoveText.textContent = 'All set!';
-    calStepCounter.textContent = 'Nice work!';
-    renderCalDots();
-    requestCalStepOnPhone();
+    startCalReview();
     return;
   }
+  // Beat one: count the player in. The prompt itself is deliberately hidden
+  // for this beat so the countdown is the only thing on screen to react to.
+  calPhase = 'countdown';
+  calCountdownT = CAL_COUNTDOWN_SECS;
+  calLiveT = 0;
+  calStepCounter.textContent = `Move ${calIndex + 1} of ${CAL_ORDER.length}`;
+  calMoveBlock.style.display = 'none';
+  calSkipHint.style.display = 'none';
+  calCountdown.style.display = 'block';
+  calCountdownNum.classList.remove('go');
+  calCountdownNum.textContent = String(Math.ceil(CAL_COUNTDOWN_SECS));
+  calCountdownNext.textContent = `then ${moveLabel(CAL_ORDER[calIndex])}`;
+  renderCalDots();
+  requestCalStepOnPhone(true);
+  syncPanel();
+}
+
+// Beat two: the move is now live and the phone is listening for it.
+function armCalibrationStep() {
+  if (calIndex >= CAL_ORDER.length) return;
+  calPhase = 'live';
+  calLiveT = 0;
   const meta = CAL_META[CAL_ORDER[calIndex]];
+  calCountdown.style.display = 'none';
+  calMoveBlock.style.display = 'block';
   calMoveIcon.textContent = meta.icon;
-  calMoveText.textContent = calMode === 'hold' ? meta.textHold : meta.textCamera;
+  calMoveText.textContent = moveLabel(CAL_ORDER[calIndex]);
   // "Move" rather than "Step" — Setup 4/4 (the control badge, above) already
   // owns "step" for the four setup STAGES; reusing it here for the four
   // calibration MOVES was the exact ambiguity that made this screen read as
   // "back to setup stage 1" instead of "the first of four moves".
   calStepCounter.textContent = `Move ${calIndex + 1} of ${CAL_ORDER.length}`;
+  calSkipHint.style.display = 'none';
   renderCalDots();
-  requestCalStepOnPhone();
+  sendCalibrationControl('step_arm', { step: CAL_ORDER[calIndex] });
+}
+
+// Drives both beats. Called from animate().
+function updateCalibrationTimers(dt) {
+  if (!calibrating) return;
+  if (calPhase === 'countdown') {
+    const before = Math.ceil(calCountdownT);
+    calCountdownT -= dt;
+    if (calCountdownT <= 0) {
+      // A short "GO!" so the transition from counting to doing is visible,
+      // then the move prompt. The phone is armed at GO, not after it.
+      if (calCountdownT > -CAL_GO_HOLD_SECS) {
+        if (!calCountdownNum.classList.contains('go')) {
+          calCountdownNum.classList.add('go');
+          calCountdownNum.textContent = 'GO!';
+          sendCalibrationControl('step_arm', { step: CAL_ORDER[calIndex] });
+        }
+      } else {
+        armCalibrationStep();
+      }
+    } else if (Math.ceil(calCountdownT) !== before) {
+      calCountdownNum.textContent = String(Math.ceil(calCountdownT));
+    }
+    return;
+  }
+  if (calPhase === 'live') {
+    calLiveT += dt;
+    if (calLiveT > CAL_SKIP_OFFER_SECS && calSkipHint.style.display === 'none') {
+      calSkipHint.style.display = 'block';
+    }
+  }
+}
+
+// =========================================================================
+// SETUP MIRROR — 2026-09-15
+// =========================================================================
+// "During setup I believe it will be better to have the character there
+// copying your movements." Until now the character was not on screen at all
+// during setup: the menu camera sits high and level, looking down the track
+// past it, so the player had nothing to confirm their movements against
+// except a word changing on a panel.
+//
+// So while setup is running the character is put on screen and driven live by
+// the phone's `calibration`/'mirror' messages — every gesture detected, not
+// just the one the walkthrough is currently asking for (see sendMirror() in
+// controller.js for why those are deliberately separate).
+//
+// Two deliberate choices worth recording:
+//   - The view is the GAMEPLAY view (behind and above the character), not a
+//     face-on mirror. A face-on view would invert left and right against what
+//     the player is about to spend the whole run learning, and "step left ->
+//     character goes left" is the mapping worth teaching here.
+//   - The camera pans left rather than the character moving right, so the
+//     character sits in the free half of the screen next to the panel without
+//     anything being moved out of its real position.
+// Sized so the character is big enough to read from a sofa while the whole
+// three-lane spread (-2.4 .. +2.4) stays clear of the panel on the left AND
+// on screen to the right. The x offset is what does that: panning the camera
+// left moves the character right in frame without moving it anywhere real.
+// At this distance the horizontal half-width is about 6.6 units against a
+// worst-case offset of 5.1 (the far lane), so nobody ever leaves the frame,
+// and the near lane still clears the panel's right edge.
+const SETUP_CAM = { x: -2.7, y: 2.0, z: 6.2, lookY: 1.0, lookZ: -5 };
+let setupMirrorActive = false;
+let setupMirrorLane = 1;
+let savedCamera = null;
+
+function enterSetupMirror() {
+  if (setupMirrorActive) return;
+  setupMirrorActive = true;
+  setupMirrorLane = 1;
+  savedCamera = { pos: camera.position.clone(), quat: camera.quaternion.clone(), fov: camera.fov };
+  document.body.classList.add('setup-mirror');
+  // Start the character centred, upright and at rest whatever the last run
+  // left behind.
+  state.lane = 1;
+  state.jumpY = 0;
+  state.vy = 0;
+  state.grounded = true;
+  state.jumping = false;
+  state.duckTimer = 0;
+  state.punchTimer = 0;
+  state.punchAnimTimer = 0;
+  player.position.set(LANE_X[1], 0, 0);
+  player.rotation.set(0, 0, 0);
+  player.scale.set(1, 1, 1);
+}
+
+function exitSetupMirror() {
+  if (!setupMirrorActive) return;
+  setupMirrorActive = false;
+  document.body.classList.remove('setup-mirror');
+  if (savedCamera) {
+    // Put the camera back exactly as it was. updatePlaying() re-derives it
+    // every frame once a run starts, but the countdown and the era picker sit
+    // between here and there and would otherwise inherit the setup framing.
+    camera.position.copy(savedCamera.pos);
+    camera.quaternion.copy(savedCamera.quat);
+    camera.fov = savedCamera.fov;
+    camera.updateProjectionMatrix();
+    savedCamera = null;
+  }
+  player.position.x = LANE_X[1];
+  player.rotation.set(0, 0, 0);
+  player.scale.set(1, 1, 1);
+}
+
+// The phone's live gesture feed during setup. Deliberately routed here rather
+// than through handleInput(): that path starts a run on the first genuine
+// jump or punch, which would launch the game from the setup screen.
+function applySetupMirror(msg) {
+  if (!calibrating) return;
+  if (msg.action === 'lane_set') {
+    setupMirrorLane = Math.max(0, Math.min(2, 1 + (msg.value || 0)));
+    state.lane = setupMirrorLane;
+  } else if (msg.action === 'jump') {
+    if (state.grounded) {
+      state.grounded = false;
+      state.jumping = true;
+      state.vy = JUMP_VELOCITY;
+      audio.sfx('jump');
+    }
+  } else if (msg.action === 'duck') {
+    if (state.grounded && state.duckTimer <= 0) {
+      audio.sfx('jump', { rate: 0.62 });
+      state.duckTimer = DUCK_DURATION;
+    }
+  } else if (msg.action === 'punch') {
+    if (state.punchAnimTimer > 0) return;
+    audio.sfx('punch');
+    state.punchTimer = PUNCH_DURATION;
+    state.punchAnimTimer = PUNCH_ANIM_DURATION;
+  }
+}
+
+// A standing-still version of the character half of updatePlaying(): lane
+// slide, jump arc, duck squash and the punch animation, with no world scroll,
+// no collisions and no scoring. Kept deliberately small rather than reaching
+// into updatePlaying(), which is wound through the run's own state.
+function updateSetupMirror(dt) {
+  if (!setupMirrorActive) return;
+
+  camera.position.set(SETUP_CAM.x, SETUP_CAM.y, SETUP_CAM.z);
+  camera.lookAt(SETUP_CAM.x, SETUP_CAM.lookY, SETUP_CAM.lookZ);
+
+  const targetX = LANE_X[state.lane];
+  const dx = targetX - player.position.x;
+  player.position.x += dx * Math.min(1, dt * 24);
+  player.rotation.z = THREE.MathUtils.lerp(player.rotation.z, THREE.MathUtils.clamp(-dx * 0.35, -0.35, 0.35), dt * 16);
+
+  if (!state.grounded) {
+    state.vy += GRAVITY * dt;
+    state.jumpY += state.vy * dt;
+    if (state.jumpY <= 0) {
+      state.jumpY = 0;
+      state.vy = 0;
+      state.grounded = true;
+      state.jumping = false;
+      landSquash = 1;
+    }
+  } else {
+    state.jumpY = 0;
+  }
+  player.position.y = state.jumpY;
+  shadowBlob.position.x = player.position.x;
+  shadowBlob.scale.setScalar(THREE.MathUtils.clamp(1 - player.position.y * 0.15, 0.4, 1));
+
+  if (state.punchTimer > 0) state.punchTimer = Math.max(0, state.punchTimer - dt);
+  if (state.punchAnimTimer > 0) state.punchAnimTimer = Math.max(0, state.punchAnimTimer - dt);
+  if (state.duckTimer > 0) state.duckTimer = Math.max(0, state.duckTimer - dt);
+  if (landSquash > 0) landSquash = Math.max(0, landSquash - dt * 5.5);
+
+  // Idle, not running: the legs stay planted and the body breathes, so the
+  // character reads as standing there waiting for the player rather than
+  // jogging on the spot through a setup screen.
+  const breathe = Math.sin(performance.now() / 620) * 0.012;
+  legL.rotation.x = 0;
+  legR.rotation.x = 0;
+  upper.position.y = breathe;
+
+  const stretch = state.grounded ? 0 : THREE.MathUtils.clamp(state.vy / JUMP_VELOCITY, -1, 1) * 0.16;
+  const squash = landSquash * 0.26;
+  let duckAmt = 0;
+  if (state.duckTimer > 0) {
+    const frac = 1 - state.duckTimer / DUCK_DURATION;
+    if (frac < DUCK_IN_FRAC) duckAmt = frac / DUCK_IN_FRAC;
+    else if (frac > 1 - DUCK_OUT_FRAC) duckAmt = (1 - frac) / DUCK_OUT_FRAC;
+    else duckAmt = 1;
+    duckAmt = THREE.MathUtils.clamp(duckAmt, 0, 1);
+  }
+  const duckY = 1 - duckAmt * (1 - DUCK_SCALE_Y);
+  const duckXZ = 1 + duckAmt * 0.16;
+  player.scale.set(
+    (1 - stretch * 0.55 + squash * 0.7) * duckXZ,
+    (1 + stretch - squash) * duckY,
+    (1 - stretch * 0.55 + squash * 0.7) * duckXZ
+  );
+  upper.rotation.x = duckAmt * 0.5;
+
+  if (state.punchAnimTimer > 0) {
+    const elapsedFrac = 1 - state.punchAnimTimer / PUNCH_ANIM_DURATION;
+    const armAngle = punchArmRotation(elapsedFrac);
+    const bump = punchImpactBump(elapsedFrac);
+    const windup = Math.max(0, armAngle) / PUNCH_WINDUP_PULL;
+    armR.rotation.x = -armAngle;
+    armL.rotation.x = armAngle * 0.45;
+    armR.rotation.z = -bump * 0.30;
+    armL.rotation.z = bump * 0.42;
+    player.rotation.y = -armAngle * 0.34;
+    player.rotation.x = windup * 0.16 - bump * 0.30;
+    player.position.z = windup * 0.22 - bump * 1.15;
+    player.position.y += bump * 0.30;
+    head.rotation.x = -bump * 0.34;
+    torso.scale.set(1 + bump * 0.52, 1 - bump * 0.38 + windup * 0.52 * 0.19, 1 + bump * 0.52);
+  } else {
+    armL.rotation.set(0, 0, 0);
+    armR.rotation.set(0, 0, 0);
+    head.rotation.x = 0;
+    torso.scale.set(1, 1, 1);
+    player.rotation.x = 0;
+    player.rotation.y = 0;
+    player.position.z = 0;
+  }
+}
+
+// 2026-09-15: "giving the player to go back and reconfigure any movement not
+// done correctly". Rather than auto-finishing off the back of "All set!",
+// setup now ends on a review of what actually registered, with any move
+// redoable from the remote.
+let calReviewIndex = 0;
+function reviewRows() {
+  return [...CAL_ORDER.map((key) => ({ key })), { key: null }]; // null = "start playing"
+}
+function renderCalReview() {
+  const rows = reviewRows();
+  calReviewList.innerHTML = rows.map((row, i) => {
+    const selected = i === calReviewIndex ? ' selected' : '';
+    if (row.key === null) {
+      return `<div class="cal-review-row go${selected}">`
+        + '<span class="cal-review-icon">▶</span>'
+        + '<span class="cal-review-label">Start playing</span>'
+        + '</div>';
+    }
+    const done = calDone[row.key] && !calSkipped[row.key];
+    const meta = CAL_META[row.key];
+    return `<div class="cal-review-row ${done ? 'ok' : 'missed'}${selected}">`
+      + `<span class="cal-review-icon">${meta.icon}</span>`
+      + `<span class="cal-review-label">${moveLabel(row.key)}</span>`
+      + `<span class="cal-review-state">${done ? '✓ worked' : '↻ redo'}</span>`
+      + '</div>';
+  }).join('');
+}
+function startCalReview() {
+  calPhase = 'review';
+  calRedoing = false;
+  // Past the end of the list, so nothing downstream thinks a move is still
+  // being asked for — including a redo that came from the middle of it.
+  calIndex = CAL_ORDER.length;
+  calAutoFinishT = 0;
+  calCountdown.style.display = 'none';
+  // Nothing is expected of the phone on this screen — tell it so, which also
+  // clears its own per-move prompt and skip button.
+  requestCalStepOnPhone(false);
+  // Default to whichever is most useful: the first move that didn't work, so
+  // a single OK fixes the thing that needs fixing; otherwise "Start playing".
+  const firstMissed = CAL_ORDER.findIndex((k) => !calDone[k] || calSkipped[k]);
+  calReviewIndex = firstMissed === -1 ? CAL_ORDER.length : firstMissed;
+  renderCalReview();
+  syncPanel();
+}
+function moveCalReviewSelection(delta) {
+  const rows = reviewRows();
+  calReviewIndex = (calReviewIndex + delta + rows.length) % rows.length;
+  renderCalReview();
+}
+function activateCalReviewRow() {
+  const rows = reviewRows();
+  const row = rows[calReviewIndex];
+  if (!row || row.key === null) { finishSetupFromTv(); return; }
+  // Redo one move: clear it and run the same counted-in beat again. calIndex
+  // points at it, so everything downstream (the prompt, the phone's expected
+  // step, the dots) follows without special-casing a "redo" anywhere.
+  calDone[row.key] = false;
+  calSkipped[row.key] = false;
+  calRedoing = true;
+  calIndex = CAL_ORDER.indexOf(row.key);
+  showCalibrationStep();
+}
+
+// Skips the move currently being asked for: marks it unconfirmed, moves on,
+// and leaves it flagged on the review screen. Deliberately NOT bound to OK,
+// which already means "end setup entirely" and has since 2026-09-03.
+function skipCalibrationStep() {
+  if (!calibrating || calPhase === 'review' || calIndex >= CAL_ORDER.length) return;
+  const key = CAL_ORDER[calIndex];
+  calSkipped[key] = true;
+  calDone[key] = true;   // "dealt with", so the walkthrough advances past it
+  if (calRedoing) {
+    calRedoing = false;
+    startCalReview();
+    return;
+  }
+  calIndex++;
+  showCalibrationStep();
 }
 function startCalibrationUI(mode) {
   calibrating = true;
   calAutoFinishT = 0;
+  calPhase = 'idle';
+  calRedoing = false;
+  calSkipped = Object.fromEntries(CAL_ORDER.map((k) => [k, false]));
+  enterSetupMirror();
   setupStage = 'none'; // placement/framing are done — the per-move panel takes over
   calMode = mode || 'camera';
   calIndex = 0;
@@ -3877,6 +4278,11 @@ function startCalibrationUI(mode) {
 }
 function advanceCalibrationUI(step) {
   if (!calibrating || !(step in calDone) || calDone[step]) return;
+  // 2026-09-15: only while the move is actually live. During the count-in the
+  // phone is disarmed and shouldn't be reporting anything anyway, but a
+  // message already in flight when the countdown started would otherwise tick
+  // the move off before the player had been asked for it.
+  if (calPhase !== 'live') return;
   // Strictly in order now. The phone is told which move we're asking for
   // and only reports that one, so anything else arriving here is either a
   // stale in-flight message or an out-of-date phone — either way, ignoring
@@ -3884,16 +4290,19 @@ function advanceCalibrationUI(step) {
   // actually performed rather than being ticked off in the background.
   if (calIndex >= CAL_ORDER.length || step !== CAL_ORDER[calIndex]) return;
   calDone[step] = true;
-  calIndex++;
-  showCalibrationStep();
-  if (calIndex >= CAL_ORDER.length) {
-    // 2026-09-03: all four moves done means nothing further is needed from
-    // the player, so setup finishes itself after a beat (long enough for
-    // "All set!" to register) and the run counts in. This used to sit there
-    // waiting for a "Start Run" tap on the phone — the press that shouldn't
-    // have to be made. Pressing OK on the remote skips the beat.
-    calAutoFinishT = CAL_AUTO_FINISH_DELAY;
+  calSkipped[step] = false;
+  // A move being re-run from the review screen goes straight back there once
+  // it's done — the moves after it were already dealt with.
+  if (calRedoing) {
+    calRedoing = false;
+    startCalReview();
+    return;
   }
+  calIndex++;
+  // 2026-09-15: the last move no longer auto-finishes setup. It lands on the
+  // review screen instead (see startCalReview), which is where setup now ends
+  // — either by starting the run or by redoing a move that didn't work.
+  showCalibrationStep();
 }
 
 // Ends per-move setup from the TV side and rolls straight into the
@@ -3922,6 +4331,8 @@ function markSetupDone(playerId) {
 function finishCalibrationUI(playerId) {
   markSetupDone(playerId);
   calibrating = false;
+  calPhase = 'idle';
+  exitSetupMirror();
   calAutoFinishT = 0;
   setupStage = 'none'; // covers the "Skip setup" escape hatch firing mid-placement/framing
   // 2026-09-03 ("you still need to press start on the phone"): finishing
@@ -4340,6 +4751,8 @@ function startCountdown() {
   state.phase = 'countdown';
   state.countdownT = COUNTDOWN_SECONDS;
   calibrating = false;
+  calPhase = 'idle';
+  exitSetupMirror();
   setupStage = 'none';
   highScoreAtRunStart = highScore;
   syncPanel();
@@ -4372,6 +4785,8 @@ function startPlaying() {
   }
   state.phase = 'playing';
   calibrating = false;
+  calPhase = 'idle';
+  exitSetupMirror();
   hideCountdown();
   lastT = performance.now(); // the countdown didn't advance the world; don't hand it a big dt
   showPanel(null);
@@ -4482,6 +4897,8 @@ function exitToMenu() {
   // this was the other half of the 2026-09-09 "no music" bug.
   audio.resumeMusic();
   calibrating = false;
+  calPhase = 'idle';
+  exitSetupMirror();
   setupStage = 'none';
   hideActionPrompt();
   // 2026-09-10 ("no way of quitting the level using the remote and
@@ -4568,6 +4985,8 @@ ws.addEventListener('message', (ev) => {
     } else if (msg.count === 0 && state.phase !== 'playing') {
       state.phase = 'pairing';
       calibrating = false;
+      calPhase = 'idle';
+      exitSetupMirror();
       setupStage = 'none';
       setupDonePlayers.clear();
       startOverrideUntil = 0;
@@ -4585,6 +5004,7 @@ ws.addEventListener('message', (ev) => {
     else if (msg.event === 'step') advanceCalibrationUI(msg.step);
     else if (msg.event === 'done') finishCalibrationUI(msg.playerId);
     else if (msg.event === 'tracking') updateTrackingWarning(msg.status);
+    else if (msg.event === 'mirror') applySetupMirror(msg);
   } else if (msg.type === 'error') {
     pairingHint.textContent = msg.message;
   }
@@ -4819,6 +5239,26 @@ window.addEventListener('keydown', (e) => {
   }
   if (state.phase === 'paused' && isSelectPress(e)) { resumeGame(); return; }
 
+  // 2026-09-15: the end-of-setup review screen owns the d-pad while it is up
+  // — up/down choose a row, OK activates it (redo that move, or start
+  // playing). Placed before the plain "OK ends setup" rule below so the
+  // review screen's OK means what it says on screen.
+  if (calibrating && calPhase === 'review') {
+    if (e.code === 'ArrowUp' || e.code === 'KeyW') { moveCalReviewSelection(-1); return; }
+    if (e.code === 'ArrowDown' || e.code === 'KeyS') { moveCalReviewSelection(1); return; }
+    if (isSelectPress(e)) { activateCalReviewRow(); return; }
+    return;
+  }
+  // 2026-09-15: a move that simply will not register on this phone used to
+  // trap setup on that step (the only way out being the phone's own skip
+  // button, which is no use at all in camera mode — the phone is propped up
+  // across the room). Right on the d-pad skips the current move and flags it
+  // on the review screen. Deliberately NOT the OK button, which has meant
+  // "end setup and start" since 2026-09-03 and is relied on as such.
+  if (calibrating && calPhase === 'live' && (e.code === 'ArrowRight' || e.code === 'KeyD')) {
+    skipCalibrationStep();
+    return;
+  }
   // 2026-09-03: OK during per-move setup ends setup and starts the run.
   // The moves themselves are body/phone-driven, but STARTING is the
   // remote's job — the player shouldn't have to walk back to the phone and
@@ -5467,12 +5907,16 @@ function animate() {
     if (state.turnIntroT >= TURN_INTRO_DELAY) startCountdown();
   }
 
-  // Setup finishes itself once the last move is done (see
-  // advanceCalibrationUI) — no press needed on the phone or the remote.
+  // 2026-09-15: setup no longer finishes itself off the back of the last
+  // move — it ends on the review screen, so the player gets the chance to
+  // redo anything that didn't register. calAutoFinishT is kept only for the
+  // "skip setup" paths that still want a beat before starting.
   if (calibrating && calAutoFinishT > 0) {
     calAutoFinishT -= dt;
     if (calAutoFinishT <= 0) finishSetupFromTv();
   }
+  updateCalibrationTimers(dt);
+  updateSetupMirror(dt);
 
   // Auto-advance out of the framing check once "good" framing has held for
   // a moment — the remote OK press (see keydown handler above) can also
@@ -5520,6 +5964,30 @@ window.__mrScene = {
 
 window.__mrDebug = {
   phase: () => state.phase,
+  // 2026-09-15 setup rework: the countdown, the per-move skip, the review
+  // screen and the character mirror are all only observable by watching the
+  // screen otherwise — which is exactly how the round-6 ordering bug survived
+  // three rounds. Read-only except calSelect/calActivate, which drive the
+  // review screen the way the remote does.
+  calState: () => ({
+    calibrating,
+    phase: calPhase,
+    index: calIndex,
+    step: calIndex < CAL_ORDER.length ? CAL_ORDER[calIndex] : null,
+    done: { ...calDone },
+    skipped: { ...calSkipped },
+    countdownT: calCountdownT,
+    liveT: calLiveT,
+    reviewIndex: calReviewIndex,
+    mirrorActive: setupMirrorActive,
+    cam: { x: +camera.position.x.toFixed(2), y: +camera.position.y.toFixed(2), z: +camera.position.z.toFixed(2) },
+    playerPos: { x: +player.position.x.toFixed(2), y: +player.position.y.toFixed(2), z: +player.position.z.toFixed(2) },
+    order: [...CAL_ORDER],
+  }),
+  calArmNow: () => { if (calibrating && calPhase === 'countdown') armCalibrationStep(); },
+  calSelect: (delta) => moveCalReviewSelection(delta),
+  calActivate: () => activateCalReviewRow(),
+  calSkipStep: () => skipCalibrationStep(),
   score: () => Math.floor(state.score),
   distance: () => state.distance,
   lane: () => state.lane,

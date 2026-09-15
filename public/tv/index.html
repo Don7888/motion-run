@@ -104,6 +104,11 @@
     overflow: hidden; display: none;
   }
   body.badge-visible #mqAtmosphere { display: block; }
+  /* 2026-09-15: the decorative menu atmosphere is a full-screen opaque layer
+     ABOVE the 3D canvas, so while the character is mirroring the player
+     during setup it would hide the very thing the player is meant to be
+     watching. Setup shows the real world and the real character instead. */
+  body.setup-mirror #mqAtmosphere { display: none; }
   .mq-sky {
     position: absolute; inset: 0;
     background: linear-gradient(180deg, var(--indigo-900) 0%, var(--indigo-800) 48%, var(--indigo-900) 100%);
@@ -381,6 +386,67 @@
     text-shadow: 0 4px 0 var(--ink);
     text-transform: uppercase;
   }
+  /* --- Per-move countdown (2026-09-15) --- */
+  .cal-countdown { margin: 4px 0 2px; }
+  .cal-countdown-label {
+    font-family: 'Nunito', sans-serif; font-size: 20px; font-weight: 700;
+    color: var(--lavender); letter-spacing: 0.5px;
+  }
+  .cal-countdown-num {
+    font-family: 'Fredoka', sans-serif; font-weight: 600;
+    font-size: 104px; line-height: 1.05; color: var(--gold);
+    text-shadow: 0 5px 0 var(--ink);
+    animation: calCount 1s ease-out infinite;
+  }
+  .cal-countdown-num.go { color: var(--green); font-size: 84px; }
+  @keyframes calCount {
+    0%   { transform: scale(1.18); opacity: 0.55; }
+    30%  { transform: scale(1); opacity: 1; }
+    100% { transform: scale(1); opacity: 1; }
+  }
+  .cal-countdown-next {
+    font-family: 'Fredoka', sans-serif; font-size: 24px; font-weight: 600;
+    color: var(--white); margin-top: 2px;
+  }
+  .cal-skip-hint { color: var(--gold) !important; }
+
+  /* --- End-of-setup review (2026-09-15) --- */
+  .cal-review-list { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; min-width: 460px; }
+  .cal-review-row {
+    display: flex; align-items: center; gap: 14px;
+    padding: 12px 18px 14px; border-radius: 18px;
+    border: 4px solid transparent; background: var(--indigo-700);
+    font-family: 'Fredoka', sans-serif; font-size: 24px; font-weight: 600;
+    color: var(--white); text-align: left;
+  }
+  .cal-review-row .cal-review-icon { font-size: 30px; line-height: 1; width: 40px; }
+  .cal-review-row .cal-review-label { flex: 1; }
+  .cal-review-row .cal-review-state {
+    font-family: 'Nunito', sans-serif; font-size: 17px; font-weight: 700;
+  }
+  .cal-review-row.ok .cal-review-state { color: var(--green); }
+  .cal-review-row.missed { background: var(--indigo-900); }
+  .cal-review-row.missed .cal-review-state { color: var(--gold); }
+  .cal-review-row.selected {
+    border-color: var(--gold); box-shadow: 0 6px 0 var(--gold-dk);
+    transform: translateY(-2px);
+  }
+  .cal-review-row.go { background: var(--green); color: var(--ink); }
+  .cal-review-row.go.selected { border-color: var(--white); box-shadow: 0 6px 0 var(--green-dk); }
+
+  /* While the character is mirroring the player during setup, the panel gets
+     out of its way rather than sitting on top of it (2026-09-15). */
+  body.setup-mirror #calibrationPanel,
+  body.setup-mirror #calReviewPanel {
+    left: 4%; transform: translate(0, -50%);
+  }
+  @keyframes panelInLeft {
+    from { opacity: 0; transform: translate(0, -50%) scale(0.92); }
+    to   { opacity: 1; transform: translate(0, -50%) scale(1); }
+  }
+  body.setup-mirror #calibrationPanel,
+  body.setup-mirror #calReviewPanel { animation: panelInLeft 0.34s cubic-bezier(0.2, 0.9, 0.3, 1.1); }
+
   .cal-dots { display: flex; gap: 12px; justify-content: center; margin-top: 16px; }
   .cal-tile {
     width: 54px; height: 54px; border-radius: 16px;
@@ -1090,11 +1156,36 @@
 
   <div id="calibrationPanel" class="overlay-panel" style="display:none;">
     <h1>Quick Setup</h1>
-    <p class="step-chip" id="calStepCounter">Move 1 of 4</p>
-    <div class="cal-move-icon" id="calMoveIcon">⬅️</div>
-    <div class="cal-move-text" id="calMoveText">Step LEFT</div>
-    <p class="hint">📱 Copy the move · 🎮 Press OK to skip ahead</p>
+    <p class="step-chip" id="calStepCounter">Move 1 of 5</p>
+    <!-- 2026-09-15: "there should always be a short countdown before doing a
+         movement to allow the player to get in position". Shown in place of
+         the move prompt while counting in; the phone is deliberately not
+         listening for the move until this reaches GO — see calStepArmed in
+         controller.js. -->
+    <div class="cal-countdown" id="calCountdown" style="display:none;">
+      <div class="cal-countdown-label">Get ready…</div>
+      <div class="cal-countdown-num" id="calCountdownNum">3</div>
+      <div class="cal-countdown-next" id="calCountdownNext">then STEP LEFT</div>
+    </div>
+    <div id="calMoveBlock">
+      <div class="cal-move-icon" id="calMoveIcon">⬅️</div>
+      <div class="cal-move-text" id="calMoveText">Step LEFT</div>
+      <p class="hint cal-skip-hint" id="calSkipHint" style="display:none;">Not registering? Press ▶ on the remote to skip this move</p>
+    </div>
+    <!-- Deliberately outside #calMoveBlock: OK ends setup in BOTH beats, so
+         this has to stay on screen during the count-in too. -->
+    <p class="hint">📱 Copy the move · 🎮 Press OK to finish setup</p>
     <div class="cal-dots" id="calDots"></div>
+  </div>
+
+  <!-- 2026-09-15: end-of-setup review. "giving the player to go back and
+       reconfigure any movement not done correctly" — every move is listed
+       with whether it actually registered, and any one of them can be redone
+       from the remote before starting. -->
+  <div id="calReviewPanel" class="overlay-panel" style="display:none;">
+    <h1>How did that go?</h1>
+    <p class="hint">🎮 ▲▼ to choose · OK to pick</p>
+    <div class="cal-review-list" id="calReviewList"></div>
   </div>
 
   <div id="pausedPanel" class="overlay-panel" style="display:none;">

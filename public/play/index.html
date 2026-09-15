@@ -438,6 +438,39 @@
     border-radius: 999px; width: fit-content; pointer-events: none;
     box-shadow: 0 4px 0 var(--ink);
   }
+  /* --- Tracking diagnostics (2026-09-14) --- */
+  .diag-row { display: flex; justify-content: flex-end; flex-shrink: 0; margin-top: 8px; }
+  .cam-diag-btn {
+    border-radius: 999px; border: 2px solid var(--violet); background: var(--indigo-800);
+    color: var(--lavender); font-family: 'Nunito', sans-serif;
+    font-size: 12px; font-weight: 700; line-height: 1;
+    padding: 7px 12px 8px; cursor: pointer;
+  }
+  .cam-diag-btn:active { transform: translateY(1px); }
+  .cam-diag {
+    flex-shrink: 0; margin: 8px 0 0; padding: 10px 12px;
+    background: var(--indigo-900); color: #b9f6ff;
+    border: 2px solid var(--violet); border-radius: 12px;
+    font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+    /* Capped and scrollable: this opens itself when tracking fails, and it
+       must not push the setup screen's own buttons off the bottom when it
+       does. */
+    max-height: 30vh; overflow-y: auto;
+  }
+  .cam-diag[hidden] { display: none; }
+  /* Sits below the camera/tilt view, inside the shared sensor panel, so it is
+     visible on both the setup screen and the play screen. */
+  .motion-perm-banner {
+    flex-shrink: 0; margin-top: 10px; padding: 10px 12px;
+    background: var(--gold); color: var(--ink);
+    border: 3px solid var(--white); border-radius: 16px;
+    box-shadow: 0 5px 0 var(--gold-dk);
+    display: flex; flex-direction: column; gap: 8px; align-items: stretch;
+    font-size: 13px; font-weight: 700; text-align: center;
+  }
+  .motion-perm-banner[hidden] { display: none; }
+
   .lane-bar {
     position: absolute; left: 14px; right: 14px; bottom: 12px; height: 10px;
     background: rgba(21, 12, 46, 0.55); border-radius: 999px; pointer-events: none;
@@ -710,6 +743,13 @@
     <p id="permText">MotionQuest wants to use your camera to watch your movements.</p>
     <p class="hint-strong">📱↔️ Turn your phone sideways (landscape) before propping it up, so it can see you head to toe.</p>
     <p>After this, look at your TV — it'll walk you through placing your phone and getting in frame. From then on you'll use your <b>Fire TV remote</b>, not your phone, until setup is done.</p>
+    <!-- 2026-09-14: only shown on browsers with no Screen Wake Lock API (iOS
+         before 16.4, mainly). On those, nothing this page can do will stop the
+         phone locking itself while it's propped up and untouched — and a locked
+         phone ends the camera stream, which is the iPhone 13 failure. Told to
+         the player HERE, before they prop it up, because that's the one moment
+         the advice is actually actionable. -->
+    <p class="hint-strong" id="autoLockHint" hidden>⏰ This phone can't be kept awake by the game. Set <b>Settings ▸ Display &amp; Brightness ▸ Auto-Lock</b> to <b>Never</b> (or 5 minutes) first, or it will lock itself mid-game and stop tracking you.</p>
     <button class="btn" id="grantCameraBtn">Enable Camera Tracking</button>
     <button class="btn secondary" id="skipCameraBtn">Hold my phone instead</button>
   </div>
@@ -799,6 +839,30 @@
       <canvas id="cameraCanvas"></canvas>
       <div class="camera-status" id="cameraStatus">Loading pose tracker…</div>
       <div class="lane-bar"><div class="lane-marker" id="laneMarker"></div></div>
+    </div>
+
+    <!-- 2026-09-14 (iPhone 13, "didn't work when doing the motion capture"):
+         a tap-to-open readout of the numbers that tell the competing causes
+         apart — see the TRACKING DIAGNOSTICS block in controller.js. It opens
+         itself whenever tracking actually fails, so neither a player nor a bug
+         report has to know it's there.
+
+         Deliberately a SIBLING of .camera-view rather than an overlay inside
+         it, which is where this first went: .camera-view is display:none
+         outside camera mode, so a readout living inside it would have been
+         invisible in the most important case of all — the camera failing to
+         start, which drops the player into hold-phone mode and hides that
+         whole element. Caught by mr_test_camera_resilience.js part D. -->
+    <div class="diag-row">
+      <button class="cam-diag-btn" id="camDiagBtn" type="button" aria-expanded="false" aria-label="Tracking details">ⓘ Tracking details</button>
+    </div>
+    <pre class="cam-diag" id="camDiag" hidden></pre>
+
+    <!-- Shown only when iOS wouldn't raise the motion prompt, or it was
+         refused — see showMotionPermBanner() in controller.js. -->
+    <div class="motion-perm-banner" id="motionPermBanner" hidden>
+      <span>Motion sensors are off, so leaning and jumping won't register.</span>
+      <button class="btn small" id="enableMotionBtn" type="button">📳 Turn on motion sensors</button>
     </div>
   </div>
 </div>
