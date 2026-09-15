@@ -819,6 +819,86 @@ function makeCypress() {
   g.add(trunk, body, tip);
   return g;
 }
+// Medieval: a pennant on a pole — the cheapest prop that says "castle
+// grounds" at a glance, and the one thing along this road with a bit of
+// colour in it.
+function makePennant() {
+  const g = new THREE.Group();
+  const h = 2.6 + Math.random() * 1.0;
+  const pole = boxMesh(0.14, h, 0.14, 0x6b4a30);
+  pole.position.y = h / 2;
+  // Two tones so the flag reads as a triangular pennant rather than a slab.
+  const cloth = boxMesh(0.06, 0.5, 0.9, jitterColor(0xb23a48, 0.1));
+  cloth.position.set(0.02, h - 0.4, 0.52);
+  const tail = boxMesh(0.06, 0.26, 0.42, jitterColor(0xb23a48, 0.1));
+  tail.position.set(0.02, h - 0.78, 0.78);
+  const finial = boxMesh(0.2, 0.2, 0.2, 0xd9b04a);
+  finial.position.y = h + 0.1;
+  g.add(pole, cloth, tail, finial);
+  return g;
+}
+// Medieval: a hay bale, low and wide, in threes along the verge.
+function makeHayBale() {
+  const g = new THREE.Group();
+  const body = boxMesh(1.0, 0.7, 0.8, jitterColor(0xd9b25c, 0.08));
+  body.position.y = 0.35;
+  // Two darker bands read as the binding twine at this distance.
+  const band1 = boxMesh(1.02, 0.1, 0.82, 0xa8843c);
+  band1.position.y = 0.52;
+  const band2 = boxMesh(1.02, 0.1, 0.82, 0xa8843c);
+  band2.position.y = 0.2;
+  g.add(body, band1, band2);
+  return g;
+}
+// Medieval: a barrel, upright or tipped on its side.
+function makeBarrel() {
+  const g = new THREE.Group();
+  const tipped = Math.random() < 0.35;
+  const body = boxMesh(0.62, 0.86, 0.62, jitterColor(0x7a5230, 0.08));
+  const hoopA = boxMesh(0.66, 0.1, 0.66, 0x4a4a52);
+  const hoopB = boxMesh(0.66, 0.1, 0.66, 0x4a4a52);
+  body.position.y = 0.43; hoopA.position.y = 0.62; hoopB.position.y = 0.24;
+  g.add(body, hoopA, hoopB);
+  if (tipped) { g.rotation.z = Math.PI / 2; g.position.y = 0.31; }
+  return g;
+}
+// 2026-09-15 ("the stable and hut should be used as background objects
+// along the side of the road") — Don's own condensed Meshy scans, the same
+// treatment as every other model in the pack. A thatched cottage, roadside
+// set-dressing rather than anything the player interacts with.
+function makeHut() {
+  const m = modelInstance('hut');
+  if (m) { m.rotation.y = Math.random() * Math.PI * 2; return m; }
+  return makeHutBoxes();
+}
+function makeHutBoxes() {
+  const g = new THREE.Group();
+  const WALL = 0xd8c9a0, ROOF = 0x8a6a3a, DOOR = 0x5c3f28;
+  part(g, 2.0, 1.6, 1.8, WALL, 0, 0.8, 0);
+  part(g, 2.3, 1.2, 2.1, ROOF, 0, 2.2, 0);            // roof slab
+  part(g, 1.3, 0.1, 1.5, ROOF, 0, 2.85, 0);           // ridge cap
+  part(g, 0.4, 0.7, 0.1, DOOR, 0, 0.35, 0.91);        // door
+  part(g, 0.4, 0.4, 0.1, 0x8fd8ff, -0.6, 1.1, 0.91);  // window
+  return g;
+}
+// 2026-09-15: the barn to go with it — a wooden stable, bigger and lower
+// than the hut so the two read as different buildings from a distance.
+function makeStable() {
+  const m = modelInstance('stable');
+  if (m) { m.rotation.y = Math.random() * Math.PI * 2; return m; }
+  return makeStableBoxes();
+}
+function makeStableBoxes() {
+  const g = new THREE.Group();
+  const WOOD = 0x7a5230, ROOF = 0x5c3f28;
+  part(g, 3.4, 2.0, 2.2, WOOD, 0, 1.0, 0);
+  part(g, 3.8, 1.4, 2.6, ROOF, 0, 2.6, 0);            // roof slab
+  part(g, 2.0, 0.1, 2.8, ROOF, 0, 3.35, 0);           // ridge cap
+  part(g, 1.3, 1.5, 0.1, 0x2a1a08, -0.7, 0.75, 1.11); // open stall front
+  part(g, 1.3, 1.5, 0.1, 0x2a1a08, 0.7, 0.75, 1.11);
+  return g;
+}
+
 // A fluted marble column, sometimes broken off partway up.
 function makeColumn() {
   const m = modelInstance('roman_column');
@@ -973,6 +1053,8 @@ const SCENERY_MAKERS = {
   tree: makeTree, bush: makeBush, rock: makeRock,
   palm: makePalm, fern: makeFern, bones: makeBones,
   cypress: makeCypress, column: makeColumn, banner: makeArchOrBanner,
+  pennant: makePennant, haybale: makeHayBale, barrel: makeBarrel,
+  hut: makeHut, stable: makeStable,
   tower: makeFutureBuilding, holo: makeHoloSign,
   palmIsland: makePalmIsland, sandbar: makeSandbar,
 };
@@ -1314,6 +1396,11 @@ function updateObstacleIdle(mesh, t) {
     if (p.core) p.core.scale.setScalar(0.85 + pulse * 0.3);
     if (p.glow) p.glow.scale.set(1 + Math.sin(t * 1.9 + ph) * 0.12, 1, 1);
     if (p.blip) p.blip.visible = Math.sin(t * 5.5 + ph) > 0;
+  } else if (kind === 'dragon') {
+    // A slow breathing bob plus a head sway, so it reads as alive and
+    // watching rather than a statue while it waits to fire.
+    mesh.position.y += Math.sin(t * 1.1 + ph) * 0.08;
+    mesh.rotation.y = Math.sin(t * 0.6 + ph) * 0.12;
   }
 }
 
@@ -1791,6 +1878,37 @@ const MODEL_SPECS = {
   // the pack) arrives already Y-up — see the note on that option in
   // glb-lite.js's loadModel().
   roman_legionary: { height: 2.3, yUp: true },
+  // 2026-09-15: Don's Meshy knight, condensed the same way (see this round's
+  // doc). Slightly shorter than the legionary's 2.3 on purpose — this model
+  // is proportionally wider (0.78 of its height against the legionary's
+  // 0.63, because of the shield held out to one side), and at 2.3 it crowds
+  // the neighbouring lanes visually. Collision is lane-based so this is
+  // purely how it reads. `yUp` for the same reason as the legionary.
+  medieval_knight: { height: 2.2, yUp: true },
+  // 2026-09-15 ("the knights should be able to be punched"): a second
+  // knight, condensed the same way, alternated at random with the first in
+  // obMedievalCrate() — see the comment there. Same height for the same
+  // reason as above.
+  medieval_knight2: { height: 2.2, yUp: true },
+  // 2026-09-15 ("the dragon should appear as a barrier"): reared up on its
+  // hind legs with wings spread — see the QA render referenced in this
+  // round's doc — which is already the "blocking your path" pose the game
+  // needs, no extra rotation required. Taller than a knight since it's the
+  // one obstacle meant to visually dominate its lane and spill into its
+  // neighbours (collision still only reads its own lane).
+  dragon: { height: 3.3, yUp: true },
+  // 2026-09-15 ("the Castle should be enlarged and be in the distant
+  // background"): replaces the hand-built box castle in horizonMedieval()
+  // — see that function. Sized in world units directly, not relative to the
+  // player, since it only ever appears far down the track at HORIZON_Z:
+  // roughly double the old box castle's ~33-unit height, which is the
+  // "enlarged" Don asked for.
+  castle: { height: 62, yUp: true },
+  // 2026-09-15 ("the stable and hut should be used as background objects
+  // along the side of the road"): roadside scenery, scaled like a small
+  // building rather than a prop — see makeHut()/makeStable().
+  hut: { height: 3.2, yUp: true },
+  stable: { height: 4.0, yUp: true },
   roman_soldier: { height: 2.0 },      // punchable, so player-sized — unused now, kept for reference
   roman_column: { height: 3.2 },       // a wall you must dodge — taller than you
   roman_arch: { height: 4.2 },         // scenery, overhead
@@ -1841,10 +1959,217 @@ function modelOr(name, fallback) {
   return modelInstance(name) || fallback();
 }
 
+// =========================================================================
+// MEDIEVAL — obstacle set
+// =========================================================================
+// Same four moves as every other era; only the props change. Each one is
+// built to say what it wants from the player by its SHAPE, the way the rest
+// of the pack does: something low to clear, something to hit, something
+// solid and tall to go round, something overhead to duck under.
+function obMedievalHurdle() {
+  const g = new THREE.Group();
+  // A low log barricade on trestles — reads as "hop this" from a distance.
+  part(g, 2.1, 0.22, 0.26, 0x7a5230, 0, 0.62, 0);
+  part(g, 2.1, 0.18, 0.22, 0x6b4a30, 0, 0.36, 0);
+  part(g, 0.2, 0.7, 0.55, 0x5c3f28, -0.85, 0.35, 0);
+  part(g, 0.2, 0.7, 0.55, 0x5c3f28, 0.85, 0.35, 0);
+  // Crossed bracing, which is what makes it look built rather than stacked.
+  const braceL = boxMesh(0.14, 0.9, 0.12, 0x5c3f28);
+  braceL.position.set(-0.85, 0.42, 0.18); braceL.rotation.x = 0.5;
+  const braceR = boxMesh(0.14, 0.9, 0.12, 0x5c3f28);
+  braceR.position.set(0.85, 0.42, 0.18); braceR.rotation.x = -0.5;
+  g.add(braceL, braceR);
+  return g;
+}
+
+// The punch obstacle: Don's own Meshy knights, condensed to flat colours the
+// same way the Roman legionary was (see
+// motionquest-roman-legionary-condense.md and this round's own doc).
+//
+// 2026-09-15 ("use the attached files to enhance the castle siege level ...
+// the knights should be able to be punched"): a second knight model joined
+// the first, so this now alternates between the two at random — the level
+// is patrolled by more than one knight, not just repeats of the same one.
+// Both are tagged for the same idle sway and both are cleared by punching,
+// exactly as the original knight already was.
+function obMedievalCrate() {
+  const name = Math.random() < 0.5 ? 'medieval_knight' : 'medieval_knight2';
+  const m = modelInstance(name) || modelInstance('medieval_knight') || modelInstance('medieval_knight2');
+  if (m) {
+    // Reuses the legionary's idle: a slow body sway so he reads as waiting
+    // for you rather than as a statue. That handler looks for optional
+    // crest/spear parts and no-ops safely when they aren't there, which is
+    // this model's case — it is one mesh per flat-colour part and nothing
+    // else.
+    m.userData.idle = 'legionary';
+    return m;
+  }
+  return obMedievalCrateBoxes();
+}
+// Hand-built fallback, used if the GLB fails to parse or load — the same
+// contract every other model in the pack has (see glb-lite.js's header).
+function obMedievalCrateBoxes() {
+  const g = new THREE.Group();
+  part(g, 0.5, 0.5, 0.34, 0x4a5568, 0, 0.25, 0);          // legs
+  part(g, 0.74, 0.62, 0.46, 0x6f7f96, 0, 0.86, 0);        // breastplate
+  part(g, 0.5, 0.46, 0.46, 0x8a9ab2, 0, 1.4, 0);          // helm
+  part(g, 0.14, 0.24, 0.5, 0x2f3a4a, 0, 1.42, 0.2);       // visor slit
+  part(g, 0.16, 0.95, 0.62, 0x2f6f8c, -0.5, 0.95, 0.08);  // shield
+  part(g, 0.08, 0.22, 0.22, 0xd9b04a, -0.59, 0.95, 0.08); // boss
+  part(g, 0.1, 1.0, 0.1, 0xc2c8d2, 0.52, 1.15, 0.1);      // sword blade
+  part(g, 0.34, 0.1, 0.12, 0x6b4a30, 0.52, 0.66, 0.1);    // crossguard
+  return g;
+}
+
+function obMedievalWall() {
+  const g = new THREE.Group();
+  // A siege barricade: tall, solid, obviously not jumpable.
+  part(g, 1.7, 2.4, 0.4, 0x6b4a30, 0, 1.2, 0);
+  for (let i = 0; i < 5; i++) part(g, 0.12, 2.4, 0.44, 0x5c3f28, -0.7 + i * 0.35, 1.2, 0);
+  part(g, 1.8, 0.2, 0.5, 0x4a3524, 0, 2.4, 0);            // capping rail
+  part(g, 1.8, 0.2, 0.5, 0x4a3524, 0, 0.9, 0);
+  // Spiked top, which is the bit that says "do not climb".
+  for (let i = 0; i < 4; i++) part(g, 0.16, 0.42, 0.16, 0x9aa3ad, -0.6 + i * 0.4, 2.7, 0);
+  return g;
+}
+
+function obMedievalLowbar() {
+  const g = new THREE.Group();
+  // A raised portcullis: the grille hangs overhead with a clear gap beneath,
+  // so ducking under it is the obvious read.
+  part(g, 2.6, 0.34, 0.5, 0x5c3f28, 0, 2.5, 0);           // gatehouse lintel
+  part(g, 0.4, 2.6, 0.5, 0x8a8680, -1.3, 1.3, 0);         // stone jamb
+  part(g, 0.4, 2.6, 0.5, 0x8a8680, 1.3, 1.3, 0);
+  // The grille itself, hanging down only as far as head height.
+  for (let i = 0; i < 7; i++) part(g, 0.1, 0.85, 0.18, 0x4a4a52, -0.9 + i * 0.3, 1.9, 0);
+  part(g, 2.2, 0.12, 0.2, 0x4a4a52, 0, 2.15, 0);
+  part(g, 2.2, 0.12, 0.2, 0x4a4a52, 0, 1.6, 0);
+  // Spiked bottom edge — the thing you are ducking under.
+  for (let i = 0; i < 7; i++) part(g, 0.12, 0.22, 0.2, 0x9aa3ad, -0.9 + i * 0.3, 1.45, 0);
+  return g;
+}
+
+// =========================================================================
+// MEDIEVAL — dragon set piece (2026-09-15)
+// =========================================================================
+// Don: "use the attached files to enhance the castle siege level ... the
+// dragon should appear as a barrier and fire flame balls straight towards
+// you in the current lane." Two hazards from one appearance: the dragon's
+// own body is a barrier occupying a lane exactly like a 'wall' obstacle —
+// only a lane dodge clears it, because the collision switch further down
+// doesn't recognise 'dragon' by name any more than it already doesn't
+// recognise 'boulder', and both fall through to the same dodge-only rule.
+// Partway through its approach it also throws one fireball at whichever
+// lane the player is standing in AT THAT MOMENT — the fireball then flies
+// straight down THAT lane and does not re-aim if the player moves again, so
+// a lane change is what dodges it too, same as the dragon itself.
+//
+// It lives outside the normal obstacleTypes/ERA_OBSTACLES rotation, on its
+// own rare timer, the same way the dino era's lava boulder does — a
+// set-piece encounter, not part of the everyday hurdle/crate/wall/lowbar
+// stream.
+const DRAGON_ERA_IDS = new Set(['medieval']);
+function dragonActive() { return DRAGON_ERA_IDS.has(currentEraId) && difficultyTuning().dragons; }
+const DRAGON_SPAWN_MIN = 22;   // seconds between appearances — rarer than the
+const DRAGON_SPAWN_MAX = 34;   // boulder, since this is a two-part encounter
+// trackZ at which the dragon lets its fireball go — well before the
+// collision window, so there's real flight time left to react to it.
+const DRAGON_FIRE_TRACK_Z = -34;
+// Fireballs close distance faster than the world scrolls, ON TOP OF the
+// normal per-frame scroll every obstacle already gets (see the obstacle
+// loop below). That extra speed is what makes a thrown fireball read as an
+// attack rather than just another obstacle drifting up the track.
+const FIREBALL_BONUS_SPEED = 15;
+
+function obMedievalDragon() {
+  const m = modelInstance('dragon');
+  if (m) {
+    // A slow menacing sway/bob (see updateObstacleIdle's 'dragon' case) so
+    // it reads as alive while it waits to fire, not a static prop.
+    m.userData.idle = 'dragon';
+    return m;
+  }
+  return obMedievalDragonBoxes();
+}
+// Hand-built fallback — same contract as every other model in the pack: if
+// the GLB fails to parse or load, the game still has a dragon to show.
+function obMedievalDragonBoxes() {
+  const g = new THREE.Group();
+  const SCALE = 0x8a2530, DARK = 0x5c1620, WING = 0x6b1c28;
+  part(g, 1.1, 1.3, 1.6, SCALE, 0, 1.3, 0);                    // body, reared up
+  part(g, 0.7, 0.7, 0.9, SCALE, 0, 2.15, 0.55);                // neck
+  part(g, 0.8, 0.65, 0.85, DARK, 0, 2.65, 1.05);               // head
+  part(g, 0.12, 0.35, 0.1, 0xd8cfb6, -0.22, 3.05, 1.25, -0.3); // horns
+  part(g, 0.12, 0.35, 0.1, 0xd8cfb6, 0.22, 3.05, 1.25, -0.3);
+  part(g, 0.9, 1.5, 0.35, WING, -1.15, 2.2, -0.2, 0, 0.5);     // wings, spread
+  part(g, 0.9, 1.5, 0.35, WING, 1.15, 2.2, -0.2, 0, -0.5);
+  part(g, 0.3, 1.0, 0.3, SCALE, -0.4, 0.5, 0);                 // legs
+  part(g, 0.3, 1.0, 0.3, SCALE, 0.4, 0.5, 0);
+  part(g, 0.3, 0.3, 1.6, DARK, 0, 1.0, -1.3);                  // tail
+  return g;
+}
+
+// The fireball projectile: a chunky, bright ember with a couple of trailing
+// shards. MeshBasicMaterial (unlit), the same trick the neon future era
+// uses for its glowing signage, so it reads as genuinely hot/magical light
+// rather than a solid lit prop, and stays legible under any era's lighting.
+function glowPart(g, w, h, d, color, x, y, z) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshBasicMaterial({ color }));
+  m.position.set(x, y, z);
+  g.add(m);
+  return m;
+}
+function makeFireball() {
+  const g = new THREE.Group();
+  glowPart(g, 0.5, 0.5, 0.5, 0xff6a1e, 0, 0, 0);                // core
+  glowPart(g, 0.3, 0.3, 0.3, 0xffcf4a, 0, 0.04, 0.06);          // hot centre
+  glowPart(g, 0.22, 0.22, 0.42, 0xff8a2f, -0.3, 0.02, -0.22);   // trailing shard
+  glowPart(g, 0.22, 0.22, 0.42, 0xff8a2f, 0.3, -0.04, -0.24);   // trailing shard
+  return g;
+}
+
+// Same shape as spawnBoulder(): never on a blind corner turn-in, pick a
+// lane, place it at the far spawn point, and let the ordinary obstacle
+// pipeline (trackZ scroll, drawing, collision window, despawn) carry it
+// the rest of the way. `firedFireball` is checked in the obstacle loop
+// below and flips once, at DRAGON_FIRE_TRACK_Z.
+function spawnDragon() {
+  if (terrainActive() && insideCorner(state.distance - SPAWN_Z)) return;
+  const lane = Math.floor(Math.random() * 3);
+  const mesh = obMedievalDragon();
+  mesh.position.x = LANE_X[lane];
+  mesh.position.z = SPAWN_Z;
+  scene.add(mesh);
+  obstacles.push({
+    type: 'dragon', lane, mesh, resolved: false, flying: false,
+    baseY: mesh.position.y, trackZ: SPAWN_Z, firedFireball: false,
+  });
+}
+
+// Fires at whichever lane the player occupies RIGHT NOW — see the big
+// comment above this section for why that lane is then fixed for the
+// fireball's whole flight. Spawns level with the dragon that threw it, at
+// chest height, and is otherwise a completely ordinary entry in `obstacles`:
+// the only thing that makes it fly rather than scroll is the extra trackZ
+// increment the obstacle loop gives anything of type 'fireball'.
+function spawnFireball(fromTrackZ) {
+  const lane = state.lane;
+  const mesh = makeFireball();
+  mesh.position.x = LANE_X[lane];
+  mesh.position.y = 1.0;
+  mesh.position.z = fromTrackZ;
+  scene.add(mesh);
+  obstacles.push({
+    type: 'fireball', lane, mesh, resolved: false, flying: false,
+    baseY: 1.0, trackZ: fromTrackZ,
+  });
+}
+
 const ERA_OBSTACLES = {
   present: { hurdle: obPresentHurdle, crate: obPresentCrate, wall: obPresentWall, lowbar: obPresentLowbar },
   dino: { hurdle: obDinoHurdle, crate: obDinoCrate, wall: obDinoWall, lowbar: obDinoLowbar },
   rome: { hurdle: obRomeHurdle, crate: obRomeCrate, wall: obRomeWall, lowbar: obRomeLowbar },
+  medieval: { hurdle: obMedievalHurdle, crate: obMedievalCrate, wall: obMedievalWall, lowbar: obMedievalLowbar },
   future: { hurdle: obFutureHurdle, crate: obFutureCrate, wall: obFutureWall, lowbar: obFutureLowbar },
   lagoon: { hurdle: obLagoonHurdle, crate: obLagoonCrate, wall: obLagoonWall, lowbar: obLagoonLowbar },
 };
@@ -1935,6 +2260,34 @@ const ERAS = [
     scenery: ['cypress', 'cypress', 'column', 'banner', 'column'],
     obstacleTypes: ['hurdle', 'crate', 'wall', 'lowbar'],
     coin: [0x4fa8ff, 0x0a3a75], gem: [0xc77dff, 0x3a1060],
+  },
+  {
+    // 2026-09-15 (Don: "make a new medieval level with a castle in the
+    // background. Use the attached Knight model"). Sits between Rome and
+    // Present Day, which is both chronologically right for a time-travel
+    // game and what Don picked when asked. Inserting mid-timeline is safe
+    // for existing saves: unlock state is stored as a list of era IDs, so a
+    // player who already had Present Day unlocked keeps it, and simply finds
+    // one new locked era behind them.
+    id: 'medieval', name: 'Castle Siege', sub: 'Mind the knights', icon: '🏰',
+    goal: 1000,
+    // A bright but cool overcast day — the castle and the teal knight both
+    // need to stand clear of it, so this stays lighter and less saturated
+    // than Rome's golden haze.
+    sky: ['#2f5f9e', '#6d9ac4', '#aac6dc', '#e2ecf2'],
+    glow: 'rgba(240,247,255,0.9)',
+    fog: 0xc3d4e0, fogNear: 60, fogFar: 220,
+    hemi: [0xdce9f5, 0x6a7360, 0.72], sun: [0xfff3e0, 1.3, [-5, 8, -11]], rim: [0xbcd6f0, 0.3],
+    // A dirt road worn through grass, edged with stone — no painted dashes,
+    // which would be the one thing on screen that couldn't be medieval.
+    ground: { verge: ['#5f8a3e', '#57803a'], kerb: '#9a958c', path: ['#8a6f4e', '#836a4a'], dash: null, slabs: 'rgba(90,75,55,0.30)' },
+    // 2026-09-15: 'hut' and 'stable' added ("used as background objects
+    // along the side of the road") at a lighter weight than everything
+    // else — they're small buildings, not clutter, so they should turn up
+    // occasionally rather than lining the whole road.
+    scenery: ['pennant', 'haybale', 'tree', 'barrel', 'tree', 'pennant', 'tree', 'hut', 'tree', 'stable'],
+    obstacleTypes: ['hurdle', 'crate', 'wall', 'lowbar'],
+    coin: [0xffc53d, 0x6b4a00], gem: [0x4fd98a, 0x0d5c38],
   },
   {
     id: 'present', name: 'Present Day', sub: 'Where you started', icon: '🏙️',
@@ -2035,10 +2388,13 @@ const DIFFICULTY_TUNING = {
   // speedMult/maxSpeedMult scale the run's pace; spawnMult scales the gap
   // between obstacles (bigger = more spread out); rampMult scales how
   // quickly both speed and spawn gap tighten up over a long run; boulders
-  // gates the Dino era's rolling lava boulder specifically.
-  easy: { speedMult: 0.62, maxSpeedMult: 0.65, spawnMult: 1.55, rampMult: 0.4, boulders: false },
-  medium: { speedMult: 1, maxSpeedMult: 1, spawnMult: 1, rampMult: 1, boulders: true },
-  hard: { speedMult: 1.18, maxSpeedMult: 1.12, spawnMult: 0.82, rampMult: 1.3, boulders: true },
+  // gates the Dino era's rolling lava boulder specifically; dragons (added
+  // 2026-09-15) gates the Castle Siege dragon + fireball the same way — off
+  // on Easy for the same reason the boulder is: a hazard that needs a timed
+  // reaction with no warning is exactly what Easy is meant to remove.
+  easy: { speedMult: 0.62, maxSpeedMult: 0.65, spawnMult: 1.55, rampMult: 0.4, boulders: false, dragons: false },
+  medium: { speedMult: 1, maxSpeedMult: 1, spawnMult: 1, rampMult: 1, boulders: true, dragons: true },
+  hard: { speedMult: 1.18, maxSpeedMult: 1.12, spawnMult: 0.82, rampMult: 1.3, boulders: true, dragons: true },
 };
 
 let difficulty = 'medium';
@@ -2225,9 +2581,107 @@ function horizonLagoon(g) {
   spire(0, 18);
 }
 
+// Medieval: the castle, which is the whole point of this era's backdrop
+// ("a castle in the background"). Built from the same horizonBox() blocks as
+// every other era rather than a model, so it costs a handful of draw calls
+// on a Fire TV Stick and can never fail to load.
+//
+// What makes a castle read at this distance is the SILHOUETTE, not detail:
+// a long crenellated curtain wall, round towers standing clear above it with
+// pointed roofs, and a taller keep behind. Crenellations are individual
+// merlon blocks along the top — the single most recognisable edge in the
+// whole shape, and cheap at this size.
+// The hand-built castle this horizon shipped with originally — kept as the
+// fallback if castle.glb (below) fails to parse or load, same contract as
+// every other model in the pack.
+function horizonMedievalCastleBoxes(g, CX) {
+  const STONE = 0xa8a49c, STONE_DK = 0x8a8680, STONE_LT = 0xc2beb6;
+  const ROOF = 0x7a3b46;
+
+  // Curtain wall, with merlons along the top.
+  const wallTop = 11;
+  horizonBox(g, 52, wallTop, 6, CX, wallTop / 2, 0, STONE);
+  for (let i = 0; i < 26; i++) {
+    horizonBox(g, 1.1, 1.6, 6.2, CX - 25 + i * 2, wallTop + 0.8, 0, STONE_LT);
+  }
+
+  // Towers: taller than the wall so they break its line, each with a
+  // conical-ish roof faked as two stacked tapering boxes.
+  const tower = (x, h, r) => {
+    horizonBox(g, r * 2, h, r * 2, x, h / 2, -1, STONE);
+    for (let i = 0; i < 6; i++) {
+      horizonBox(g, r * 0.5, 1.3, r * 2.1, x - r + 0.35 + i * (r * 0.38), h + 0.65, -1, STONE_LT);
+    }
+    horizonBox(g, r * 1.9, 1.7, r * 1.9, x, h + 2.3, -1, ROOF);
+    horizonBox(g, r * 1.1, 1.8, r * 1.1, x, h + 3.9, -1, ROOF);
+    horizonBox(g, 0.25, 1.1, 0.25, x, h + 5.2, -1, 0x6b4a30);      // flagpole
+    horizonBox(g, 0.12, 0.5, 0.9, x + 0.1, h + 5.2, -0.6, 0xb23a48); // pennant
+  };
+  tower(CX - 24, 16, 2.6);
+  tower(CX - 9, 18, 3.0);
+  tower(CX + 9, 18, 3.0);
+  tower(CX + 24, 16, 2.6);
+
+  // Gatehouse at the centre, with a dark arch — the eye reads the dark
+  // rectangle as a way in, which is what makes the wall a castle and not a
+  // barrier.
+  horizonBox(g, 9, 14, 7, CX, 7, 1, STONE_DK);
+  horizonBox(g, 4.2, 6.5, 1.2, CX, 3.25, 4.4, 0x2e2a28);
+  for (let i = 0; i < 5; i++) horizonBox(g, 1.1, 1.6, 7.2, CX - 3.6 + i * 1.8, 15.2, 1, STONE_LT);
+
+  // Keep, set back and taller than everything else.
+  horizonBox(g, 13, 26, 11, CX + 1, 13, -13, STONE_DK);
+  for (let i = 0; i < 7; i++) horizonBox(g, 1.2, 1.8, 11.2, CX - 5 + i * 1.8, 27, -13, STONE_LT);
+  horizonBox(g, 5, 7, 5, CX - 5.5, 29, -13, ROOF);
+  horizonBox(g, 5, 7, 5, CX + 7.5, 29, -13, ROOF);
+}
+
+function horizonMedieval(g) {
+  const CX = -6;
+
+  // 2026-09-15 ("the Castle should be enlarged and be in the distant
+  // background"): Don's own condensed Meshy scan replaces the hand-built
+  // wall/towers/gatehouse/keep above — one real castle instead of seven
+  // stacked box shapes. Sized in MODEL_SPECS to roughly double the old
+  // castle's ~33-unit height, which is the "enlarged" part; "distant
+  // background" is already true of everything placed in this function —
+  // see HORIZON_Z. Positioned where the old gatehouse/keep sat, so the
+  // treeline below still reads as flanking it rather than standing in
+  // front of empty ground.
+  const castleModel = modelInstance('castle');
+  if (castleModel) {
+    castleModel.position.set(CX, 0, -6);
+    g.add(castleModel);
+  } else {
+    horizonMedievalCastleBoxes(g, CX);
+  }
+
+  // A treeline either side, so the castle sits IN a landscape instead of on
+  // an empty fog line.
+  //
+  // First attempt used a handful of big 13x10 slabs and they read as green
+  // hedges FLOATING in the sky: at this distance a shape that wide carries no
+  // internal detail to say which way is up, and its base is lost in the haze,
+  // so the eye has nothing to sit it on. Narrow trunks with a canopy on top
+  // — the same trick horizonRome() uses for its cypress line — read as trees
+  // immediately, at a fraction of the visual weight. Each one is anchored at
+  // y = h/2 so it genuinely stands on the ground plane.
+  const treeline = (x0, count, step, tint, canopy) => {
+    for (let i = 0; i < count; i++) {
+      const x = x0 + i * step + (i % 3);
+      const h = 7 + ((i * 5) % 4) * 1.6;
+      horizonBox(g, 1.0, h * 0.45, 1.0, x, h * 0.225, 12, 0x4a3524);      // trunk
+      horizonBox(g, 4.4, h * 0.62, 4.0, x, h * 0.45 + h * 0.31, 12, tint);
+      horizonBox(g, 3.0, h * 0.34, 2.8, x, h * 0.45 + h * 0.72, 12, canopy);
+    }
+  };
+  treeline(-74, 9, 7.5, 0x3f6238, 0x4a7341);
+  treeline(30, 9, 7.5, 0x395a33, 0x44693c);
+}
+
 const ERA_HORIZONS = {
-  dino: horizonDino, rome: horizonRome, present: horizonPresent, future: horizonFuture,
-  lagoon: horizonLagoon,
+  dino: horizonDino, rome: horizonRome, medieval: horizonMedieval,
+  present: horizonPresent, future: horizonFuture, lagoon: horizonLagoon,
 };
 
 function buildHorizon(id) {
@@ -2297,7 +2751,14 @@ function currentEra() { return ERA_BY_ID[currentEraId] || ERA_BY_ID.present; }
 // any of the other four, and it's what gives the gentle-swell hill profile
 // (HILL_PROFILES.lagoon) anywhere to apply, since hillOffset()/headingAt()
 // are both gated on the same terrainActive() flag as corners are.
-const TERRAIN_ERA_IDS = new Set(['dino', 'rome', 'present', 'future', 'lagoon']);
+// 2026-09-15: Castle Siege is in this set too. Every other era has the
+// winding road and rolling hills, and a dirt road climbing through
+// countryside toward a castle is the most natural fit of the lot — leaving it
+// out would have given the new level a dead-straight, dead-flat road that
+// looked wrong next to every other era. Caught by mr_test_corners.js, which
+// asserts this for EVERY era in the list rather than a hardcoded set: exactly
+// the kind of test that catches an omission in a new level for free.
+const TERRAIN_ERA_IDS = new Set(['dino', 'rome', 'medieval', 'present', 'future', 'lagoon']);
 function terrainActive() { return TERRAIN_ERA_IDS.has(currentEraId); }
 
 // Metres of track spent turning through the 90 degrees. At the game's
@@ -4716,6 +5177,7 @@ function resetRun() {
   state.lifeSpawnTimer = LIFE_SPAWN_MIN + Math.random() * (LIFE_SPAWN_MAX - LIFE_SPAWN_MIN);
   state.starSpawnTimer = STAR_SPAWN_MIN + Math.random() * (STAR_SPAWN_MAX - STAR_SPAWN_MIN);
   state.boulderSpawnTimer = BOULDER_SPAWN_MIN + Math.random() * (BOULDER_SPAWN_MAX - BOULDER_SPAWN_MIN);
+  state.dragonSpawnTimer = DRAGON_SPAWN_MIN + Math.random() * (DRAGON_SPAWN_MAX - DRAGON_SPAWN_MIN);
   endStar();
   state.spawnTimer = BASE_SPAWN_INTERVAL;
   state.coinTimer = 0.8;
@@ -4911,6 +5373,29 @@ function exitToMenu() {
   // to the picker. Two presses (pause, then quit) now does what the player
   // is actually asking for.
   openLevelSelect();
+}
+
+// 2026-09-15 ("if you press back on the level select it goes back to
+// configuration"): sends every connected phone back to its control-choice
+// screen (motion vs. pad, then recalibrate) and drops the TV back to the
+// pre-setup Ready screen to wait for them, the same place it sits the very
+// first time a phone connects. Broadcast rather than aimed at one phone —
+// calibration_control already reaches every controller in the room (see
+// server.js), and setup is a per-player thing the TV has no way to tell
+// apart from a single remote press.
+function restartConfiguration() {
+  sendCalibrationControl('restart');
+  setupDonePlayers.clear();
+  startOverrideUntil = 0;
+  calibrating = false;
+  calPhase = 'idle';
+  exitSetupMirror();
+  setupStage = 'none';
+  hideActionPrompt();
+  hideCountdown();
+  state.phase = roster.length ? 'ready' : 'pairing';
+  renderReadyHint();
+  syncPanel();
 }
 
 // ---------------------------------------------------------------------
@@ -5196,12 +5681,18 @@ window.addEventListener('keydown', (e) => {
     return;
   }
 
-  // Pause (Back while playing) / Exit (Back again while paused) / Resume
-  // (OK while paused) — remote-first, with the phone's ⏸/✕ buttons as the
-  // always-reliable equivalent (see handleInput's pause_toggle/exit_to_menu).
+  // Back while playing: 2026-09-15 ("during the level if you press back on
+  // the firestick remote it goes back to level select") — straight to the
+  // era picker, no pause stop-off in between. Pausing is still there for
+  // whoever wants it (the phone's own ⏸ button, or solo mode's on-screen
+  // one — see handleInput's pause_toggle), Back on the remote just isn't
+  // the way there any more. exitToMenu() already ends on openLevelSelect(),
+  // so paused and mid-countdown Back presses land in the same place too.
   if (isBackPress(e)) {
-    if (state.phase === 'playing') { pauseGame(); return; }
-    if (state.phase === 'paused') { exitToMenu(); return; }
+    if (state.phase === 'playing' || state.phase === 'paused' || state.phase === 'countdown') {
+      exitToMenu();
+      return;
+    }
     // From the results screens, Back goes to the era picker rather than
     // straight back into the same level again. Mid-multiplayer-game, Back
     // abandons the whole session (remaining turns included) rather than
@@ -5211,6 +5702,11 @@ window.addEventListener('keydown', (e) => {
       if (multiplayer.active) endMultiplayer(); else openLevelSelect();
       return;
     }
+    // 2026-09-15 ("if you press back on the level select it goes back to
+    // configuration") — one more Back press from the era picker sends every
+    // connected phone back to choosing motion/pad and recalibrating, rather
+    // than being stuck with whatever was set up at the start of the session.
+    if (state.phase === 'levelSelect') { restartConfiguration(); return; }
   }
 
   // Difficulty (2026-09-10). Left/right on the Ready screen already sets
@@ -5585,6 +6081,17 @@ function updatePlaying(dt) {
     }
   }
 
+  // The Castle Siege dragon (2026-09-15) — same shape again: its own rare,
+  // independent timer, never retried early, because spawnDragon() likewise
+  // only ever bails on a blind corner turn-in.
+  if (dragonActive()) {
+    state.dragonSpawnTimer -= dt;
+    if (state.dragonSpawnTimer <= 0) {
+      spawnDragon();
+      state.dragonSpawnTimer = DRAGON_SPAWN_MIN + Math.random() * (DRAGON_SPAWN_MAX - DRAGON_SPAWN_MIN);
+    }
+  }
+
   // Update collectibles
   for (let i = pickups.length - 1; i >= 0; i--) {
     const p = pickups[i];
@@ -5680,6 +6187,20 @@ function updatePlaying(dt) {
     }
 
     o.trackZ += speed * dt;
+    // A thrown fireball closes distance faster than the world scrolls — see
+    // the big comment above spawnFireball() for why this is the only thing
+    // that needs to be special-cased for it; everything else (drawing, the
+    // collision window, despawn) is the ordinary obstacle pipeline.
+    if (o.type === 'fireball') o.trackZ += FIREBALL_BONUS_SPEED * dt;
+
+    // The dragon fires once, partway through its own approach, at whatever
+    // lane the player is in AT THAT MOMENT — see the big comment above
+    // obMedievalDragon() for the full reasoning. Checked here, alongside the
+    // boulder's own mid-approach special case just below.
+    if (o.type === 'dragon' && !o.firedFireball && o.trackZ >= DRAGON_FIRE_TRACK_Z) {
+      o.firedFireball = true;
+      spawnFireball(o.trackZ);
+    }
 
     // Lava boulder: commit to a new lane once, at a fixed point in its
     // approach, well before the collision window — then let the DRAWN x
@@ -5730,7 +6251,7 @@ function updatePlaying(dt) {
         // one puts your head straight through it, which is what stops the
         // new obstacle from collapsing back into "another hurdle".
         else if (o.type === 'lowbar') safe = state.duckTimer > 0 && state.grounded;
-        else safe = false; // wall, boulder: only lane-dodge saves you
+        else safe = false; // wall, boulder, dragon, fireball: only lane-dodge saves you
 
         if (state.starT > 0) {
           // Star: run straight through it. Walls included — this is the one
@@ -5991,9 +6512,14 @@ window.__mrDebug = {
   score: () => Math.floor(state.score),
   distance: () => state.distance,
   lane: () => state.lane,
+  // Forces the player's lane directly, for deterministic dodge/no-dodge
+  // tests — player.position itself just lerps to it over the next few
+  // frames, same as a real lane change.
+  setLane: (n) => { state.lane = Math.max(0, Math.min(2, n)); },
   lives: () => state.lives,
   starRemaining: () => state.starT,
   setLives: (n) => { state.lives = n; renderLives(); },
+  invulnRemaining: () => state.invulnTimer,
   spawnSpecial: (kind) => spawnSpecial(kind),
   placeSpecial: (kind, lane, z) => addPickup(kind, lane, z),
   coinsTaken: () => state.coinsTaken,
@@ -6033,6 +6559,18 @@ window.__mrDebug = {
   duckRemaining: () => state.duckTimer,
   punch: () => { if (state.punchAnimTimer <= 0) { state.punchTimer = PUNCH_DURATION; state.punchAnimTimer = PUNCH_ANIM_DURATION; } },
   era: () => currentEraId,
+  // 2026-09-15: whether a GLB in MODEL_SPECS actually parsed and loaded, as
+  // opposed to quietly falling back to its hand-built box shape. The fallback
+  // is deliberate and invisible by design (see glb-lite.js's header), which
+  // is exactly why a test needs to be able to tell the two apart.
+  modelLoaded: (name) => models.has(name),
+  // How much the era's backdrop actually built. A horizon that silently
+  // produced nothing looks identical to one that is simply far away.
+  horizonParts: () => {
+    let n = 0;
+    if (horizonGroup) horizonGroup.traverse((o) => { if (o.isMesh) n++; });
+    return n;
+  },
   // 2026-09-10 (Don: "driving a small speed boat") — lets a test confirm
   // the lagoon era's player-rig swap (boat shown, legs hidden) actually
   // happened, the same way characterFacingWorldZ() confirms the facing
@@ -6065,6 +6603,18 @@ window.__mrDebug = {
   setUnlocked: (ids) => { const p = loadProgress(); p.unlocked = ids.slice(); saveProgress(p); renderLevelSelect(); },
   selectIndex: () => levelSelectIndex,
   obstacleCount: () => obstacles.length,
+  // 2026-09-15: what an obstacle on the track is actually made of. A model
+  // that failed to load falls back to a hand-built box shape silently and by
+  // design, so "is the era using the real model?" cannot be answered from
+  // the outside without this.
+  obstacleInfo: (i) => {
+    const o = obstacles[i];
+    if (!o) return null;
+    let meshes = 0;
+    o.mesh.traverse((n) => { if (n.isMesh) meshes++; });
+    return { type: o.type, lane: o.lane, meshes, idle: o.mesh.userData.idle || null };
+  },
+  unlockAfter: (id) => { const e = unlockNextAfter(id); return e ? e.id : null; },
   placeObstacle: (type, lane, z) => {
     // Same as spawnObstacle(): buildObstacleMesh already sets the right y
     // for the type, so only lane and distance are placed here.
@@ -6137,6 +6687,48 @@ window.__mrDebug = {
   boulderVisualX: () => { const b = obstacles.find((o) => o.type === 'boulder'); return b ? b.visualX : null; },
   boulderRolled: () => { const b = obstacles.find((o) => o.type === 'boulder'); return b ? b.rolled : null; },
   coinModelName: () => ERA_COIN_MODEL[currentEraId] || null,
+  // --- 2026-09-15: Castle Siege dragon + fireball ------------------------
+  dragonActive: () => dragonActive(),
+  dragonCount: () => obstacles.filter((o) => o.type === 'dragon').length,
+  fireballCount: () => obstacles.filter((o) => o.type === 'fireball').length,
+  // Deterministic placement for testing — spawnDragon() itself always picks
+  // a random lane and fires only once it scrolls to DRAGON_FIRE_TRACK_Z.
+  placeDragon: (lane, z) => {
+    const mesh = obMedievalDragon();
+    mesh.position.x = LANE_X[lane];
+    mesh.position.z = z;
+    scene.add(mesh);
+    obstacles.push({
+      type: 'dragon', lane, mesh, resolved: false, flying: false,
+      baseY: mesh.position.y, trackZ: z, firedFireball: false,
+    });
+  },
+  // Fires immediately at the player's current lane, from wherever the
+  // dragon (if any) actually is — same helper the real game uses.
+  triggerDragonFireball: () => {
+    const d = obstacles.find((o) => o.type === 'dragon');
+    spawnFireball(d ? d.trackZ : DRAGON_FIRE_TRACK_Z);
+  },
+  placeFireball: (lane, z) => {
+    const mesh = makeFireball();
+    mesh.position.x = LANE_X[lane];
+    mesh.position.y = 1.0;
+    mesh.position.z = z;
+    scene.add(mesh);
+    obstacles.push({ type: 'fireball', lane, mesh, resolved: false, flying: false, baseY: 1.0, trackZ: z });
+  },
+  // 2026-09-15: lets a test force the roadside scenery mix (e.g. all 'hut')
+  // and then check what actually got BUILT (see sceneryMeshCounts) — the
+  // same "don't trust that a model loaded just because nothing crashed"
+  // principle as obstacleInfo()/modelLoaded() above. A missing/failed model
+  // falls back to a hand-built box silently and by design.
+  buildScenery: (names) => buildScenery(names),
+  sceneryCount: () => sceneryPool.length,
+  sceneryMeshCounts: () => sceneryPool.map((t) => {
+    let n = 0;
+    t.traverse((o) => { if (o.isMesh) n++; });
+    return n;
+  }),
 };
 
 // Paint the initial (pairing) state once before the loop starts. Without

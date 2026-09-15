@@ -709,6 +709,12 @@
         // off, or because OK was pressed on the remote. Either way the
         // player doesn't have to come back to the phone to start.
         else if (msg.action === 'finish') finishCalibration({ notifyTv: false });
+        // 2026-09-15 ("if you press back on the level select it goes back to
+        // configuration"): sent to every phone in the room when Back is
+        // pressed on the era picker. Whatever this phone was doing — mid
+        // run, mid calibration, sitting on the play screen — gets torn down
+        // and it lands back on control choice to pick motion/pad again.
+        else if (msg.action === 'restart') handleRestartConfiguration();
       } else if (msg.type === 'error') {
         joinError.textContent = msg.message || 'Could not connect.';
         joinBtn.disabled = false;
@@ -818,6 +824,28 @@
     } else {
       sendCalibration('start', { mode: currentMode });
     }
+  }
+
+  // 2026-09-15 ("if you press back on the level select it goes back to
+  // configuration"): the TV broadcasts this to every phone in the room when
+  // Back is pressed on the era picker (see restartConfiguration() in
+  // tv/game.js). Whatever this phone was doing gets torn down the same way
+  // switching control modes already does — stop the camera and any motion
+  // listeners, drop the setup gates, forget which mode was chosen — and it
+  // lands back on control choice so the player can pick motion or pad and
+  // recalibrate from scratch.
+  function handleRestartConfiguration() {
+    stopCamera();
+    stopMotionListeners();
+    hideMotionPermBanner();
+    if (calStuckTimer) clearTimeout(calStuckTimer);
+    inCameraSetupGate = false;
+    framingActive = false;
+    framingGoodStreakStart = null;
+    expectedCalStep = null;
+    currentMode = null;
+    actionHandlers = realHandlers;
+    showScreen(controlChoiceScreen);
   }
 
   function handlePlacementAck() {

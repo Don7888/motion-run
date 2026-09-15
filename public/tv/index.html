@@ -733,6 +733,14 @@
       repeating-linear-gradient(90deg, rgba(216,204,250,0.16) 0 8px, transparent 8px 34px),
       linear-gradient(180deg, var(--indigo-700), var(--indigo-900));
   }
+  .level-card[data-era="medieval"]::before {
+    /* Crenellations: a repeating square-wave along the top of a stone band,
+       which is the castle silhouette reduced to pure CSS. */
+    background:
+      linear-gradient(90deg, rgba(216,204,250,0.22) 0 14px, transparent 14px 28px) top/28px 26px repeat-x,
+      radial-gradient(circle at 50% 96%, rgba(255,210,63,0.18), transparent 46%),
+      linear-gradient(180deg, var(--indigo-700), var(--indigo-900));
+  }
   .level-card[data-era="present"]::before {
     background:
       radial-gradient(circle at 80% 85%, rgba(255,210,63,0.22), transparent 40%),

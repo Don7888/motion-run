@@ -1,114 +1,48 @@
 MotionQuest — motionquest-deploy
 
-Commit: 82af736
-Date: 2026-09-15
+Commit: 9957477
+Date: 2026-09-15 (later the same day)
 
->>> READ THIS FIRST <<<
-The upload you just did went through fine — but this folder was still
-holding the build from 11 Sep (the menu rebuild), so that's what went to
-GitHub. My last two rounds never made it into this folder, because the
-link to your computer was down both times and the zips I sent had to be
-unzipped in here by hand.
+Everything up to and including c3b22ca (the medieval "Castle Siege" era) is
+now LIVE. This is the next round on top of it.
 
-That's fixed now: the five changed files below have been written straight
-into this folder. Please drag the "public" folder to GitHub once more and
-tell me — that upload will carry all THREE outstanding rounds at once.
-
-Files replaced just now (15 Sep):
-  public/play/controller.js    129,653 bytes
-  public/play/index.html        46,446 bytes
-  public/solo/index.html        64,626 bytes
-  public/tv/game.js            294,249 bytes
-  public/tv/index.html          57,863 bytes
-
-If Explorer shows those sizes, you have the right build. (The old ones
-were 87,514 / 42,666 / 61,203 / 273,782 / 53,358.)
-
-Everything else in this folder — art, audio, fonts, icons, models — was
-already correct and is untouched.
+Files changed this round:
+  public/tv/game.js          309,117 bytes
+  public/play/controller.js  131,050 bytes
 
 ===========================================================================
-WHAT THE THREE ROUNDS CONTAIN
+BACK BUTTON: LEVEL SELECT, THEN CONFIGURATION
 ===========================================================================
 
-ROUND 3 — 15 Sep (commit 82af736)
+You: "change the game so that during the level if you press back on the
+firestick remote it goes back to level select and if you press back on the
+level select it goes back to configuration."
 
-1. MOTION TRACKING NOW WORKS WITHOUT SEEING YOUR WHOLE BODY
-   You: "In landscape it's rare that the players full body will be
-   visible."
+DURING A LEVEL
+   Back now goes straight to the era picker — no pause stop-off first. You
+   can still pause: the phone's own pause button (and solo mode's on-screen
+   one) still work exactly as before. It's just that Back on the remote is
+   now a one-press "get me out of here", not "pause, then a second press to
+   quit".
 
-   It was worse than just less accurate: the tracking needed to see your
-   shoulders AND your hips before it would register anything at all.
-   Propped up in landscape it often sees you from the waist up, and in
-   that case nothing was ever detected. The setup screen also told you to
-   move further back whenever you filled more of the picture than a
-   full-body shot — which is exactly the position that tracks best, so
-   you could get stuck being told to back away from a spot that would
-   have worked.
+ON THE ERA PICKER
+   One more Back press sends every connected phone back to choosing motion
+   camera or pad controls, then recalibrating from scratch — the same
+   placement, framing, per-move walkthrough and review as the very first
+   time. The TV drops back to the "waiting for setup" Ready screen while
+   that happens. This is a genuine do-over: if you'd already finished
+   setting up, that's forgotten, and you'll need to finish it again before
+   you can start a run.
 
-   It now works from your head and shoulders alone. If it can see your
-   hips it still uses them; if it can't, it measures from your shoulders
-   instead. Losing sight of your hips mid-game no longer causes a phantom
-   jump, and hips flickering in and out at the bottom of the picture no
-   longer make it keep re-adjusting. The "are you in shot?" check now
-   asks whether you're big enough to read and whether you're being cut
-   off — including whether there's room above your head to jump into.
+   Everyone in the room gets sent back together — the TV has no way to know
+   it was only one of several players who wanted to reconfigure, so a Back
+   press here starts the whole room over, not just one player.
 
-2. EVERY SETUP MOVE IS COUNTED IN
-   "Get ready… 3, 2, 1, GO" before each move. The phone genuinely isn't
-   listening during the count, so it can't tick a move off while you're
-   still walking back into position.
-
-3. YOUR CHARACTER COPIES YOU THROUGHOUT SETUP
-   Your character is on screen for the whole of setup doing whatever you
-   do — including moves the walkthrough hasn't asked for yet. Shown from
-   behind, the same view as the game, so left and right mean the same
-   thing in setup as in play.
-
-4. A REVIEW AT THE END
-   Setup finishes on a list of all five moves showing which registered.
-   ▲▼ to pick one and OK to do it again, or pick "Start playing". If
-   something didn't work it's already selected — one press of OK redoes
-   it.
-
-5. A MOVE THAT WON'T REGISTER NO LONGER TRAPS SETUP
-   Press ▶ (right) on the remote to skip it; it gets flagged on the
-   review list. OK still means "finish setup and start".
-
-ROUND 2 — 14 Sep (commit 387b8db)
-
-6. iPHONE CAMERA MODE — THE PHONE WAS FALLING ASLEEP
-   You: "iPhone 13 didn't work when doing the motion capture."
-
-   Camera mode asks you to prop the phone up and never touch it again,
-   so it locks its own screen — and iOS shuts the camera off when it
-   does. Everything silently stopped from that moment; pick the phone up
-   and the camera looks perfectly healthy again, which is why it was hard
-   to spot. An iPhone's Auto-Lock can be as short as 30 seconds. Android
-   was getting away with it by accident.
-
-   The game now holds the screen awake while the camera is running. On
-   iPhones too old to allow that (before iOS 16.4) it tells you to set
-   Auto-Lock to Never first.
-
-7. WHEN TRACKING STOPS, YOU GET TOLD
-   Previously a dead tracker looked identical to one that just couldn't
-   see you. Now the phone retries the camera by itself, and if that
-   fails the TV says "Phone stopped tracking — wake it up".
-
-8. A "TRACKING DETAILS" READOUT ON THE PHONE
-   Tap it to see what tracking is doing — camera resolution, speed,
-   whether it can see your body, whether the screen is being held awake,
-   last error. It opens itself if tracking fails. If a phone misbehaves
-   again, one photo of that panel should explain why.
-
-9. Fixed: on iPhone, a camera problem used to silently kill hold-phone
-   mode too, leaving nothing working. There's now a "Turn on motion
-   sensors" button when that happens.
-
-ROUND 1 — 11 Sep (commit 5b59b0f) — this one IS on GitHub already
-   Menus completely rebuilt — TV, solo and phone screens rebuilt from
-   scratch on one consistent look from the style guide.
+Testing: new suite (12/12) covering Back mid-run landing on the era picker
+without a pause screen in between, Back while already paused still reaching
+it too (unchanged), and Back on the era picker resetting who's finished
+setup and telling the phone to redo it. Full regression re-run against the
+existing setup/calibration/medieval-era suites — no new failures.
 
 ===========================================================================
 HOW TO UPLOAD (same as always)
@@ -118,10 +52,4 @@ HOW TO UPLOAD (same as always)
 2. Tell Claude once it's uploaded, so it can verify and trigger the
    deploy.
 
-WHAT TO TRY ONCE IT'S LIVE:
-- Camera mode with the phone propped up in landscape where it can only
-  see you from the waist up. That should now work, and setup should
-  accept that position instead of telling you to back away.
-- Watch your character on the TV during setup — it should copy you.
-- On the review screen, try redoing a move with ▲▼ and OK.
-- On the iPhone 13: the screen should stay awake through a whole run.
+If Explorer shows game.js at 309 KB, you have this build.

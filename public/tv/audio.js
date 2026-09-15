@@ -37,6 +37,10 @@ const SFX_FILES = {
 const MUSIC_FILES = {
   dino: 'music_dino.mp3',
   rome: 'music_rome.mp3',
+  // 2026-09-15: the medieval era shares Rome's track rather than shipping a
+  // sixth audio file. They are the two "old world" eras and it sits fine
+  // under both; an era with no entry here simply runs silent.
+  medieval: 'music_rome.mp3',
   present: 'music_present.mp3',
   future: 'music_future.mp3',
 };
