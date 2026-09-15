@@ -120,6 +120,27 @@
   const POSE_CENTER_SETTLE_BAND = 0.35;  // fraction of ENTER that counts as "clearly centred"
   const JUMP_TRIGGER_TORSO_FRAC = 0.28;
   const JUMP_COOLDOWN_MS = 500;
+  // 2026-09-11 ("it got stuck on jump a few times", real camera-mode
+  // testing): jump used to be a pure LEVEL trigger — "rise is currently
+  // above the threshold" — re-checked every frame and gated only by
+  // JUMP_COOLDOWN_MS. A real jump's hang time is often *longer* than that
+  // 500ms cooldown, so the very same jump would still read as "hips risen"
+  // the instant the cooldown expired, fire a SECOND jump message for a
+  // single physical jump, reset the cooldown clock again, and repeat for
+  // as long as the player was still airborne or mid-landing — which reads
+  // to the player as the character being "stuck" jumping over and over.
+  // Worse, the baseline drift-correction below was also gated on the same
+  // cooldown, so it could never catch up while this was happening, which
+  // kept the bug feeding itself.
+  //
+  // Fixed by making jump a true EDGE trigger with hysteresis, the same
+  // ENTER/EXIT idea already used for lanes: `jumpArmed` must be true to
+  // fire, goes false the instant it fires, and only goes true again once
+  // the hips have genuinely returned close to baseline (below
+  // JUMP_REARM_TORSO_FRAC) — i.e. the player has actually landed. One real
+  // jump can now only ever produce one jump message, no matter how long
+  // the hang time is or how the cooldown lines up against it.
+  const JUMP_REARM_TORSO_FRAC = 0.12;
   // ---- Duck (2026-09-04, the era-levels round) ------------------------
   // Detected as the mirror image of a jump: the hips DROP below their
   // resting baseline by a good fraction of torso length. The threshold is
@@ -139,6 +160,10 @@
   // see the move register at all before trusting it mid-run.
   const CAL_DUCK_TRIGGER_TORSO_FRAC = 0.24;
   const CAL_DUCK_COOLDOWN_MS = 450;
+  // Same "stuck" fix as jump above, applied to duck: re-arms only once the
+  // hips have risen back out of the crouch, past this fraction of torso
+  // length below baseline.
+  const DUCK_REARM_TORSO_FRAC = 0.14;
   // Punch was firing continuously on real-device testing (2026-09-02) —
   // ordinary running arm swing was crossing these thresholds repeatedly.
   // Raised extension/velocity requirements (a punch now needs a clearly
@@ -151,6 +176,29 @@
   const PUNCH_EXTENSION_FRAC = 0.52;
   const PUNCH_VELOCITY_TORSO_FRAC = 2.0;
   const PUNCH_COOLDOWN_MS = 700;
+  // 2026-09-11 ("punch triggers when I've not done a punch", randomly, no
+  // clear pattern — real camera-mode testing): that "no clear pattern" is
+  // the signature of single-frame POSE NOISE rather than a real gesture
+  // being misread. MoveNet occasionally reports one noisy wrist estimate —
+  // a small jump in position from motion blur, brief partial occlusion, or
+  // just an off frame — and the old check fired a punch off ONE such frame
+  // the instant it happened to clear both the speed and extension bars.
+  //
+  // Two independent tightenings, both cheap (well under one frame of
+  // latency at POSE_TARGET_FPS):
+  //   1. A punch reading is only trusted from a wrist estimate the model
+  //      itself is reasonably confident in — POSE_MIN_SCORE (0.25) is a
+  //      deliberately low bar so lane/jump/duck (which average many frames
+  //      together) keep working at the edges of the frame; punch fires off
+  //      a single frame's reading, so it needs a cleaner one.
+  //   2. A punch must clear the bar on TWO qualifying frames within
+  //      PUNCH_CONFIRM_WINDOW_MS of each other, not just one — see
+  //      checkPunch()'s comment. A real punch stays fast and extended for
+  //      several consecutive frames near its peak, so this costs it
+  //      nothing; an isolated noisy frame essentially never repeats on the
+  //      very next sample too.
+  const PUNCH_MIN_SCORE = 0.35;
+  const PUNCH_CONFIRM_WINDOW_MS = 150;
   // Calibration-only punch thresholds (2026-09-02, "ensure punch is in the
   // list of movements during setup" feedback) — punch IS already one of
   // the 4 guided-calibration steps (see CAL_ORDER in tv/game.js, and
@@ -734,6 +782,9 @@
     poseCenterSamples.length = 0;
     poseHipYBaseline = null;
     cameraLaneZone = 0;
+    jumpArmed = true;
+    duckArmed = true;
+    punchPending = { left: null, right: null };
     actionHandlers = realHandlers;
     moveSensorPanelTo(playSensorSlot);
     showScreen(playScreen);
@@ -749,6 +800,9 @@
       poseCenterSamples.length = 0;
       poseHipYBaseline = null;
       cameraLaneZone = 0;
+      jumpArmed = true;
+      duckArmed = true;
+      punchPending = { left: null, right: null };
     } else {
       baselineGamma = null;
       tiltLaneZone = 0;
@@ -766,6 +820,11 @@
   let lastPunchTime = 0;
   let lastDuckTime = 0;
   let lastActionTime = 0;
+  // Edge-trigger arming for jump/duck — see JUMP_REARM_TORSO_FRAC's comment.
+  // Both start armed: a player who is already standing neutral when
+  // tracking locks on should be able to jump/duck immediately.
+  let jumpArmed = true;
+  let duckArmed = true;
 
   function fireJump(opts) {
     const now = performance.now();
@@ -948,6 +1007,9 @@
   let liveFramingStatus = 'ok';
   let lastLiveFramingSentT = 0;
   let lastWrist = { left: null, right: null };
+  // First-qualifying-frame timestamp per arm, awaiting a second confirming
+  // frame — see PUNCH_CONFIRM_WINDOW_MS's comment and checkPunch() below.
+  let punchPending = { left: null, right: null };
 
   // Shared absolute-zone hysteresis: harder to leave center (ENTER) than to
   // return to it (EXIT), so a normal centered stance reliably snaps you
@@ -1166,21 +1228,34 @@
     const inCalibration = actionHandlers === calHandlers;
     const duckTrigger = (inCalibration ? CAL_DUCK_TRIGGER_TORSO_FRAC : DUCK_TRIGGER_TORSO_FRAC) * torsoScale;
     const duckCooldown = inCalibration ? CAL_DUCK_COOLDOWN_MS : DUCK_COOLDOWN_MS;
-    if (rise > JUMP_TRIGGER_TORSO_FRAC * torsoScale && now - lastJumpTime > JUMP_COOLDOWN_MS && now - lastActionTime > CROSS_TALK_LOCK_MS) {
+
+    // Re-arm once the hips have genuinely returned near baseline — i.e. the
+    // player has landed the jump / come back up out of the duck. See
+    // JUMP_REARM_TORSO_FRAC's comment for why this exists ("stuck on
+    // jump"): without it, a single jump whose hang time outlasts the
+    // cooldown could fire twice (or more) off the same physical motion.
+    if (!jumpArmed && rise < JUMP_REARM_TORSO_FRAC * torsoScale) jumpArmed = true;
+    if (!duckArmed && drop < DUCK_REARM_TORSO_FRAC * torsoScale) duckArmed = true;
+
+    if (jumpArmed && rise > JUMP_TRIGGER_TORSO_FRAC * torsoScale && now - lastJumpTime > JUMP_COOLDOWN_MS && now - lastActionTime > CROSS_TALK_LOCK_MS) {
       lastJumpTime = now;
       lastActionTime = now;
+      jumpArmed = false;
       actionHandlers.jump();
-    } else if (drop > duckTrigger
+    } else if (duckArmed && drop > duckTrigger
         && now - lastDuckTime > duckCooldown
         && now - lastJumpTime > DUCK_AFTER_JUMP_LOCK_MS
         && now - lastActionTime > CROSS_TALK_LOCK_MS) {
       lastDuckTime = now;
       lastActionTime = now;
+      duckArmed = false;
       actionHandlers.duck();
-    } else if (now - lastJumpTime > JUMP_COOLDOWN_MS && now - lastDuckTime > duckCooldown) {
-      // The baseline only re-settles when neither move is in progress —
-      // otherwise a held crouch would drag the baseline down with it and
-      // the player would have to duck further and further each time.
+    } else if (jumpArmed && duckArmed) {
+      // The baseline only re-settles while genuinely at rest (both armed —
+      // not mid-jump or mid-duck) — otherwise a held crouch would drag the
+      // baseline down with it (and the player would have to duck further
+      // and further each time), or a long jump's hang time would slowly
+      // pull the baseline up to meet it.
       poseHipYBaseline = poseHipYBaseline * 0.94 + hipMid.y * 0.06;
     }
 
@@ -1237,6 +1312,9 @@
       poseCenterX = null;
       poseCenterSamples.length = 0;
       poseHipYBaseline = null;
+      jumpArmed = true;
+      duckArmed = true;
+      punchPending = { left: null, right: null };
       if (cameraLaneZone !== 0) { cameraLaneZone = 0; actionHandlers.laneZone(0); }
     }
     const now = performance.now();
@@ -1292,14 +1370,34 @@
     }
   }
 
+  // 2026-09-11 ("punch triggers when I've not done a punch", randomly) — see
+  // PUNCH_MIN_SCORE/PUNCH_CONFIRM_WINDOW_MS's comment up top for the
+  // reasoning. Two changes from the original single-frame check:
+  //   - a wrist estimate below PUNCH_MIN_SCORE is treated as untracked
+  //     (same as absent), same as kp()'s own POSE_MIN_SCORE gate but held
+  //     to a stricter bar because punch trusts a single frame's position;
+  //   - a frame that clears the speed+extension bar doesn't fire on its
+  //     own. It's remembered as a PENDING punch; only a second qualifying
+  //     frame within PUNCH_CONFIRM_WINDOW_MS actually fires. A real punch
+  //     stays fast and extended for several consecutive frames near its
+  //     peak, so it still confirms almost immediately; an isolated noisy
+  //     frame — the "no clear pattern" signature — essentially never
+  //     repeats on the very next sample too.
   function checkPunch(side, wrist, shoulder, torsoScale, now) {
-    if (!wrist || !shoulder) { lastWrist[side] = null; return; }
+    if (!wrist || !shoulder || wrist.score < PUNCH_MIN_SCORE) {
+      lastWrist[side] = null;
+      punchPending[side] = null;
+      return;
+    }
     const prev = lastWrist[side];
     lastWrist[side] = { x: wrist.x, y: wrist.y, t: now };
     if (!prev) return;
 
     const dt = (now - prev.t) / 1000;
-    if (dt <= 0 || dt > 0.5) return;
+    // Besides the existing "gap too large" guard, also floor dt against a
+    // near-zero value — a very short dt would blow up an otherwise modest
+    // pixel jitter into a huge, spurious speed reading via division.
+    if (dt <= 1 / (POSE_TARGET_FPS * 2) || dt > 0.5) return;
     const speed = Math.hypot(wrist.x - prev.x, wrist.y - prev.y) / dt;
     const extension = dist(wrist, shoulder) / torsoScale;
 
@@ -1310,16 +1408,33 @@
     const extensionThresh = calibrating ? CAL_PUNCH_EXTENSION_FRAC : PUNCH_EXTENSION_FRAC;
     const cooldown = calibrating ? CAL_PUNCH_COOLDOWN_MS : PUNCH_COOLDOWN_MS;
 
-    if (
-      speed > velocityThresh * torsoScale &&
-      extension > extensionThresh &&
-      now - lastPunchTime > cooldown &&
-      now - lastActionTime > CROSS_TALK_LOCK_MS
-    ) {
+    const qualifies = speed > velocityThresh * torsoScale && extension > extensionThresh;
+
+    if (!qualifies) {
+      // Only drop an in-progress confirmation once it's aged out — a
+      // single frame that missed by a hair shouldn't cost an otherwise-real
+      // punch its confirming second frame.
+      if (punchPending[side] !== null && now - punchPending[side] > PUNCH_CONFIRM_WINDOW_MS) {
+        punchPending[side] = null;
+      }
+      return;
+    }
+
+    const hasPendingInWindow = punchPending[side] !== null && now - punchPending[side] <= PUNCH_CONFIRM_WINDOW_MS;
+    if (hasPendingInWindow && now - lastPunchTime > cooldown && now - lastActionTime > CROSS_TALK_LOCK_MS) {
       lastPunchTime = now;
       lastActionTime = now;
+      punchPending[side] = null;
       actionHandlers.punch();
+      return;
     }
+    // Not confirmed this frame — either this is the first qualifying frame,
+    // the previous pending one aged out of the window, or a genuine
+    // two-frame gesture got blocked by cooldown/cross-talk. Either way,
+    // (re)anchor the pending window here so the NEXT qualifying frame gets
+    // a fresh chance to confirm, rather than being stuck comparing against
+    // a stale timestamp that can never be within the window again.
+    punchPending[side] = now;
   }
 
   // `laneEnter` is now in pixels and varies with the player's torso (see
@@ -1619,6 +1734,68 @@
     if (e.target.closest('#characterScreen')) return;
     e.preventDefault();
   }, { passive: false });
+
+  // =========================================================================
+  // TEST HOOK — 2026-09-11, same idea as tv/game.js's window.__mrDebug:
+  // there is no camera or real device motion available in an automated test
+  // environment, so gesture-detection regressions (the "stuck on jump" /
+  // "punch triggers when I've not done a punch" round) have to be tested
+  // by feeding synthetic pose data through the REAL detection code —
+  // processPose(), checkPunch() — not a reimplementation of it. This calls
+  // processPose() directly (bypassing getUserMedia/TFJS entirely) and
+  // exposes the internal arming state a test needs to assert against.
+  // Always present, same as __mrDebug — never gated behind an env flag.
+  // =========================================================================
+  window.__mrPoseDebug = {
+    // Puts the detector into the same state real play is in once
+    // calibration finishes (see finishCalibration()) — real handlers live,
+    // no setup gates active — without going through the camera/permission/
+    // calibration UI flow at all. `cameraVideo.videoWidth/videoHeight` are
+    // read-only and normally only populated by a real media stream (which
+    // getUserMedia never runs in a test), but liveFramingCheck()/
+    // evaluateFraming() divide by them — so this stubs in a plausible fixed
+    // frame size (default 640x480, matching startCamera()'s requested
+    // resolution) via defineProperty, same trick a test would use on any
+    // other read-only DOM property.
+    enterRealPlay(opts) {
+      actionHandlers = realHandlers;
+      inCameraSetupGate = false;
+      framingActive = false;
+      detectionEnabled = true;
+      const frameW = (opts && opts.frameW) || 640;
+      const frameH = (opts && opts.frameH) || 480;
+      Object.defineProperty(cameraVideo, 'videoWidth', { value: frameW, configurable: true });
+      Object.defineProperty(cameraVideo, 'videoHeight', { value: frameH, configurable: true });
+    },
+    // Same reset finishCalibration()/recenter() do, exposed directly so a
+    // test can start each case from a clean baseline.
+    reset() {
+      poseCenterX = null;
+      poseCenterSamples.length = 0;
+      poseHipYBaseline = null;
+      cameraLaneZone = 0;
+      jumpArmed = true;
+      duckArmed = true;
+      punchPending = { left: null, right: null };
+      lastWrist = { left: null, right: null };
+      lastJumpTime = 0;
+      lastDuckTime = 0;
+      lastPunchTime = 0;
+      lastActionTime = 0;
+    },
+    // `keypoints`: array of {name, x, y, score}. Feeds straight into the
+    // real processPose(), exactly as a real pose-detection frame would.
+    injectPose(keypoints) {
+      processPose({ keypoints });
+    },
+    state() {
+      return {
+        jumpArmed, duckArmed,
+        punchPending: { ...punchPending },
+        poseHipYBaseline, poseCenterX, cameraLaneZone,
+      };
+    },
+  };
 
   // =========================================================================
   // STARTUP — join screen first (see the header comment for the flow
