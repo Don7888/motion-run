@@ -221,8 +221,51 @@ if (ON_RENDER) {
 }
 const wss = new WSServer({ server });
 
-/** @type {Map<string, {tv: import('./lib/ws-lite').WSConnection|null, controllers: Set<import('./lib/ws-lite').WSConnection>}>} */
+// --- Reconnect & session-lifetime tuning (2026-09-16 round) -----------------
+// A phone's own network hiccup (elevator, wifi handoff, screen lock) or a TV
+// browser blip should recover on its own without losing a player's slot or
+// forcing anyone back through setup. A short per-connection grace period
+// keeps a disconnected side's identity reserved for a little while, so a
+// reconnecting socket can reclaim exactly who it was rather than looking like
+// a brand-new join. This is separate from a room simply going stale: a TV
+// left sitting on the pairing screen for a long time is an expired session,
+// not a blip, and is swept away outright so a fresh code is always waiting.
+// MQ_TEST_TIMERS shrinks all of the above to a few seconds so the Playwright
+// suite can actually exercise grace-window and idle-expiry behavior without
+// a real test taking 45 minutes. Never set in production — see README.md.
+const TEST_TIMERS = !!process.env.MQ_TEST_TIMERS;
+// 2026-09-16: the two reconnect grace windows need to stay comfortably
+// longer than the CLIENT's own first-retry delay (game.js's
+// TV_RECONNECT_DELAYS_MS / controller.js's RECONNECT_DELAYS_MS both start
+// their backoff at a hardcoded 1000ms, unaffected by this flag — there's no
+// client-side equivalent of MQ_TEST_TIMERS). In production the ratio is
+// roughly 20-25:1 (a real blip's first retry lands nowhere near the grace
+// window), so shrinking both grace windows to ~1000ms here reproduced a
+// race that never happens for real: the room could mark a merely-blipped
+// TV/phone as "left" before its very first, on-time reconnect attempt had
+// even finished round-tripping. Keeping a similar multiple under test mode
+// avoids that false expiry while still finishing in a couple of seconds.
+const CONTROLLER_RECONNECT_GRACE_MS = TEST_TIMERS ? 2500 : 25000;
+const TV_RECONNECT_GRACE_MS = TEST_TIMERS ? 2500 : 20000;
+const ROOM_IDLE_EXPIRE_MS = TEST_TIMERS ? 4000 : 45 * 60 * 1000;
+const IDLE_SWEEP_INTERVAL_MS = TEST_TIMERS ? 500 : 60 * 1000;
+
+/**
+ * @typedef {{
+ *   tv: import('./lib/ws-lite').WSConnection|null,
+ *   tvPendingTimer: NodeJS.Timeout|null,
+ *   controllers: Set<import('./lib/ws-lite').WSConnection>,
+ *   players: Map<number, {token: string|null, pendingRemoveTimer: NodeJS.Timeout|null}>,
+ *   tokenToPlayer: Map<string, number>,
+ *   lastActivity: number,
+ * }} Room
+ */
+/** @type {Map<string, Room>} */
 const rooms = new Map();
+
+function touchActivity(room) {
+  room.lastActivity = Date.now();
+}
 
 // 6 digits once this is reachable from the open internet (Render deploy) —
 // a 4-digit code is fine on a private LAN but too easy to stumble into by
@@ -241,14 +284,54 @@ function send(ws, obj) {
 }
 
 function roomFor(code) {
-  if (!rooms.has(code)) rooms.set(code, { tv: null, controllers: new Set() });
+  if (!rooms.has(code)) {
+    rooms.set(code, {
+      tv: null,
+      tvPendingTimer: null,
+      controllers: new Set(),
+      players: new Map(),
+      tokenToPlayer: new Map(),
+      lastActivity: Date.now(),
+    });
+  }
   return rooms.get(code);
 }
 
+// A room is only truly empty once nothing could still reclaim it: no live TV,
+// no TV reconnect grace timer pending, no live phone, and no phone reconnect
+// grace timer pending either. Each grace-timer callback calls this again once
+// it fires, so a room that never gets reclaimed still cleans itself up —
+// just after its grace window rather than the instant a socket drops.
 function cleanupEmptyRoom(code) {
   const room = rooms.get(code);
-  if (room && !room.tv && room.controllers.size === 0) rooms.delete(code);
+  if (!room) return;
+  if (room.tv || room.tvPendingTimer) return;
+  if (room.controllers.size > 0 || room.players.size > 0) return;
+  rooms.delete(code);
 }
+
+// A session nobody has touched in a long time (TV left on the pairing screen
+// overnight, say) is expired outright rather than left to rot — swept
+// periodically rather than timed per-room, to keep this simple. Both sides
+// are told plainly, while their sockets are still open, so neither is left
+// guessing why the game vanished.
+function expireRoom(code, room) {
+  const msg = { type: 'session_expired', message: 'This session timed out from inactivity.' };
+  if (room.tv) send(room.tv, msg);
+  room.controllers.forEach((c) => send(c, msg));
+  if (room.tvPendingTimer) clearTimeout(room.tvPendingTimer);
+  for (const rec of room.players.values()) {
+    if (rec.pendingRemoveTimer) clearTimeout(rec.pendingRemoveTimer);
+  }
+  rooms.delete(code);
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [code, room] of rooms) {
+    if (now - room.lastActivity > ROOM_IDLE_EXPIRE_MS) expireRoom(code, room);
+  }
+}, IDLE_SWEEP_INTERVAL_MS).unref();
 
 // Multiplayer (2026-09-08): up to 4 phones can join one room, one per
 // player. Each gets a stable 1-4 id — the lowest one not currently in
@@ -258,9 +341,12 @@ function cleanupEmptyRoom(code) {
 // among themselves. A 5th join is turned away rather than silently
 // bumping someone, since there's no fair way to pick who loses a slot.
 const MAX_PLAYERS = 4;
+// Uses room.players (identities, including anyone mid-reconnect-grace) rather
+// than room.controllers (live sockets only) — a phone that just dropped and
+// is still inside its grace window keeps its slot reserved, so a second
+// device can't be handed the same id while the first might still come back.
 function assignPlayerId(room) {
-  const used = new Set(Array.from(room.controllers, (c) => c.playerId));
-  for (let id = 1; id <= MAX_PLAYERS; id++) if (!used.has(id)) return id;
+  for (let id = 1; id <= MAX_PLAYERS; id++) if (!room.players.has(id)) return id;
   return null;
 }
 
@@ -288,29 +374,100 @@ wss.on('connection', (ws) => {
 
     if (msg.type === 'register') {
       if (msg.role === 'tv') {
-        const code = makeRoomCode();
+        // A TV whose socket merely dropped (not a full page reload) can ask
+        // to reclaim the exact code it already had, via rejoinCode — but
+        // only while that room's TV slot is still actually free. This is
+        // what lets a brief network blip resume silently on the SAME code
+        // instead of stranding every already-paired phone. A rejoinCode that
+        // can't be reclaimed (room gone, or someone/something else already
+        // holds it) is not an error — it just falls through to a normal
+        // fresh code, which is also exactly the behavior a genuinely expired
+        // session should get.
+        const rejoinCode = typeof msg.rejoinCode === 'string' ? msg.rejoinCode.trim() : null;
+        let code = null;
+        let rejoined = false;
+        if (rejoinCode && rooms.has(rejoinCode) && !rooms.get(rejoinCode).tv) {
+          const existing = rooms.get(rejoinCode);
+          code = rejoinCode;
+          rejoined = true;
+          if (existing.tvPendingTimer) {
+            clearTimeout(existing.tvPendingTimer);
+            existing.tvPendingTimer = null;
+          }
+        }
+        if (!code) code = makeRoomCode();
         ws.role = 'tv';
         ws.roomCode = code;
-        roomFor(code).tv = ws;
-        send(ws, { type: 'room', code });
+        const room = roomFor(code);
+        room.tv = ws;
+        touchActivity(room);
+        send(ws, { type: 'room', code, rejoined });
+        if (rejoined) {
+          // Let every already-connected phone know the TV is back, and
+          // resend the roster so nothing on either side looks stale.
+          room.controllers.forEach((c) => send(c, { type: 'tv_status', status: 'connected' }));
+          send(ws, { type: 'controller_connected', count: room.controllers.size });
+          broadcastRoster(room);
+        }
       } else if (msg.role === 'controller') {
         const code = String(msg.code || '').trim();
         const room = rooms.get(code);
         if (!room || !room.tv) {
-          send(ws, { type: 'error', message: 'Room not found. Check the code on the TV screen.' });
+          send(ws, { type: 'error', code: 'room_not_found', message: 'Room not found. Check the code on the TV screen.' });
           return;
         }
-        const playerId = assignPlayerId(room);
+        touchActivity(room);
+
+        // Reclaiming an existing slot requires presenting the exact private
+        // token that was handed out for it when that slot was first taken —
+        // the 6-digit room code (which anyone who scans the QR or is told
+        // the digits has) is deliberately never enough on its own. That is
+        // what makes a network blip recoverable without opening a hijack
+        // path: a second real player who knows only the code, but not
+        // another player's own token, always gets a brand-new slot below,
+        // never someone else's identity or their finished calibration.
+        const token = typeof msg.deviceToken === 'string' && msg.deviceToken.length >= 16 && msg.deviceToken.length <= 128
+          ? msg.deviceToken
+          : null;
+        let playerId = null;
+        let reconnected = false;
+        if (token && room.tokenToPlayer.has(token)) {
+          const claimedId = room.tokenToPlayer.get(token);
+          const rec = room.players.get(claimedId);
+          if (rec) {
+            playerId = claimedId;
+            reconnected = true;
+            if (rec.pendingRemoveTimer) {
+              clearTimeout(rec.pendingRemoveTimer);
+              rec.pendingRemoveTimer = null;
+            }
+            // Only one live socket per player id — drop anything stale still
+            // on file for it (e.g. an old tab that hasn't finished closing).
+            for (const c of room.controllers) {
+              if (c.playerId === playerId && c !== ws) {
+                room.controllers.delete(c);
+                try { c.close(); } catch { /* already gone */ }
+              }
+            }
+          }
+        }
         if (playerId === null) {
-          send(ws, { type: 'error', message: 'Room is full — up to 4 players can join.' });
-          return;
+          playerId = assignPlayerId(room);
+          if (playerId === null) {
+            send(ws, { type: 'error', code: 'room_full', message: 'Room is full — up to 4 players can join.' });
+            return;
+          }
+          room.players.set(playerId, { token, pendingRemoveTimer: null });
+          if (token) room.tokenToPlayer.set(token, playerId);
         }
+
         ws.role = 'controller';
         ws.roomCode = code;
         ws.playerId = playerId;
         room.controllers.add(ws);
-        send(ws, { type: 'paired', code, playerId });
+        send(ws, { type: 'paired', code, playerId, reconnected });
         send(room.tv, { type: 'controller_connected', count: room.controllers.size });
+        send(room.tv, { type: 'controller_status', playerId, status: reconnected ? 'reconnected' : 'connected' });
         broadcastRoster(room);
       }
       return;
@@ -322,6 +479,7 @@ wss.on('connection', (ws) => {
     // tv/game.js's handleInput(). Harmless in solo play, where nothing reads it.
     if (msg.type === 'input' && ws.role === 'controller' && ws.roomCode) {
       const room = rooms.get(ws.roomCode);
+      if (room) touchActivity(room);
       if (room && room.tv) send(room.tv, { ...msg, playerId: ws.playerId });
       return;
     }
@@ -330,6 +488,7 @@ wss.on('connection', (ws) => {
     // relayed to the TV so it can dress the player model.
     if (msg.type === 'character' && ws.role === 'controller' && ws.roomCode) {
       const room = rooms.get(ws.roomCode);
+      if (room) touchActivity(room);
       if (room && room.tv) send(room.tv, { ...msg, playerId: ws.playerId });
       return;
     }
@@ -339,6 +498,7 @@ wss.on('connection', (ws) => {
     // itself is displayed on the TV, so every event gets relayed there.
     if (msg.type === 'calibration' && ws.role === 'controller' && ws.roomCode) {
       const room = rooms.get(ws.roomCode);
+      if (room) touchActivity(room);
       if (room && room.tv) send(room.tv, { ...msg, playerId: ws.playerId });
       return;
     }
@@ -346,7 +506,7 @@ wss.on('connection', (ws) => {
     // Optional: TV -> controller feedback (e.g. game-over, buzz cue).
     if (msg.type === 'feedback' && ws.role === 'tv' && ws.roomCode) {
       const room = rooms.get(ws.roomCode);
-      if (room) room.controllers.forEach((c) => send(c, msg));
+      if (room) { touchActivity(room); room.controllers.forEach((c) => send(c, msg)); }
       return;
     }
 
@@ -355,24 +515,44 @@ wss.on('connection', (ws) => {
     // the top of tv/game.js's calibration section for the full picture).
     if (msg.type === 'calibration_control' && ws.role === 'tv' && ws.roomCode) {
       const room = rooms.get(ws.roomCode);
-      if (room) room.controllers.forEach((c) => send(c, msg));
+      if (room) { touchActivity(room); room.controllers.forEach((c) => send(c, msg)); }
       return;
     }
   });
 
   ws.on('close', () => {
     if (!ws.roomCode) return;
-    const room = rooms.get(ws.roomCode);
+    const code = ws.roomCode;
+    const room = rooms.get(code);
     if (!room) return;
     if (ws.role === 'tv' && room.tv === ws) {
       room.tv = null;
-      room.controllers.forEach((c) => send(c, { type: 'error', message: 'TV disconnected.' }));
+      // Softer than a flat "TV disconnected" — the phone is meant to keep
+      // calm and retry on its own for a while before saying anything is
+      // actually wrong. See tv_status handling in play/controller.js.
+      room.controllers.forEach((c) => send(c, { type: 'tv_status', status: 'reconnecting' }));
+      room.tvPendingTimer = setTimeout(() => {
+        room.tvPendingTimer = null;
+        room.controllers.forEach((c) => send(c, { type: 'tv_status', status: 'left' }));
+        cleanupEmptyRoom(code);
+      }, TV_RECONNECT_GRACE_MS);
     } else if (ws.role === 'controller') {
       room.controllers.delete(ws);
       if (room.tv) send(room.tv, { type: 'controller_connected', count: room.controllers.size });
+      const playerId = ws.playerId;
+      const rec = room.players.get(playerId);
+      if (rec) {
+        if (room.tv) send(room.tv, { type: 'controller_status', playerId, status: 'reconnecting' });
+        rec.pendingRemoveTimer = setTimeout(() => {
+          room.players.delete(playerId);
+          if (rec.token) room.tokenToPlayer.delete(rec.token);
+          if (room.tv) send(room.tv, { type: 'controller_status', playerId, status: 'left' });
+          cleanupEmptyRoom(code);
+        }, CONTROLLER_RECONNECT_GRACE_MS);
+      }
       broadcastRoster(room);
     }
-    cleanupEmptyRoom(ws.roomCode);
+    cleanupEmptyRoom(code);
   });
 });
 

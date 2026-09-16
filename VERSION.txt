@@ -1,55 +1,90 @@
 MotionQuest — motionquest-deploy
 
-Commit: 9957477
-Date: 2026-09-15 (later the same day)
+Commit (local, tested): built on c4053aa
+Date: 2026-09-16
 
-Everything up to and including c3b22ca (the medieval "Castle Siege" era) is
-now LIVE. This is the next round on top of it.
+IMPORTANT — this folder was two rounds behind before this update:
+  - It still had the 9957477 "Back button" build.
+  - The castle siege round (c4053aa: second knight, dragon, real castle,
+    huts/stables) never got copied in here — it went out by chat because
+    the link to your computer was down that day — but you already
+    uploaded it correctly anyway, and it's the build currently LIVE on
+    the site right now. This update brings this folder up to match that,
+    plus adds today's new round on top.
+  - Everything below is now caught up to today's tested build.
 
-Files changed this round:
-  public/tv/game.js          309,117 bytes
-  public/play/controller.js  131,050 bytes
+Files changed this round (2026-09-16 — reconnect & recovery UX):
+  server.js                             26,177 bytes   *** NEW: see below ***
+  public/tv/game.js                    341,426 bytes
+  public/tv/index.html                  65,180 bytes
+  public/play/controller.js            145,081 bytes
+  public/play/index.html                49,637 bytes
 
-===========================================================================
-BACK BUTTON: LEVEL SELECT, THEN CONFIGURATION
-===========================================================================
-
-You: "change the game so that during the level if you press back on the
-firestick remote it goes back to level select and if you press back on the
-level select it goes back to configuration."
-
-DURING A LEVEL
-   Back now goes straight to the era picker — no pause stop-off first. You
-   can still pause: the phone's own pause button (and solo mode's on-screen
-   one) still work exactly as before. It's just that Back on the remote is
-   now a one-press "get me out of here", not "pause, then a second press to
-   quit".
-
-ON THE ERA PICKER
-   One more Back press sends every connected phone back to choosing motion
-   camera or pad controls, then recalibrating from scratch — the same
-   placement, framing, per-move walkthrough and review as the very first
-   time. The TV drops back to the "waiting for setup" Ready screen while
-   that happens. This is a genuine do-over: if you'd already finished
-   setting up, that's forgotten, and you'll need to finish it again before
-   you can start a run.
-
-   Everyone in the room gets sent back together — the TV has no way to know
-   it was only one of several players who wanted to reconfigure, so a Back
-   press here starts the whole room over, not just one player.
-
-Testing: new suite (12/12) covering Back mid-run landing on the era picker
-without a pause screen in between, Back while already paused still reaching
-it too (unchanged), and Back on the era picker resetting who's finished
-setup and telling the phone to redo it. Full regression re-run against the
-existing setup/calibration/medieval-era suites — no new failures.
+Files added by the castle siege round (already live, now also correct here):
+  public/tv/models/castle.glb          649,668 bytes
+  public/tv/models/dragon.glb          200,236 bytes
+  public/tv/models/hut.glb             354,288 bytes
+  public/tv/models/medieval_knight2.glb 261,628 bytes
+  public/tv/models/stable.glb          264,904 bytes
 
 ===========================================================================
-HOW TO UPLOAD (same as always)
+*** THIS ROUND CHANGES server.js — THAT'S NEW, READ THIS CAREFULLY ***
 ===========================================================================
-1. Drag the "public" folder (not this whole motionquest-deploy folder)
-   onto https://github.com/Don7888/motion-run/upload/main
-2. Tell Claude once it's uploaded, so it can verify and trigger the
+Every round so far has only ever touched files inside "public". This is
+the first round in a long while to change server.js, which lives at the
+TOP of this motionquest-deploy folder, next to "public" — not inside it.
+
+That means the usual "just drag the public folder to GitHub" step is NOT
+enough this time. You need to drag BOTH:
+  - the "public" folder
+  - the "server.js" file
+onto https://github.com/Don7888/motion-run/upload/main in the same drop.
+(You can select both of them together in Explorer — click "public", then
+Ctrl+click "server.js" — and drag them in one go. Don't drag VERSION.txt
+or the outer "motionquest-deploy" folder itself.)
+
+If server.js doesn't go up along with everything else, the game will
+still look and play the same, but the new reconnect/recovery behavior
+below won't actually be live — the site would be running the OLD
+server.js underneath the NEW public files, which would be a broken
+mismatch. So please double check both are included before you upload.
+
+===========================================================================
+WHAT'S NEW THIS ROUND
+===========================================================================
+You: "Implement all seven items: session/reconnect foundation, TV/phone
+recovery UI, setup feedback and safety copy, recalibration and remembered
+setup, developer mode, then the Playwright coverage."
+
+- If a phone or the TV drops for a few seconds (Wi-Fi blip, app switch),
+  it now quietly reconnects on its own and picks up exactly where it left
+  off — no lost setup, no restart. A calm "reconnecting" message shows
+  during this; a manual retry button only appears if it can't recover on
+  its own.
+- If a session genuinely expires, both sides say so clearly: the TV shows
+  a brand new pairing code, the phone shows "the TV session ended — scan
+  new code".
+- The placement screen now has a one-line reminder to clear some space and
+  turn up the lights.
+- Calibration shows a clearer demo animation per move and a short flash of
+  confirmation when each move registers.
+- Returning players are offered "Use remembered setup" instead of
+  recalibrating from scratch every time — always still redoable, and it
+  safely falls back to full calibration if anything about the app has
+  changed.
+- A hidden `?dev=1` developer test mode exists for testing the game
+  without a real phone — it's visually unmistakable as a test tool and is
+  blocked from ever appearing on the real published site.
+
+Full details, test results and the manual test checklist are in this
+round's write-up (motionquest-round-2026-09-16-ux-upgrade-delivery.md).
+
+===========================================================================
+HOW TO UPLOAD (same as always, PLUS server.js this time)
+===========================================================================
+1. Select BOTH "public" and "server.js" in this folder (not VERSION.txt,
+   not the outer motionquest-deploy folder itself).
+2. Drag them together onto
+   https://github.com/Don7888/motion-run/upload/main
+3. Tell Claude once it's uploaded, so it can verify and trigger the
    deploy.
-
-If Explorer shows game.js at 309 KB, you have this build.
