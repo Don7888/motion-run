@@ -404,10 +404,16 @@
   // ==== DOM ================================================================
   const characterScreen = document.getElementById('characterScreen');
   const joinScreen = document.getElementById('joinScreen');
+  const sessionExpiredScreen = document.getElementById('sessionExpiredScreen');
+  const scanNewCodeBtn = document.getElementById('scanNewCodeBtn');
+  const connectionBanner = document.getElementById('connectionBanner');
   const controlChoiceScreen = document.getElementById('controlChoiceScreen');
   const chooseMotionBtn = document.getElementById('chooseMotionBtn');
   const choosePadBtn = document.getElementById('choosePadBtn');
   const permScreen = document.getElementById('permScreen');
+  const rememberedSetupScreen = document.getElementById('rememberedSetupScreen');
+  const useRememberedBtn = document.getElementById('useRememberedBtn');
+  const redoSetupBtn = document.getElementById('redoSetupBtn');
   const calibrationScreen = document.getElementById('calibrationScreen');
   const playScreen = document.getElementById('playScreen');
 
@@ -538,7 +544,7 @@
   setInterval(renderDiagnostics, DIAG_REFRESH_MS);
 
   function showScreen(el) {
-    [characterScreen, joinScreen, controlChoiceScreen, permScreen, calibrationScreen, playScreen]
+    [characterScreen, joinScreen, sessionExpiredScreen, controlChoiceScreen, permScreen, rememberedSetupScreen, calibrationScreen, playScreen]
       .forEach((s) => (s.style.display = 'none'));
     el.style.display = 'flex';
     // 2026-09-03 styling pass: the app title and strapline are worth having
@@ -670,68 +676,243 @@
   let ws = null;
   let roomCode = null;
 
+  // 2026-09-16 (reconnect round): a private, unguessable per-device
+  // credential — NOT the 6-digit room code, which is meant for initial
+  // pairing only and must never by itself be enough to reclaim a slot (see
+  // server.js). Generated once with the Web Crypto RNG and kept in
+  // sessionStorage so it survives a reload of this tab but goes away with
+  // it — there is no reason for it to outlive the tab, and every value here
+  // is meaningless to anyone who doesn't already hold this exact phone's
+  // open session. Never sent anywhere except this server's own /register
+  // message, and never derived from or exposed via the join URL/QR code.
+  function makeDeviceToken() {
+    const bytes = new Uint8Array(16);
+    (window.crypto || {}).getRandomValues?.(bytes);
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('') || `${Date.now()}-${Math.random()}`.replace(/[^a-z0-9]/gi, '');
+  }
+  let deviceToken;
+  try {
+    deviceToken = sessionStorage.getItem('mq_device_token') || makeDeviceToken();
+    sessionStorage.setItem('mq_device_token', deviceToken);
+  } catch {
+    deviceToken = makeDeviceToken(); // private browsing etc. — still works, just won't survive a reload
+  }
+
+  // Whether this phone has EVER successfully paired this page-load. Before
+  // that, a closed socket is just a failed join attempt (show the join
+  // error, let them retry); after it, a closed socket is something to
+  // recover from automatically without bouncing the player off whatever
+  // screen — setup or mid-run — they were actually on.
+  let everPaired = false;
+  let sessionExpiredShown = false;
+  let intentionalDisconnect = false;
+  let reconnectAttempts = 0;
+  let reconnectTimer = null;
+  let reconnectDeadline = 0;
+  // Capped backoff — quick at first (a wifi handoff is usually sub-second),
+  // levelling off rather than growing forever. The deadline below is what
+  // actually decides when to stop, not the length of this list.
+  const RECONNECT_DELAYS_MS = [1000, 1500, 2500, 4000, 6000, 8000];
+  // A little longer than the server's own CONTROLLER_RECONNECT_GRACE_MS
+  // (server.js), so automatic recovery has already had every chance the
+  // server itself allows before we ever bother the player with a button.
+  const MAX_AUTO_RECONNECT_MS = 28000;
+
   function connect(code) {
+    intentionalDisconnect = false;
+    everPaired = false;
+    reconnectAttempts = 0;
+    reconnectDeadline = 0;
+    roomCode = code;
+    hideConnectionBanner();
+    openSocket();
+  }
+
+  function openSocket() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     ws = new WebSocket(`${proto}://${location.host}`);
+    ws.addEventListener('open', handleSocketOpen);
+    ws.addEventListener('message', handleSocketMessage);
+    ws.addEventListener('close', handleSocketClose);
+    ws.addEventListener('error', handleSocketError);
+  }
 
-    ws.addEventListener('open', () => {
-      ws.send(JSON.stringify({ type: 'register', role: 'controller', code }));
-    });
+  function handleSocketOpen() {
+    ws.send(JSON.stringify({ type: 'register', role: 'controller', code: roomCode, deviceToken }));
+  }
 
-    ws.addEventListener('message', (ev) => {
-      let msg;
-      try { msg = JSON.parse(ev.data); } catch { return; }
-      if (msg.type === 'paired') {
-        roomCode = msg.code;
-        roomLabel.textContent = roomCode;
-        // Multiplayer: the server assigns a stable 1-4 id on join (see
-        // server.js's assignPlayerId()) purely so the TV can tell whose turn
-        // it is — this phone doesn't need to do anything differently, just
-        // show the player which colour/number they ended up as.
-        if (playerBadge && msg.playerId) playerBadge.textContent = ` · P${msg.playerId}`;
-        // 2026-09-03: character creation now happens straight after a
-        // successful connection rather than before it (see the header
-        // comment) — sendCharacter() moves to characterContinueBtn's click
-        // handler below, once there's an actual customized character to
-        // send instead of just the default.
-        showScreen(characterScreen);
-      } else if (msg.type === 'calibration_control') {
-        // The TV relays Fire TV remote OK presses back to us during the
-        // placement/framing setup stages — see handlePlacementAck/
-        // handleMovesAck (defined further down, alongside beginCalibration).
-        if (msg.action === 'placement_ack') handlePlacementAck();
-        else if (msg.action === 'moves_ack') handleMovesAck();
-        // The TV also drives WHICH move the walkthrough is currently asking
-        // for, so we only accept that one — see handleCalStepRequest().
-        else if (msg.action === 'step_request') handleCalStepRequest(msg);
-        else if (msg.action === 'step_arm') handleCalStepArm(msg);
-        // The TV ends setup — either because the last move just got ticked
-        // off, or because OK was pressed on the remote. Either way the
-        // player doesn't have to come back to the phone to start.
-        else if (msg.action === 'finish') finishCalibration({ notifyTv: false });
-        // 2026-09-15 ("if you press back on the level select it goes back to
-        // configuration"): sent to every phone in the room when Back is
-        // pressed on the era picker. Whatever this phone was doing — mid
-        // run, mid calibration, sitting on the play screen — gets torn down
-        // and it lands back on control choice to pick motion/pad again.
-        else if (msg.action === 'restart') handleRestartConfiguration();
-      } else if (msg.type === 'error') {
-        joinError.textContent = msg.message || 'Could not connect.';
-        joinBtn.disabled = false;
+  function handleSocketMessage(ev) {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+    if (msg.type === 'paired') {
+      const wasReconnect = everPaired && msg.reconnected;
+      reconnectAttempts = 0;
+      reconnectDeadline = 0;
+      hideConnectionBanner();
+      everPaired = true;
+      roomCode = msg.code;
+      roomLabel.textContent = roomCode;
+      // Multiplayer: the server assigns a stable 1-4 id on join (see
+      // server.js's assignPlayerId()) purely so the TV can tell whose turn
+      // it is — this phone doesn't need to do anything differently, just
+      // show the player which colour/number they ended up as.
+      if (playerBadge && msg.playerId) playerBadge.textContent = ` · P${msg.playerId}`;
+      if (wasReconnect) {
+        // A network blip, not a fresh join — reclaiming the SAME slot (see
+        // deviceToken above). Whatever screen/state the player was on stays
+        // exactly as it was; reconnecting must never bounce them back to
+        // character creation or the start of setup.
+        return;
       }
-    });
-
-    ws.addEventListener('close', () => {
-      if (playScreen.style.display !== 'none' || calibrationScreen.style.display !== 'none') {
-        showToast('Disconnected from TV — reconnecting…');
+      // 2026-09-03: character creation now happens straight after a
+      // successful connection rather than before it (see the header
+      // comment) — sendCharacter() moves to characterContinueBtn's click
+      // handler below, once there's an actual customized character to
+      // send instead of just the default.
+      showScreen(characterScreen);
+    } else if (msg.type === 'calibration_control') {
+      // The TV relays Fire TV remote OK presses back to us during the
+      // placement/framing setup stages — see handlePlacementAck/
+      // handleMovesAck (defined further down, alongside beginCalibration).
+      if (msg.action === 'placement_ack') handlePlacementAck();
+      else if (msg.action === 'moves_ack') handleMovesAck();
+      // The TV also drives WHICH move the walkthrough is currently asking
+      // for, so we only accept that one — see handleCalStepRequest().
+      else if (msg.action === 'step_request') handleCalStepRequest(msg);
+      else if (msg.action === 'step_arm') handleCalStepArm(msg);
+      // The TV ends setup — either because the last move just got ticked
+      // off, or because OK was pressed on the remote. Either way the
+      // player doesn't have to come back to the phone to start.
+      else if (msg.action === 'finish') finishCalibration({ notifyTv: false });
+      // 2026-09-15 ("if you press back on the level select it goes back to
+      // configuration"): sent to every phone in the room when Back is
+      // pressed on the era picker. Whatever this phone was doing — mid
+      // run, mid calibration, sitting on the play screen — gets torn down
+      // and it lands back on control choice to pick motion/pad again.
+      else if (msg.action === 'restart') handleRestartConfiguration();
+    } else if (msg.type === 'tv_status') {
+      handleTvStatus(msg.status);
+    } else if (msg.type === 'session_expired') {
+      handleSessionExpired();
+    } else if (msg.type === 'error') {
+      if (msg.code === 'room_not_found' && everPaired) {
+        // Discovered on a reconnect attempt (we were already in) rather
+        // than on a fresh join — the room is genuinely gone, not just a
+        // mistyped code, so this is the expired-session story.
+        handleSessionExpired();
+        return;
       }
+      joinError.textContent = msg.message || 'Could not connect.';
+      joinBtn.disabled = false;
+    }
+  }
+
+  function handleSocketClose() {
+    if (intentionalDisconnect) return;
+    if (!everPaired) {
+      // Never successfully paired on this attempt — a plain join failure,
+      // not a "reconnecting" story to be calm about.
       showScreen(joinScreen);
       joinBtn.disabled = false;
-    });
+      return;
+    }
+    scheduleReconnect();
+  }
 
-    ws.addEventListener('error', () => {
+  function handleSocketError() {
+    if (!everPaired) {
       joinError.textContent = 'Connection failed. Check you’re on the same WiFi as the TV.';
       joinBtn.disabled = false;
+    }
+    // A 'close' event follows an 'error' on every browser this runs on —
+    // the actual reconnect scheduling lives there so it only runs once.
+  }
+
+  // Automatic, capped-backoff reconnection. Deliberately calm: no screen
+  // change, no alarming copy, nothing torn down — see the header comment on
+  // deviceToken/everPaired for why this can just quietly retry in place.
+  // Only once the deadline passes does this stop trying on its own and put
+  // a manual retry button in front of the player.
+  function scheduleReconnect() {
+    if (!reconnectDeadline) reconnectDeadline = Date.now() + MAX_AUTO_RECONNECT_MS;
+    if (Date.now() >= reconnectDeadline) {
+      showConnectionBanner('failed', 'Couldn’t reconnect automatically.');
+      return;
+    }
+    showConnectionBanner('reconnecting', '🔄 Reconnecting to the TV…');
+    const delay = RECONNECT_DELAYS_MS[Math.min(reconnectAttempts, RECONNECT_DELAYS_MS.length - 1)];
+    reconnectAttempts++;
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(openSocket, delay);
+  }
+
+  function retryConnectionNow() {
+    clearTimeout(reconnectTimer);
+    reconnectAttempts = 0;
+    reconnectDeadline = 0;
+    openSocket();
+  }
+
+  function showConnectionBanner(kind, text) {
+    if (!connectionBanner) return;
+    connectionBanner.innerHTML = '';
+    const label = document.createElement('span');
+    label.textContent = text;
+    connectionBanner.appendChild(label);
+    if (kind === 'failed') {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn small';
+      btn.textContent = '🔄 Try again';
+      btn.addEventListener('click', retryConnectionNow);
+      connectionBanner.appendChild(btn);
+    }
+    connectionBanner.className = kind === 'failed' ? 'showing failed' : 'showing';
+  }
+  function hideConnectionBanner() {
+    if (connectionBanner) connectionBanner.className = '';
+  }
+
+  // The TV side can blip too (its own network, or its page reloading) —
+  // told to us via tv_status so we can stay calm about that as well, rather
+  // than only ever handling our own socket dropping.
+  function handleTvStatus(status) {
+    if (status === 'reconnecting') {
+      showConnectionBanner('reconnecting', '🔄 Waiting for the TV to come back…');
+    } else if (status === 'connected') {
+      hideConnectionBanner();
+    } else if (status === 'left') {
+      // The TV's own reconnect grace window ran out — not a blip. Treated
+      // the same as the room itself expiring, below.
+      handleSessionExpired();
+    }
+  }
+
+  // A genuinely expired/gone TV session (server.js's idle sweep, or the TV
+  // never coming back within its own grace window) is a dead end that no
+  // amount of automatic retrying will fix — per the guardrail, this gets an
+  // unambiguous screen and a single clear action, not a banner that spins
+  // forever.
+  function handleSessionExpired() {
+    if (sessionExpiredShown) return;
+    sessionExpiredShown = true;
+    intentionalDisconnect = true;
+    clearTimeout(reconnectTimer);
+    hideConnectionBanner();
+    try { ws && ws.close(); } catch { /* already gone */ }
+    teardownActiveSetup();
+    everPaired = false;
+    roomCode = null;
+    showScreen(sessionExpiredScreen);
+  }
+
+  if (scanNewCodeBtn) {
+    scanNewCodeBtn.addEventListener('click', () => {
+      sessionExpiredShown = false;
+      codeInput.value = '';
+      joinError.textContent = '';
+      joinBtn.disabled = false;
+      showScreen(joinScreen);
     });
   }
 
@@ -781,8 +962,97 @@
     showScreen(permScreen);
   });
   choosePadBtn.addEventListener('click', () => beginPadMode());
-  grantCameraBtn.addEventListener('click', () => beginCalibration('camera'));
-  skipCameraBtn.addEventListener('click', () => beginCalibration('hold'));
+
+  // =========================================================================
+  // REMEMBERED SETUP (2026-09-16)
+  // =========================================================================
+  // "The local remembered-setup record should contain only the minimum
+  // non-sensitive state needed to skip calibration: setup version, input
+  // mode, completion timestamp, and completed gesture names" — never raw
+  // pose, camera, or motion-sensor data. Bumping SETUP_VERSION invalidates
+  // every existing record automatically: an old version just fails the
+  // check below and the player falls back to full calibration, exactly as
+  // if nothing had ever been saved.
+  const SETUP_VERSION = 1;
+  const REMEMBERED_SETUP_KEY = 'mq_remembered_setup';
+
+  function loadRememberedSetup(mode) {
+    try {
+      const raw = localStorage.getItem(REMEMBERED_SETUP_KEY);
+      if (!raw) return null;
+      const rec = JSON.parse(raw);
+      if (!rec || rec.version !== SETUP_VERSION || rec.mode !== mode) return null;
+      const moves = Object.keys(calState);
+      if (!Array.isArray(rec.completedMoves) || !moves.every((m) => rec.completedMoves.includes(m))) return null;
+      return rec;
+    } catch {
+      // Unavailable storage, corrupt JSON, private-mode throw — any of these
+      // just means "nothing remembered", never a crash.
+      return null;
+    }
+  }
+
+  // Deliberately conservative: only a setup where THIS phone itself
+  // detected every single move during the session just finishing counts as
+  // "remembered" — a move ticked off via the TV remote's skip, or one
+  // carried over unverified from an earlier remembered setup, does not.
+  // That is what "the phone demonstrably did every move" means as a signal
+  // worth trusting next time.
+  function saveRememberedSetupIfComplete() {
+    if (!currentMode || currentMode === 'pad') return;
+    if (!Object.values(calState).every(Boolean)) return;
+    try {
+      localStorage.setItem(REMEMBERED_SETUP_KEY, JSON.stringify({
+        version: SETUP_VERSION,
+        mode: currentMode,
+        completedMoves: Object.keys(calState).filter((k) => calState[k]),
+        completedAt: Date.now(),
+      }));
+    } catch {
+      // Storage full/unavailable — setup just isn't remembered next time.
+    }
+  }
+
+  // Skips straight past the per-move walkthrough: tells the TV which moves
+  // this phone already proved it can do, and lands on the TV's own review
+  // screen (see applyRememberedCalibration() in tv/game.js) — never
+  // straight into a run, and still one tap away from a full redo.
+  async function useRememberedSetup(remembered) {
+    resetCalibration();
+    actionHandlers = calHandlers;
+    moveSensorPanelTo(calSensorSlot);
+    showScreen(calibrationScreen);
+    inCameraSetupGate = false;
+    framingActive = false;
+    calibrationHint.textContent = 'Using your remembered setup — check the TV…';
+    await setMode(remembered.mode);
+    sendCalibration('remembered', { mode: remembered.mode, completedMoves: remembered.completedMoves });
+  }
+
+  let pendingRememberedSetup = null;
+  function offerOrBeginCalibration(mode) {
+    const remembered = loadRememberedSetup(mode);
+    if (remembered) {
+      pendingRememberedSetup = remembered;
+      showScreen(rememberedSetupScreen);
+      return;
+    }
+    beginCalibration(mode);
+  }
+  useRememberedBtn.addEventListener('click', () => {
+    if (!pendingRememberedSetup) return;
+    const remembered = pendingRememberedSetup;
+    pendingRememberedSetup = null;
+    useRememberedSetup(remembered);
+  });
+  redoSetupBtn.addEventListener('click', () => {
+    const mode = pendingRememberedSetup ? pendingRememberedSetup.mode : 'camera';
+    pendingRememberedSetup = null;
+    beginCalibration(mode);
+  });
+
+  grantCameraBtn.addEventListener('click', () => offerOrBeginCalibration('camera'));
+  skipCameraBtn.addEventListener('click', () => offerOrBeginCalibration('hold'));
 
   // Controller mode needs no calibration at all — there are no gestures to
   // teach or thresholds to check, just buttons — so it goes straight to the
@@ -834,7 +1104,10 @@
   // listeners, drop the setup gates, forget which mode was chosen — and it
   // lands back on control choice so the player can pick motion or pad and
   // recalibrate from scratch.
-  function handleRestartConfiguration() {
+  // Shared by the "Back on the era picker" restart AND a genuinely expired
+  // TV session (2026-09-16) — both mean "nothing currently running is still
+  // valid", just with a different destination screen afterwards.
+  function teardownActiveSetup() {
     stopCamera();
     stopMotionListeners();
     hideMotionPermBanner();
@@ -845,6 +1118,11 @@
     expectedCalStep = null;
     currentMode = null;
     actionHandlers = realHandlers;
+    pendingRememberedSetup = null;
+  }
+
+  function handleRestartConfiguration() {
+    teardownActiveSetup();
     showScreen(controlChoiceScreen);
   }
 
@@ -999,6 +1277,7 @@
     expectedCalStep = null;
     if (calStuckTimer) clearTimeout(calStuckTimer);
     calSkipStepBtn.style.display = 'none';
+    saveRememberedSetupIfComplete();
     if (!opts || opts.notifyTv !== false) sendCalibration('done');
     // 2026-09-09: re-learn where "centre" is on the way into real play.
     // Calibration's last acts are a LEFT step, a RIGHT step, a jump, a duck
@@ -2618,6 +2897,50 @@
     resetPoseHealth,
     wakeLockState() { return diag.wakeLock; },
     showDiagnostics,
+    // 2026-09-16 (reconnect round) — read-only state a test can assert
+    // against without reaching into module internals, plus one action hook
+    // for the one thing a test genuinely cannot wait out for real: idle
+    // room expiry is tens of minutes even under the server's own
+    // MQ_TEST_TIMERS shortcut in some suites, and there's no reason to make
+    // a test simulate a whole dropped socket just to reach the same code
+    // path handleSessionExpired() already runs for real.
+    connectionState() {
+      return {
+        everPaired,
+        deviceToken,
+        roomCode,
+        reconnecting: !!reconnectTimer,
+        bannerText: connectionBanner ? connectionBanner.textContent : '',
+        bannerShowing: !!(connectionBanner && connectionBanner.classList.contains('showing')),
+        bannerFailed: !!(connectionBanner && connectionBanner.classList.contains('failed')),
+        sessionExpiredShown,
+        onSessionExpiredScreen: sessionExpiredScreen.style.display !== 'none',
+      };
+    },
+    simulateSessionExpired() { handleSessionExpired(); },
+    retryConnectionNow,
+    // 2026-09-16 (remembered setup) — read-only + one seeding hook, same
+    // spirit as connectionState() above: a test can't get this phone to
+    // "have completed every move on a previous visit" any other way than
+    // actually playing through calibration once for real first, so this
+    // lets it seed (or clear) the exact record saveRememberedSetupIfComplete()
+    // would have written, then drive the real offer/use/redo buttons.
+    rememberedSetupState() {
+      let stored = null;
+      try { stored = JSON.parse(localStorage.getItem(REMEMBERED_SETUP_KEY) || 'null'); } catch { stored = 'unreadable'; }
+      return {
+        stored,
+        version: SETUP_VERSION,
+        onOfferScreen: rememberedSetupScreen.style.display !== 'none',
+        pending: pendingRememberedSetup ? { ...pendingRememberedSetup } : null,
+      };
+    },
+    seedRememberedSetup(rec) {
+      try { localStorage.setItem(REMEMBERED_SETUP_KEY, JSON.stringify(rec)); } catch { /* ignore */ }
+    },
+    clearRememberedSetup() {
+      try { localStorage.removeItem(REMEMBERED_SETUP_KEY); } catch { /* ignore */ }
+    },
   };
 
   // =========================================================================

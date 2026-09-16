@@ -3835,6 +3835,8 @@ const calCountdownNum = document.getElementById('calCountdownNum');
 const calCountdownNext = document.getElementById('calCountdownNext');
 const calMoveBlock = document.getElementById('calMoveBlock');
 const calSkipHint = document.getElementById('calSkipHint');
+const calDemoIcon = document.getElementById('calDemoIcon');
+const calMoveSuccess = document.getElementById('calMoveSuccess');
 const calReviewList = document.getElementById('calReviewList');
 const placementPanel = document.getElementById('placementPanel');
 const framingPanel = document.getElementById('framingPanel');
@@ -3846,6 +3848,7 @@ const roomCodeMiniEl = document.getElementById('roomCodeMini');
 const playUrlEl = document.getElementById('playUrl');
 const joinQrEl = document.getElementById('joinQr');
 const pairingHint = document.getElementById('pairingHint');
+const connectionBannerEl = document.getElementById('connectionBanner');
 const rosterRowEl = document.getElementById('rosterRow');
 const movesStripEl = document.getElementById('movesStrip');
 const readyJoinHintEl = document.getElementById('readyJoinHint');
@@ -3886,6 +3889,8 @@ const countdownHintEl = document.getElementById('countdownHint');
 const controlBadge = document.getElementById('controlBadge');
 const pausedPanel = document.getElementById('pausedPanel');
 const pausedScoreVal = document.getElementById('pausedScoreVal');
+const pausedResumeRow = document.getElementById('pausedResumeRow');
+const pausedRecalRow = document.getElementById('pausedRecalRow');
 const newHighScoreNote = document.getElementById('newHighScoreNote');
 
 const levelSelectPanel = document.getElementById('levelSelectPanel');
@@ -4023,7 +4028,14 @@ function renderRoster() {
   rosterRowEl.innerHTML = PLAYER_META.map((meta, i) => {
     const id = i + 1;
     const filled = roster.includes(id);
-    return `<span class="roster-slot${filled ? ' filled' : ''}" style="--slot-color:${meta.color}">${filled ? id : ''}</span>`;
+    // A player reconnecting (network blip) isn't in the live roster yet but
+    // still holds their slot server-side (server.js's grace window) — shown
+    // as a pulsing dot on their same slot rather than looking like they
+    // vanished, which reconnecting genuinely isn't.
+    const status = controllerConnStatus.get(id);
+    const reconnecting = !filled && status === 'reconnecting';
+    const cls = ['roster-slot', filled && 'filled', reconnecting && 'reconnecting'].filter(Boolean).join(' ');
+    return `<span class="${cls}" style="--slot-color:${meta.color}">${filled ? id : (reconnecting ? '⋯' : '')}</span>`;
   }).join('');
   if (readyJoinHintEl) {
     readyJoinHintEl.style.display = roster.length >= 4 ? 'none' : 'block';
@@ -4280,12 +4292,19 @@ function confirmMovesStart() {
 // an unfamiliar room, so it's worth confirming it reads at all before the
 // first low bar arrives at speed.
 const CAL_ORDER = ['left', 'right', 'jump', 'duck', 'punch'];
+// `hint` (2026-09-16) is the move-specific second half of the skip-offer
+// line — see CAL_SKIP_OFFER_SECS below. Kept short: it's shown on top of a
+// live game screen, not a manual.
+// `demo` (2026-09-16) names the CSS animation class the count-in ghost icon
+// plays — see .cal-demo-icon in index.html — so every move gets a distinct,
+// silent preview of the motion before the player has to do it, on top of
+// the existing live 3D mirror (which shows THEIR movement, not a target).
 const CAL_META = {
-  left: { icon: '⬅️', textCamera: 'Step LEFT', textHold: 'Lean LEFT' },
-  right: { icon: '➡️', textCamera: 'Step RIGHT', textHold: 'Lean RIGHT' },
-  jump: { icon: '⬆️', textCamera: 'JUMP', textHold: 'JUMP' },
-  duck: { icon: '⬇️', textCamera: 'DUCK down', textHold: 'DUCK down' },
-  punch: { icon: '👊', textCamera: 'PUNCH', textHold: 'PUNCH' },
+  left: { icon: '⬅️', textCamera: 'Step LEFT', textHold: 'Lean LEFT', hint: 'Take a bigger step to the side', demo: 'demo-left' },
+  right: { icon: '➡️', textCamera: 'Step RIGHT', textHold: 'Lean RIGHT', hint: 'Take a bigger step to the side', demo: 'demo-right' },
+  jump: { icon: '⬆️', textCamera: 'JUMP', textHold: 'JUMP', hint: 'Jump a little higher off the ground', demo: 'demo-jump' },
+  duck: { icon: '⬇️', textCamera: 'DUCK down', textHold: 'DUCK down', hint: 'Bend your knees lower', demo: 'demo-duck' },
+  punch: { icon: '👊', textCamera: 'PUNCH', textHold: 'PUNCH', hint: 'Throw the punch further forward', demo: 'demo-punch' },
 };
 // Decays after every landing to drive the touchdown squash — see the
 // squash-and-stretch block in updatePlaying().
@@ -4354,7 +4373,12 @@ const CAL_GO_HOLD_SECS = 0.45;      // how long "GO!" stays up before the prompt
 // How long a move can go unregistered before the remote is offered as a way
 // past it. Matches the phone's own on-screen skip (CAL_STUCK_HINT_MS).
 const CAL_SKIP_OFFER_SECS = 6;
-let calPhase = 'idle';              // 'idle' | 'countdown' | 'live' | 'review'
+// 2026-09-16: how long the "✓ Nice!" success beat holds before moving on —
+// long enough to register as positive feedback, short enough not to feel
+// like the walkthrough is stalling.
+const CAL_SUCCESS_FLASH_SECS = 0.55;
+let calFlashT = 0;
+let calPhase = 'idle';              // 'idle' | 'countdown' | 'live' | 'success' | 'review'
 // True while re-running a single move picked from the review screen. That move
 // returns to the review as soon as it's dealt with, rather than carrying on
 // through moves that are already done.
@@ -4391,6 +4415,13 @@ function showCalibrationStep() {
   calCountdownNum.classList.remove('go');
   calCountdownNum.textContent = String(Math.ceil(CAL_COUNTDOWN_SECS));
   calCountdownNext.textContent = `then ${moveLabel(CAL_ORDER[calIndex])}`;
+  // 2026-09-16: a silent ghost preview of the move itself, not just its name
+  // — see the `demo` note on CAL_META above. Swapping the class each step
+  // restarts the CSS animation from its first frame.
+  if (calDemoIcon) {
+    calDemoIcon.className = 'cal-demo-icon ' + CAL_META[CAL_ORDER[calIndex]].demo;
+    calDemoIcon.textContent = CAL_META[CAL_ORDER[calIndex]].icon;
+  }
   renderCalDots();
   requestCalStepOnPhone(true);
   syncPanel();
@@ -4412,6 +4443,9 @@ function armCalibrationStep() {
   // "back to setup stage 1" instead of "the first of four moves".
   calStepCounter.textContent = `Move ${calIndex + 1} of ${CAL_ORDER.length}`;
   calSkipHint.style.display = 'none';
+  // Reset from any previous move's success beat before this one goes live.
+  if (calMoveSuccess) calMoveSuccess.style.display = 'none';
+  calMoveBlock.classList.remove('success');
   renderCalDots();
   sendCalibrationControl('step_arm', { step: CAL_ORDER[calIndex] });
 }
@@ -4442,8 +4476,17 @@ function updateCalibrationTimers(dt) {
   if (calPhase === 'live') {
     calLiveT += dt;
     if (calLiveT > CAL_SKIP_OFFER_SECS && calSkipHint.style.display === 'none') {
+      // 2026-09-16: move-specific troubleshooting rather than one generic
+      // line for every move — see the `hint` note on CAL_META above.
+      const meta = CAL_META[CAL_ORDER[calIndex]];
+      calSkipHint.textContent = `Not registering? ${meta.hint} — or press ▶ to skip`;
       calSkipHint.style.display = 'block';
     }
+    return;
+  }
+  if (calPhase === 'success') {
+    calFlashT -= dt;
+    if (calFlashT <= 0) completeCalibrationStep();
   }
 }
 
@@ -4707,7 +4750,10 @@ function activateCalReviewRow() {
 // and leaves it flagged on the review screen. Deliberately NOT bound to OK,
 // which already means "end setup entirely" and has since 2026-09-03.
 function skipCalibrationStep() {
-  if (!calibrating || calPhase === 'review' || calIndex >= CAL_ORDER.length) return;
+  // 'success' excluded too (2026-09-16): that phase already has a move
+  // queued to auto-advance via completeCalibrationStep() — skipping on top
+  // of it would double-advance calIndex.
+  if (!calibrating || calPhase === 'review' || calPhase === 'success' || calIndex >= CAL_ORDER.length) return;
   const key = CAL_ORDER[calIndex];
   calSkipped[key] = true;
   calDone[key] = true;   // "dealt with", so the walkthrough advances past it
@@ -4737,6 +4783,28 @@ function startCalibrationUI(mode) {
   showCalibrationStep();
   syncPanel();
 }
+
+// 2026-09-16 ("remembered setup"): the phone offered to skip calibration
+// because IT locally remembers demonstrably completing every move on a
+// previous visit (see controller.js — the record is move names, a mode and
+// a timestamp only, never pose/camera/motion data, per this round's
+// guardrail). The player already said yes on the phone; this lands them
+// straight on the SAME review screen a freshly-finished walkthrough would,
+// with everything shown as done — never straight into a run — so a stale
+// or simply wrong memory is still just one redo away from being fixed, and
+// "Start playing" still needs its own OK press.
+function applyRememberedCalibration(msg) {
+  const moves = Array.isArray(msg.completedMoves) ? msg.completedMoves : [];
+  calibrating = true;
+  calAutoFinishT = 0;
+  calRedoing = false;
+  enterSetupMirror();
+  setupStage = 'none';
+  calMode = msg.mode === 'hold' ? 'hold' : 'camera';
+  calDone = Object.fromEntries(CAL_ORDER.map((k) => [k, moves.includes(k)]));
+  calSkipped = Object.fromEntries(CAL_ORDER.map((k) => [k, false]));
+  startCalReview();
+}
 function advanceCalibrationUI(step) {
   if (!calibrating || !(step in calDone) || calDone[step]) return;
   // 2026-09-15: only while the move is actually live. During the count-in the
@@ -4752,6 +4820,24 @@ function advanceCalibrationUI(step) {
   if (calIndex >= CAL_ORDER.length || step !== CAL_ORDER[calIndex]) return;
   calDone[step] = true;
   calSkipped[step] = false;
+  // 2026-09-16: a short "✓ Nice!" success beat before moving on, so a
+  // correctly-detected move gets positive feedback instead of the screen
+  // silently jumping to the next prompt. The actual advance (redo-return or
+  // next-move) happens in completeCalibrationStep() once the flash timer
+  // (updateCalibrationTimers) elapses.
+  calPhase = 'success';
+  calFlashT = CAL_SUCCESS_FLASH_SECS;
+  calSkipHint.style.display = 'none';
+  if (calMoveSuccess) calMoveSuccess.style.display = 'block';
+  calMoveBlock.classList.add('success');
+  renderCalDots();
+}
+
+// The redo-return / next-move step that used to run immediately inside
+// advanceCalibrationUI(), now deferred behind the success flash above.
+function completeCalibrationStep() {
+  calMoveBlock.classList.remove('success');
+  if (calMoveSuccess) calMoveSuccess.style.display = 'none';
   // A move being re-run from the review screen goes straight back there once
   // it's done — the moves after it were already dealt with.
   if (calRedoing) {
@@ -5322,6 +5408,29 @@ function commitHighScore() {
   highScoreVal.textContent = String(Math.floor(highScore));
 }
 
+// 2026-09-16: "Resume" vs "Recalibrate" on the pause panel, navigable with
+// ▲▼ + OK like the calibration review screen — Back still exits regardless
+// of which is highlighted, unchanged from before this round.
+let pausedSelection = 0; // 0 = Resume, 1 = Recalibrate
+function renderPausedPanel() {
+  if (pausedResumeRow) pausedResumeRow.classList.toggle('selected', pausedSelection === 0);
+  if (pausedRecalRow) pausedRecalRow.classList.toggle('selected', pausedSelection === 1);
+}
+function movePausedSelection(delta) {
+  pausedSelection = pausedSelection === 0 ? 1 : 0; // only two rows — any press toggles
+  void delta;
+  renderPausedPanel();
+}
+// Reuses the existing, already-tested restartConfiguration() path (every
+// phone back to control-choice + full calibration, TV back to the pre-setup
+// Ready screen) rather than inventing a second way to redo setup — see the
+// guardrail this round shipped under: recalibrating is allowed to end the
+// current run, since setup and a run in progress can't sensibly overlap.
+function recalibrateFromPause() {
+  if (state.phase !== 'paused') return;
+  restartConfiguration();
+}
+
 function pauseGame() {
   // 2026-09-09 (part of the "dino level has no music" fix): these two calls
   // used to sit ABOVE the phase guards, so a pause_toggle arriving outside a
@@ -5333,6 +5442,8 @@ function pauseGame() {
   audio.pauseMusic();
   state.phase = 'paused';
   pausedScoreVal.textContent = String(Math.floor(state.score));
+  pausedSelection = 0;
+  renderPausedPanel();
   hideActionPrompt();
   syncPanel();
 }
@@ -5421,17 +5532,87 @@ function restartConfiguration() {
 // ---------------------------------------------------------------------
 const SOLO_MODE = document.body?.dataset.mode === 'solo';
 const wsProtocol = location.protocol === 'https:' ? 'wss' : 'ws';
-const ws = SOLO_MODE
-  ? { readyState: -1, send() {}, addEventListener() {} }
-  : new WebSocket(`${wsProtocol}://${location.host}`);
+
+// =========================================================================
+// DEVELOPER TEST MODE — 2026-09-16
+// =========================================================================
+// "Make ?dev=1 clearly non-production in appearance and ensure it cannot be
+// enabled accidentally in a normal release build." Two independent guards,
+// both required:
+//   1. The query flag itself — a stray link with ?dev=1 does nothing on its
+//      own if the hostname check below fails, so it can't be toggled by
+//      accident from a bookmark or a copy-pasted URL with old params.
+//   2. Never on the live Render domain, whatever the query string says —
+//      the one host real players actually use, checked by hostname rather
+//      than an env flag baked in at build time, since this is a static
+//      page with no build step to bake anything into.
+// Anyone self-hosting on their own domain/LAN IP still gets it — "never in
+// front of real players on the shipped game" is the actual goal, not
+// "only on localhost".
+const DEV_MODE_HOSTNAME_BLOCKED = /(^|\.)onrender\.com$/i.test(location.hostname);
+const DEV_MODE = !DEV_MODE_HOSTNAME_BLOCKED && new URLSearchParams(location.search).get('dev') === '1';
+const SOLO_WS_STUB = { readyState: -1, send() {}, addEventListener() {}, close() {} };
 
 playUrlEl.textContent = `${location.host}/play`;
 
-ws.addEventListener('open', () => {
-  ws.send(JSON.stringify({ type: 'register', role: 'tv' }));
-});
+// --- Reconnect (2026-09-16 round) ------------------------------------------
+// `ws` used to be a one-shot const: a dropped socket just printed a dead
+// "refresh this page" string and never tried again. A phone's own Wi-Fi is
+// far more likely to blip than this TV's, but the TV's can too, and every
+// already-paired phone would otherwise be stranded for nothing. `ws` is now
+// `let`, reassigned on each reconnect attempt — the two call sites that read
+// it (ws.send/ws.readyState, in this file's calibration_control sender)
+// read the module-level binding fresh each time they run, so nothing else
+// needed to change to pick up a new socket transparently.
+let ws = SOLO_MODE ? SOLO_WS_STUB : null;
+let lastRoomCode = null;
+let tvReconnectAttempts = 0;
+let tvReconnectTimer = null;
+const TV_RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 8000, 8000];
+// Per player id, the last connection status the server told us about —
+// drives the small dot on each roster slot (see renderRoster()).
+const controllerConnStatus = new Map();
 
-ws.addEventListener('message', (ev) => {
+function openTvSocket() {
+  if (SOLO_MODE) { ws = SOLO_WS_STUB; return; }
+  const socket = new WebSocket(`${wsProtocol}://${location.host}`);
+  socket.addEventListener('open', () => {
+    if (socket !== ws) return;
+    tvReconnectAttempts = 0;
+    hideConnectionBanner();
+    // A rejoinCode asks the server to hand back the SAME room if it's still
+    // free to reclaim (see server.js) — that is what lets a brief TV-side
+    // network blip resume silently on the same code instead of stranding
+    // every already-paired phone. Omitted on the very first connect, which
+    // is exactly what a fresh room needs.
+    socket.send(JSON.stringify({ type: 'register', role: 'tv', ...(lastRoomCode ? { rejoinCode: lastRoomCode } : {}) }));
+  });
+  socket.addEventListener('message', handleTvSocketMessage);
+  socket.addEventListener('close', () => {
+    if (socket !== ws) return; // a stale/replaced socket finishing its own close; ignore
+    scheduleTvReconnect();
+  });
+  ws = socket;
+}
+
+function scheduleTvReconnect() {
+  showConnectionBanner('🔄 Reconnecting…');
+  const delay = TV_RECONNECT_DELAYS_MS[Math.min(tvReconnectAttempts, TV_RECONNECT_DELAYS_MS.length - 1)];
+  tvReconnectAttempts++;
+  clearTimeout(tvReconnectTimer);
+  tvReconnectTimer = setTimeout(openTvSocket, delay);
+}
+
+function showConnectionBanner(text) {
+  if (!connectionBannerEl) return;
+  connectionBannerEl.textContent = text;
+  connectionBannerEl.style.display = 'flex';
+}
+function hideConnectionBanner() {
+  if (connectionBannerEl) connectionBannerEl.style.display = 'none';
+}
+
+function handleTvSocketMessage(ev) {
   let msg;
   try { msg = JSON.parse(ev.data); } catch { return; }
 
@@ -5448,6 +5629,11 @@ ws.addEventListener('message', (ev) => {
     // or network fetch is needed here — just point an <img> at it once the
     // room code exists. Same-origin request, so no CORS concerns either.
     joinQrEl.src = `/qr/${msg.code}.svg`;
+    lastRoomCode = msg.code;
+    if (awaitingFreshCodeAfterExpiry) {
+      awaitingFreshCodeAfterExpiry = false;
+      showExpiredNote();
+    }
   } else if (msg.type === 'roster') {
     // Who's actually connected, by player id — separate from
     // controller_connected's bare count, which this still runs alongside.
@@ -5490,14 +5676,123 @@ ws.addEventListener('message', (ev) => {
     else if (msg.event === 'done') finishCalibrationUI(msg.playerId);
     else if (msg.event === 'tracking') updateTrackingWarning(msg.status);
     else if (msg.event === 'mirror') applySetupMirror(msg);
+    else if (msg.event === 'remembered') applyRememberedCalibration(msg);
+  } else if (msg.type === 'controller_status') {
+    // Per-player connected/reconnecting/left, from the server's own
+    // reconnect-grace bookkeeping (server.js) — drives the small dot on
+    // each roster slot so "someone's phone just blipped" reads differently
+    // from "someone left" (see renderRoster()).
+    if (msg.status === 'left') controllerConnStatus.delete(msg.playerId);
+    else controllerConnStatus.set(msg.playerId, msg.status);
+    renderRoster();
+  } else if (msg.type === 'session_expired') {
+    handleTvSessionExpired();
   } else if (msg.type === 'error') {
     pairingHint.textContent = msg.message;
   }
-});
+}
 
-ws.addEventListener('close', () => {
-  pairingHint.textContent = 'Connection lost — refresh this page to reconnect.';
-});
+// A session_expired arrives while the socket is technically still open (the
+// server tells both sides plainly before deleting the room — see
+// expireRoom() in server.js) — there is no point trying to rejoin a code
+// that's already gone, so this closes proactively and lets the ordinary
+// reconnect path fetch a brand-new one instead of waiting out a close event
+// that was never coming on its own.
+let awaitingFreshCodeAfterExpiry = false;
+function handleTvSessionExpired() {
+  lastRoomCode = null;
+  awaitingFreshCodeAfterExpiry = true;
+  try { ws.close(); } catch { /* already gone */ }
+}
+function showExpiredNote() {
+  if (!pairingHint) return;
+  pairingHint.textContent = 'That session timed out — here’s a fresh code to scan.';
+  clearTimeout(showExpiredNote._t);
+  showExpiredNote._t = setTimeout(() => {
+    pairingHint.textContent = 'Waiting for your phone to connect… you won’t need the Fire TV remote for this part.';
+  }, 6000);
+}
+
+if (!SOLO_MODE) openTvSocket();
+
+// =========================================================================
+// DEVELOPER TEST MODE — panel wiring (DEV_MODE itself is defined above,
+// near SOLO_MODE, with the hostname/query-flag guards).
+// =========================================================================
+// "simulate a fake phone connection and drive each gesture end-to-end
+// through the real server relay" — this opens a SECOND, genuinely separate
+// WebSocket from the TV page itself, registers it as an ordinary
+// role:'controller' in the TV's own current room, and drives it from the
+// panel's buttons. Nothing here is a shortcut into game state directly —
+// every button press is a real 'input'/'calibration' message travelling
+// through the same server.js relay a real phone's message would, so this
+// exercises the actual network path, not a simulation of it.
+if (DEV_MODE && !SOLO_MODE) {
+  const devPanel = document.getElementById('devPanel');
+  const devStatus = document.getElementById('devStatus');
+  const devConnectBtn = document.getElementById('devConnectBtn');
+  const devGestureRow = document.getElementById('devGestureRow');
+  if (devPanel) {
+    devPanel.style.display = 'block';
+    let devWs = null;
+    let devCalibrating = false;
+
+    function devSetStatus(text) { if (devStatus) devStatus.textContent = text; }
+
+    function devConnect() {
+      if (!lastRoomCode) { devSetStatus('no room code yet — wait for the TV to pair'); return; }
+      if (devWs && devWs.readyState === WebSocket.OPEN) return;
+      const token = Array.from({ length: 16 }, () => Math.floor(Math.random() * 16).toString(16)).join('');
+      devWs = new WebSocket(`${wsProtocol}://${location.host}`);
+      devSetStatus('connecting…');
+      devWs.addEventListener('open', () => {
+        devWs.send(JSON.stringify({ type: 'register', role: 'controller', code: lastRoomCode, deviceToken: token }));
+      });
+      devWs.addEventListener('message', (ev) => {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch { return; }
+        if (msg.type === 'paired') {
+          devSetStatus(`fake phone connected — player ${msg.playerId}`);
+          devGestureRow.style.display = 'flex';
+        } else if (msg.type === 'calibration_control' && msg.action === 'step_request') {
+          devCalibrating = true;
+        } else if (msg.type === 'calibration_control' && msg.action === 'finish') {
+          devCalibrating = false;
+        } else if (msg.type === 'error') {
+          devSetStatus(`error: ${msg.message || msg.code || 'unknown'}`);
+        }
+      });
+      devWs.addEventListener('close', () => {
+        devSetStatus('fake phone disconnected');
+        devGestureRow.style.display = 'none';
+      });
+    }
+    devConnectBtn.addEventListener('click', devConnect);
+
+    devGestureRow.querySelectorAll('[data-dev-move]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (!devWs || devWs.readyState !== WebSocket.OPEN) return;
+        const move = btn.dataset.devMove;
+        if (move === 'pause') {
+          devWs.send(JSON.stringify({ type: 'input', action: 'pause_toggle' }));
+          return;
+        }
+        // While a calibration walkthrough is live, drive it exactly like a
+        // real phone's detector would; otherwise this is ordinary mid-run
+        // (or menu) input. Both paths go through the real relay either way.
+        if (devCalibrating) {
+          devWs.send(JSON.stringify({ type: 'calibration', event: 'step', step: move }));
+          return;
+        }
+        if (move === 'left' || move === 'right') {
+          devWs.send(JSON.stringify({ type: 'input', action: 'lane_set', value: move === 'left' ? -1 : 1 }));
+        } else {
+          devWs.send(JSON.stringify({ type: 'input', action: move, explicit: true }));
+        }
+      });
+    });
+  }
+}
 
 // Remembers the last absolute body position seen on the era picker so a
 // player standing to one side doesn't scroll the menu continuously.
@@ -5733,7 +6028,20 @@ window.addEventListener('keydown', (e) => {
     endMultiplayer();
     return;
   }
-  if (state.phase === 'paused' && isSelectPress(e)) { resumeGame(); return; }
+  // 2026-09-16: pause now offers Resume or Recalibrate, navigable the same
+  // way the calibration review screen already is. Back still exits no
+  // matter which row is highlighted (handled earlier in this function,
+  // unchanged).
+  if (state.phase === 'paused') {
+    if (e.code === 'ArrowUp' || e.code === 'KeyW' || e.code === 'ArrowDown' || e.code === 'KeyS') {
+      movePausedSelection();
+      return;
+    }
+    if (isSelectPress(e)) {
+      if (pausedSelection === 1) recalibrateFromPause(); else resumeGame();
+      return;
+    }
+  }
 
   // 2026-09-15: the end-of-setup review screen owns the d-pad while it is up
   // — up/down choose a row, OK activates it (redo that move, or start
@@ -6499,6 +6807,7 @@ window.__mrDebug = {
     skipped: { ...calSkipped },
     countdownT: calCountdownT,
     liveT: calLiveT,
+    flashT: calFlashT,
     reviewIndex: calReviewIndex,
     mirrorActive: setupMirrorActive,
     cam: { x: +camera.position.x.toFixed(2), y: +camera.position.y.toFixed(2), z: +camera.position.z.toFixed(2) },
@@ -6506,6 +6815,13 @@ window.__mrDebug = {
     order: [...CAL_ORDER],
   }),
   calArmNow: () => { if (calibrating && calPhase === 'countdown') armCalibrationStep(); },
+  // 2026-09-16: skips straight past the "✓ Nice!" success beat so tests
+  // don't need to sleep out CAL_SUCCESS_FLASH_SECS — same pattern as calArmNow.
+  calFinishFlashNow: () => { if (calibrating && calPhase === 'success') completeCalibrationStep(); },
+  // 2026-09-16 (remembered setup) — drives the real handler exactly as the
+  // relayed phone message would, without needing a fake controller socket.
+  applyRemembered: (mode, completedMoves) => applyRememberedCalibration({ mode, completedMoves }),
+  devMode: () => DEV_MODE,
   calSelect: (delta) => moveCalReviewSelection(delta),
   calActivate: () => activateCalReviewRow(),
   calSkipStep: () => skipCalibrationStep(),
@@ -6729,6 +7045,24 @@ window.__mrDebug = {
     t.traverse((o) => { if (o.isMesh) n++; });
     return n;
   }),
+
+  // 2026-09-16 (reconnect/recalibrate round) — same principle as everything
+  // above: a test drives the REAL socket/timer code, never a reimplementation
+  // of it, and reads back state that would otherwise only be visible as a
+  // banner on screen for a few seconds.
+  roomCode: () => lastRoomCode,
+  connectionBanner: () => ({
+    showing: connectionBannerEl ? connectionBannerEl.style.display !== 'none' : false,
+    text: connectionBannerEl ? connectionBannerEl.textContent : '',
+  }),
+  controllerStatus: (playerId) => controllerConnStatus.get(playerId) || null,
+  // Force-closes the LIVE socket, same as a real network drop would — the
+  // normal scheduleTvReconnect()/openTvSocket() path takes it from there.
+  forceSocketClose: () => { try { ws.close(); } catch { /* already gone */ } },
+  simulateSessionExpired: () => handleTvSessionExpired(),
+  pairingHintText: () => (pairingHint ? pairingHint.textContent : ''),
+  recalibrateFromPause: () => recalibrateFromPause(),
+  pausedSelection: () => pausedSelection,
 };
 
 // Paint the initial (pairing) state once before the loop starts. Without

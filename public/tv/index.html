@@ -410,6 +410,35 @@
   }
   .cal-skip-hint { color: var(--gold) !important; }
 
+  /* --- Per-move ghost/demo during the count-in, and the success beat when a
+     move registers (2026-09-16) --- */
+  .cal-demo-icon {
+    font-size: 46px; line-height: 1; margin: 2px 0;
+    animation-duration: 1s; animation-iteration-count: infinite; animation-timing-function: ease-in-out;
+  }
+  @keyframes calDemoLeft  { 0%, 100% { transform: translateX(0); } 50% { transform: translateX(-22px); } }
+  @keyframes calDemoRight { 0%, 100% { transform: translateX(0); } 50% { transform: translateX(22px); } }
+  @keyframes calDemoJump  { 0%, 100% { transform: translateY(0); } 40% { transform: translateY(-20px); } 55% { transform: translateY(-20px); } }
+  @keyframes calDemoDuck  { 0%, 100% { transform: scaleY(1); } 50% { transform: scaleY(0.6); } }
+  @keyframes calDemoPunch { 0%, 100% { transform: translateX(0) scale(1); } 45% { transform: translateX(16px) scale(1.15); } }
+  .cal-demo-icon.demo-left  { animation-name: calDemoLeft; }
+  .cal-demo-icon.demo-right { animation-name: calDemoRight; }
+  .cal-demo-icon.demo-jump  { animation-name: calDemoJump; }
+  .cal-demo-icon.demo-duck  { animation-name: calDemoDuck; transform-origin: center bottom; }
+  .cal-demo-icon.demo-punch { animation-name: calDemoPunch; }
+  .cal-move-success {
+    font-family: 'Fredoka', sans-serif; font-size: 26px; font-weight: 700;
+    color: var(--green); margin: 0 0 8px;
+    animation: calSuccessPop 0.35s ease-out;
+  }
+  @keyframes calSuccessPop {
+    0%   { transform: scale(0.6); opacity: 0; }
+    60%  { transform: scale(1.12); opacity: 1; }
+    100% { transform: scale(1); opacity: 1; }
+  }
+  #calMoveBlock.success .cal-move-icon,
+  #calMoveBlock.success .cal-move-text { opacity: 0.55; }
+
   /* --- End-of-setup review (2026-09-15) --- */
   .cal-review-list { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; min-width: 460px; }
   .cal-review-row {
@@ -433,6 +462,19 @@
   }
   .cal-review-row.go { background: var(--green); color: var(--ink); }
   .cal-review-row.go.selected { border-color: var(--white); box-shadow: 0 6px 0 var(--green-dk); }
+
+  /* --- Paused panel: Resume / Recalibrate options (2026-09-16) --- */
+  .paused-options { display: flex; flex-direction: column; gap: 10px; margin: 16px 0; min-width: 320px; }
+  .paused-option {
+    display: block; margin: 0; padding: 12px 22px; border-radius: 18px;
+    border: 4px solid transparent; background: var(--indigo-700);
+    font-family: 'Fredoka', sans-serif; font-size: 24px; font-weight: 600;
+    color: var(--white); text-align: center;
+  }
+  .paused-option.selected {
+    border-color: var(--gold); box-shadow: 0 6px 0 var(--gold-dk);
+    transform: translateY(-2px);
+  }
 
   /* While the character is mirroring the player during setup, the panel gets
      out of its way rather than sitting on top of it (2026-09-15). */
@@ -497,6 +539,11 @@
     opacity: 0.4;
   }
   .roster-slot.filled { opacity: 1; border-color: var(--slot-color, var(--violet-brt)); }
+  /* A player mid-reconnect (network blip) still holds their slot server-side
+     (see server.js's grace window) — shown as a pulsing dot rather than an
+     empty slot, since "reconnecting" genuinely isn't "gone". */
+  .roster-slot.reconnecting { opacity: 1; border-color: var(--gold); animation: rosterReconnectPulse 1s ease-in-out infinite; }
+  @keyframes rosterReconnectPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
   .overlay-panel p.hint#readyJoinHint { font-size: 15px !important; }
 
   .turn-swatch {
@@ -699,6 +746,49 @@
     0%, 100% { transform: translateX(-50%) scale(1); }
     50%      { transform: translateX(-50%) scale(1.04); }
   }
+
+  /* 2026-09-16: a calm, small "the server connection blipped" banner — NOT a
+     blocking screen, since a dropped socket recovers on its own (see
+     openTvSocket()/scheduleTvReconnect() in game.js) and whatever panel is
+     already showing (pairing, ready, mid-setup) should just keep showing. */
+  #connectionBanner {
+    position: fixed; left: 50%; top: 20px; transform: translateX(-50%); z-index: 61;
+    display: none; align-items: center; gap: 8px;
+    padding: 8px 20px; border-radius: 14px;
+    background: var(--indigo-800); color: var(--white);
+    border: 3px solid var(--gold);
+    box-shadow: 0 4px 0 var(--ink);
+    font-size: 16px; font-weight: 800; font-family: 'Nunito', sans-serif; letter-spacing: 0.3px;
+    white-space: nowrap;
+  }
+
+  /* 2026-09-16: developer test mode (?dev=1, non-production hosts only —
+     see DEV_MODE in game.js). Deliberately garish and never reused anywhere
+     else in the app — hazard-stripe border, monospace, a blinking label —
+     so this can never be mistaken for real game UI even in a screenshot. */
+  #devPanel {
+    position: fixed; right: 12px; bottom: 12px; z-index: 200;
+    max-width: 260px;
+    background: #1a0000; color: #ffe15a;
+    border: 4px dashed #ff2d2d;
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-family: 'Courier New', monospace; font-size: 12px; line-height: 1.4;
+  }
+  #devPanel .dev-title {
+    color: #ff4d4d; font-weight: 700; letter-spacing: 1px;
+    animation: devBlink 1s step-start infinite;
+    margin: 0 0 6px;
+  }
+  @keyframes devBlink { 50% { opacity: 0.35; } }
+  #devPanel button {
+    font-family: 'Courier New', monospace; font-size: 12px;
+    background: #330000; color: #ffe15a; border: 2px solid #ff2d2d;
+    border-radius: 4px; padding: 4px 8px; margin: 2px; cursor: pointer;
+  }
+  #devPanel button:hover { background: #4d0000; }
+  #devPanel .dev-status { color: #9a9a9a; margin: 4px 0; word-break: break-all; }
+  #devPanel .dev-row { display: flex; flex-wrap: wrap; gap: 4px; }
 
   /* ---- Era picker ---------------------------------------------------- */
   #levelSelectPanel { max-width: 94vw; padding: 24px 34px 28px; }
@@ -988,6 +1078,26 @@
   <div id="soundHint" style="display:none;">🔊 Press OK on your remote for sound</div>
   <div id="turnSign" style="display:none;"><span id="turnSignArrow">↰</span> Bend ahead</div>
   <div id="trackingWarning" style="display:none;"></div>
+  <div id="connectionBanner" style="display:none;"></div>
+
+  <!-- 2026-09-16: developer test mode. Populated and shown only when
+       DEV_MODE is true (see game.js) — absent from the DOM's visible
+       behaviour entirely otherwise. Never styled to resemble real game UI. -->
+  <div id="devPanel" style="display:none;">
+    <p class="dev-title">⚠ DEV TEST MODE ⚠</p>
+    <p class="dev-status" id="devStatus">no fake phone connected</p>
+    <div class="dev-row">
+      <button id="devConnectBtn" type="button">connect fake phone</button>
+    </div>
+    <div class="dev-row" id="devGestureRow" style="display:none;">
+      <button data-dev-move="left" type="button">⬅️ left</button>
+      <button data-dev-move="right" type="button">➡️ right</button>
+      <button data-dev-move="jump" type="button">⬆️ jump</button>
+      <button data-dev-move="duck" type="button">⬇️ duck</button>
+      <button data-dev-move="punch" type="button">👊 punch</button>
+      <button data-dev-move="pause" type="button">⏸ pause</button>
+    </div>
+  </div>
 
   <div id="controlBadge" class="control-badge" style="display:none;"></div>
   <div id="actionPrompt" style="display:none;"></div>
@@ -1147,6 +1257,11 @@
     <div class="icon-xl">📱📺</div>
     <p class="hint">Stand 2–3 metres back so the camera can see your whole body.</p>
     <p class="hint" id="placementOrientationHint">📱↔️ Make sure your phone is propped up sideways (landscape), facing you</p>
+    <!-- 2026-09-16: "keep the play-space and lighting guidance short, friendly,
+         and on the TV only — do not add a separate blocking safety screen".
+         One line, folded into the existing placement step rather than a
+         screen of its own. -->
+    <p class="hint">🧹 Clear some space around you and turn up the lights if you can</p>
   </div>
 
   <div id="framingPanel" class="overlay-panel" style="display:none;">
@@ -1172,12 +1287,21 @@
          controller.js. -->
     <div class="cal-countdown" id="calCountdown" style="display:none;">
       <div class="cal-countdown-label">Get ready…</div>
+      <!-- 2026-09-16: a silent looping preview of the move itself (not just
+           its name) during the count-in — see the `demo` note on CAL_META in
+           game.js. Distinct from the live 3D mirror below, which shows the
+           player's OWN movement rather than a target to copy. -->
+      <div class="cal-demo-icon" id="calDemoIcon">⬅️</div>
       <div class="cal-countdown-num" id="calCountdownNum">3</div>
       <div class="cal-countdown-next" id="calCountdownNext">then STEP LEFT</div>
     </div>
     <div id="calMoveBlock">
       <div class="cal-move-icon" id="calMoveIcon">⬅️</div>
       <div class="cal-move-text" id="calMoveText">Step LEFT</div>
+      <!-- 2026-09-16: brief positive feedback the instant a move registers,
+           before the walkthrough moves on — see completeCalibrationStep()
+           in game.js. -->
+      <div class="cal-move-success" id="calMoveSuccess" style="display:none;">✅ Nice!</div>
       <p class="hint cal-skip-hint" id="calSkipHint" style="display:none;">Not registering? Press ▶ on the remote to skip this move</p>
     </div>
     <!-- Deliberately outside #calMoveBlock: OK ends setup in BOTH beats, so
@@ -1199,8 +1323,11 @@
   <div id="pausedPanel" class="overlay-panel" style="display:none;">
     <h1>Paused ⏸</h1>
     <div class="score-big" style="font-size:52px;"><span id="pausedScoreVal">0</span> pts</div>
-    <p class="hint pulse">🎮 Press OK on your remote (or tap ▶ on your phone) to resume</p>
-    <p class="hint">🎮 Press Back again (or tap ✕ Exit on your phone) to end this run</p>
+    <div class="paused-options">
+      <p class="hint paused-option selected" id="pausedResumeRow">▶ Resume</p>
+      <p class="hint paused-option" id="pausedRecalRow">🔄 Recalibrate</p>
+    </div>
+    <p class="hint">🎮 ▲▼ + OK to choose · Back to end this run</p>
   </div>
 
   <div id="gameOverPanel" class="overlay-panel" style="display:none;">

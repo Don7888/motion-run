@@ -642,6 +642,29 @@
     box-shadow: 0 5px 0 var(--ink);
     opacity: 0; transition: opacity 0.25s; pointer-events: none; z-index: 30;
   }
+
+  /* 2026-09-16: a calm, small "the TV connection blipped" banner — NOT a
+     full-screen takeover, since a network hiccup is meant to recover on its
+     own without alarming anyone or losing the screen the player was on.
+     Only turns into a "manual retry" affordance once auto-reconnect has
+     genuinely given up (see scheduleReconnect() in controller.js). */
+  #connectionBanner {
+    position: fixed; left: 50%; top: 14px; transform: translate(-50%, 0);
+    z-index: 40; display: none; flex-direction: column; gap: 8px; align-items: center;
+    background: var(--indigo-900); color: var(--white);
+    border: 3px solid var(--gold); border-radius: 16px;
+    padding: 10px 18px 12px; font-family: 'Nunito', sans-serif; font-weight: 800;
+    font-size: 13px; text-align: center; box-shadow: 0 5px 0 var(--ink);
+    max-width: 86vw;
+  }
+  #connectionBanner.showing { display: flex; }
+  #connectionBanner.failed { border-color: var(--violet-brt); }
+  #connectionBanner .btn.small { width: auto; }
+
+  /* A genuinely expired TV session (not a blip) is a dead end that needs a
+     real action, so it gets its own clear screen rather than a small banner
+     — reuses the join panel's look so it doesn't feel like a different app. */
+  #sessionExpiredScreen { display: none; }
 </style>
 </head>
 <body>
@@ -676,6 +699,20 @@
       <input id="codeInput" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="000000" autocomplete="off" aria-label="6-digit room code" />
       <button class="btn" id="joinBtn">Connect to TV →</button>
       <div id="joinError"></div>
+    </div>
+  </div>
+
+  <!-- 2026-09-16: shown only once the TV's session has genuinely timed out
+       (not a network blip — see handleSessionExpired() in controller.js).
+       Deliberately unambiguous: explains what happened and gives one clear
+       way forward, rather than leaving the player staring at a dead join
+       screen wondering why nothing responds. -->
+  <div id="sessionExpiredScreen">
+    <div class="join-panel">
+      <div class="join-portal" aria-hidden="true">⌛</div>
+      <h2 class="join-title" style="text-transform:none; letter-spacing:normal; color:var(--white);">The TV session ended</h2>
+      <p class="join-hint">It looks like the TV's game session timed out or restarted. Scan its new code to jump back in.</p>
+      <button class="btn" id="scanNewCodeBtn">📷 Scan new code</button>
     </div>
   </div>
 
@@ -752,6 +789,22 @@
     <p class="hint-strong" id="autoLockHint" hidden>⏰ This phone can't be kept awake by the game. Set <b>Settings ▸ Display &amp; Brightness ▸ Auto-Lock</b> to <b>Never</b> (or 5 minutes) first, or it will lock itself mid-game and stop tracking you.</p>
     <button class="btn" id="grantCameraBtn">Enable Camera Tracking</button>
     <button class="btn secondary" id="skipCameraBtn">Hold my phone instead</button>
+  </div>
+
+  <!-- 3c. "We remember your setup" — 2026-09-16. Offered only when THIS
+       phone demonstrably completed every move, in this same mode, on a
+       previous visit — see loadRememberedSetup() in controller.js. Redoing
+       is always one tap away, and any app/setup-version change (or a
+       different mode) invalidates the memory automatically, falling back
+       to full calibration with nothing shown here at all. -->
+  <div id="rememberedSetupScreen">
+    <div class="join-panel">
+      <div class="join-portal" aria-hidden="true">✅</div>
+      <h2 class="join-title" style="text-transform:none; letter-spacing:normal; color:var(--white);">Use your remembered setup?</h2>
+      <p class="join-hint">Every move worked on this phone last time. Skip straight to a quick review, or redo the full walkthrough.</p>
+      <button class="btn" id="useRememberedBtn">✅ Use remembered setup</button>
+      <button class="btn secondary" id="redoSetupBtn">🔄 Redo setup instead</button>
+    </div>
   </div>
 
   <!-- 4. Guided calibration -->
@@ -868,6 +921,7 @@
 </div>
 
 <div id="toast"></div>
+<div id="connectionBanner" role="status" aria-live="polite"></div>
 
 <script src="./controller.js"></script>
 </body>
