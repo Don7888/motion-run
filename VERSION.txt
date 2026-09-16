@@ -1,90 +1,117 @@
 MotionQuest — motionquest-deploy
 
-Commit (local, tested): built on c4053aa
-Date: 2026-09-16
+Date: 2026-09-16 (second round today)
+Built on: the round you uploaded earlier today (commit 25ac3c3, now live)
 
-IMPORTANT — this folder was two rounds behind before this update:
-  - It still had the 9957477 "Back button" build.
-  - The castle siege round (c4053aa: second knight, dragon, real castle,
-    huts/stables) never got copied in here — it went out by chat because
-    the link to your computer was down that day — but you already
-    uploaded it correctly anyway, and it's the build currently LIVE on
-    the site right now. This update brings this folder up to match that,
-    plus adds today's new round on top.
-  - Everything below is now caught up to today's tested build.
+Files changed this round:
+  public/tv/game.js          364,730 bytes
+  public/tv/index.html        68,118 bytes
+  public/play/controller.js   157,836 bytes
+  public/solo/index.html      66,243 bytes
+  server.js                   26,177 bytes   <- unchanged content, see note
 
-Files changed this round (2026-09-16 — reconnect & recovery UX):
-  server.js                             26,177 bytes   *** NEW: see below ***
-  public/tv/game.js                    341,426 bytes
-  public/tv/index.html                  65,180 bytes
-  public/play/controller.js            145,081 bytes
-  public/play/index.html                49,637 bytes
-
-Files added by the castle siege round (already live, now also correct here):
-  public/tv/models/castle.glb          649,668 bytes
-  public/tv/models/dragon.glb          200,236 bytes
-  public/tv/models/hut.glb             354,288 bytes
-  public/tv/models/medieval_knight2.glb 261,628 bytes
-  public/tv/models/stable.glb          264,904 bytes
+NOTE ON server.js: it is byte-identical to the one you just uploaded — no
+change this round. It is in this folder only so the folder stays a complete,
+current build. You do NOT need to drag it up again this time; dragging just
+the "public" folder is enough, same as every round before today.
 
 ===========================================================================
-*** THIS ROUND CHANGES server.js — THAT'S NEW, READ THIS CAREFULLY ***
+THE THREE THINGS YOU REPORTED
 ===========================================================================
-Every round so far has only ever touched files inside "public". This is
-the first round in a long while to change server.js, which lives at the
-TOP of this motionquest-deploy folder, next to "public" — not inside it.
 
-That means the usual "just drag the public folder to GitHub" step is NOT
-enough this time. You need to drag BOTH:
-  - the "public" folder
-  - the "server.js" file
-onto https://github.com/Don7888/motion-run/upload/main in the same drop.
-(You can select both of them together in Explorer — click "public", then
-Ctrl+click "server.js" — and drag them in one go. Don't drag VERSION.txt
-or the outer "motionquest-deploy" folder itself.)
+1. BACK NO LONGER LEAVES THE APP
+   Two separate faults were behind this, and both are fixed.
 
-If server.js doesn't go up along with everything else, the game will
-still look and play the same, but the new reconnect/recovery behavior
-below won't actually be live — the site would be running the OLD
-server.js underneath the NEW public files, which would be a broken
-mismatch. So please double check both are included before you upload.
+   The game was reacting to Back correctly but never telling the browser it
+   had dealt with it — so the app went to the era picker AND closed itself
+   at the same time. On top of that, the Fire TV app is a web-app shell,
+   and its Back arrives as a page navigation rather than a button press, so
+   on some builds the game never saw it at all. It now catches both, and
+   holds a spare history entry so a Back press has something to consume
+   other than the app itself.
+
+   Back now walks back one screen at a time:
+     during a run            -> era picker
+     results / leaderboard   -> era picker
+     calibration review      -> back into the last move
+     a move                  -> the previous move
+     first move              -> the framing screen
+     framing                 -> the "place your phone" screen
+     placement               -> the pre-setup Ready screen
+     era picker (home)       -> a menu: Keep playing / Change controls and
+                                redo setup / Quit MotionQuest
+
+   The menu always opens on "Keep playing", so a stray OK press can never
+   quit, and Back while it is open just closes it. Quitting the app now
+   takes a deliberate arrow-down-twice-then-OK. "Change controls / redo
+   setup" is where the behaviour you asked for last night now lives — it
+   is still there, it just isn't what a bare Back press does any more.
+
+2. PUNCH FIRING WHEN YOU HAVEN'T PUNCHED
+   The bar was raised (a punch now has to reach further and move faster,
+   and can't re-fire for 900ms), but the real fix is two new requirements
+   that aren't about sensitivity at all:
+
+   - A punch has to be EXTENDING. Your fist has to be getting further from
+     your shoulder. An arm swinging while you step sideways moves every bit
+     as fast as a punch, which is why speed alone kept firing — but it
+     doesn't extend, so it's now rejected outright.
+   - A punch has to be roughly FORWARD, not vertical. Arms flying up as you
+     land a jump, or reaching up, were the other big source.
+
+   In hold-the-phone mode there was a genuine logic bug: on any phone that
+   doesn't report rotation data (most Androids), practically any sharp
+   movement that wasn't big enough to count as a jump fell through and
+   fired a punch instead. That's fixed.
+
+   And the loosened "make punch easy to land" thresholds that setup uses
+   now apply ONLY while setup is actually asking for a punch. They were
+   live through the whole of setup before, which is why stepping sideways
+   in front of the camera registered as punches.
+
+3. THE CHARACTER NOW DEMONSTRATES, THEN COPIES
+   During each move's count-in the character performs the move itself —
+   twice — then returns to standing still with about a second to spare, so
+   you're not copying a moving target. Only after GO does it start copying
+   you, and only for the move being asked for. Nothing you do during the
+   count-in moves it at all. That's what stops the character punching and
+   stepping about before those moves have been configured.
+
+   NEW: a live figure of you in the bottom-right corner during setup.
+   Three columns show the LEFT / MIDDLE / RIGHT zones with the one you're
+   standing in lit up, and the two dividing lines show exactly how far you
+   have to move to change lane — which was invisible before. If you drift
+   out of shot it says so ("Come a bit closer" / "Take a step back" /
+   "Step back into view"), and any limb outside the picture is marked.
+
+   It's drawn from the body points your phone already tracks, not camera
+   video — same information, a fraction of the network traffic, and no
+   picture of your living room ever leaves the phone.
 
 ===========================================================================
-WHAT'S NEW THIS ROUND
+TESTING
 ===========================================================================
-You: "Implement all seven items: session/reconnect foundation, TV/phone
-recovery UI, setup feedback and safety copy, recalibration and remembered
-setup, developer mode, then the Playwright coverage."
+New: back-chain suite (21/21) — including that no Back press from any
+screen can reach the browser and close the app, and that only a confirmed
+Quit tries to leave. Punch false-fire suite (9/9) — a real jab still fires,
+a fast arm raise and a fast sweep at constant arm extension no longer do.
+Demo/pose-figure suite (21/21).
 
-- If a phone or the TV drops for a few seconds (Wi-Fi blip, app switch),
-  it now quietly reconnects on its own and picks up exactly where it left
-  off — no lost setup, no restart. A calm "reconnecting" message shows
-  during this; a manual retry button only appears if it can't recover on
-  its own.
-- If a session genuinely expires, both sides say so clearly: the TV shows
-  a brand new pairing code, the phone shows "the TV session ended — scan
-  new code".
-- The placement screen now has a one-line reminder to clear some space and
-  turn up the lights.
-- Calibration shows a clearer demo animation per move and a short flash of
-  confirmation when each move registers.
-- Returning players are offered "Use remembered setup" instead of
-  recalibrating from scratch every time — always still redoable, and it
-  safely falls back to full calibration if anything about the app has
-  changed.
-- A hidden `?dev=1` developer test mode exists for testing the game
-  without a real phone — it's visually unmistakable as a test tool and is
-  blocked from ever appearing on the real published site.
+Updated for the intended changes: the 2026-09-15 back-button suite (15/15)
+and the setup-flow suite (45/45) both used to assert the old behaviour and
+now assert the new.
 
-Full details, test results and the manual test checklist are in this
-round's write-up (motionquest-round-2026-09-16-ux-upgrade-delivery.md).
+Full regression re-run: everything else passes unchanged — calibration
+order (37/37), remote start (20/20), remembered setup (30/30), camera
+resilience (39/39), partial-body tracking (26/26), multiplayer (27/27),
+reconnect (15/15 + 12/12), solo build (16/16), and the rest.
 
 ===========================================================================
-HOW TO UPLOAD (same as always, PLUS server.js this time)
+HOW TO UPLOAD
 ===========================================================================
-1. Select BOTH "public" and "server.js" in this folder (not VERSION.txt,
-   not the outer motionquest-deploy folder itself).
-2. Drag them together onto
+1. Drag the "public" folder (not this whole motionquest-deploy folder, and
+   server.js is not needed this time) onto
    https://github.com/Don7888/motion-run/upload/main
-3. Tell Claude once it's uploaded, so it can verify and trigger the
-   deploy.
+2. Tell Claude once it's uploaded, so it can verify and trigger the deploy.
+
+If Explorer shows game.js at about 356 KB, you have this build.

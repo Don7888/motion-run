@@ -747,6 +747,31 @@
     50%      { transform: translateX(-50%) scale(1.04); }
   }
 
+  /* --- The live pose figure, bottom-right during setup (2026-09-16) ---
+     Bottom RIGHT specifically: the setup panels sit left (see
+     body.setup-mirror above) and the character mirrors in the middle, so this
+     is the one corner nothing else wants. */
+  #poseView {
+    position: fixed; right: 3%; bottom: 4%; z-index: 34;
+    width: 320px; padding: 10px 10px 8px;
+    border-radius: 20px; border: 4px solid var(--white);
+    background: rgba(11, 4, 26, 0.72);
+    box-shadow: 0 6px 0 rgba(11, 4, 26, 0.45);
+  }
+  #poseViewCanvas { display: block; width: 100%; height: auto; border-radius: 12px; }
+  #poseViewZones {
+    display: flex; margin-top: 6px;
+    font-family: 'Fredoka', sans-serif; font-size: 13px; font-weight: 700;
+    letter-spacing: 1px; color: rgba(255, 255, 255, 0.72);
+  }
+  #poseViewZones span { flex: 1; text-align: center; }
+  #poseViewWarn {
+    display: none; margin-top: 6px; padding: 5px 10px; border-radius: 10px;
+    background: var(--violet-brt); color: var(--white);
+    font-family: 'Fredoka', sans-serif; font-size: 16px; font-weight: 700; text-align: center;
+  }
+  #poseViewWarn.show { display: block; }
+
   /* 2026-09-16: a calm, small "the server connection blipped" banner — NOT a
      blocking screen, since a dropped socket recovers on its own (see
      openTvSocket()/scheduleTvReconnect() in game.js) and whatever panel is
@@ -1080,6 +1105,21 @@
   <div id="trackingWarning" style="display:none;"></div>
   <div id="connectionBanner" style="display:none;"></div>
 
+  <!-- 2026-09-16. Don: "It should be clear to the player moving left and
+       right where they have to movement and if they go off screen. Perhaps a
+       camera screen in the bottom corner to show the segment they need to
+       move to."
+       A live stick figure drawn from the pose points the phone already
+       tracks — not camera video. Same information (where you are, which zone
+       that puts you in, whether you're drifting out of shot) for a fraction
+       of the bandwidth, and no picture of the room ever leaves the phone.
+       Setup only; hidden during a run. -->
+  <div id="poseView" style="display:none;">
+    <canvas id="poseViewCanvas" width="320" height="240"></canvas>
+    <div id="poseViewWarn"></div>
+    <div id="poseViewZones"><span>LEFT</span><span>MIDDLE</span><span>RIGHT</span></div>
+  </div>
+
   <!-- 2026-09-16: developer test mode. Populated and shown only when
        DEV_MODE is true (see game.js) — absent from the DOM's visible
        behaviour entirely otherwise. Never styled to resemble real game UI. -->
@@ -1328,6 +1368,22 @@
       <p class="hint paused-option" id="pausedRecalRow">🔄 Recalibrate</p>
     </div>
     <p class="hint">🎮 ▲▼ + OK to choose · Back to end this run</p>
+  </div>
+
+  <!-- 2026-09-16 ("Back should always lead to the previous screen and only
+       when its on main menu and back is pressed then it gives you an option
+       to quit the game"). The era picker is home, so Back there opens this
+       rather than walking off the end of the app. Same ▲▼ + OK pattern as the
+       pause panel and the calibration review list, so there is one way to
+       drive a list of choices on this TV rather than three. -->
+  <div id="backMenuPanel" class="overlay-panel" style="display:none;">
+    <h1>Leaving already? 👋</h1>
+    <div class="paused-options">
+      <p class="hint paused-option selected" id="backMenuCancelRow">↩ Keep playing</p>
+      <p class="hint paused-option" id="backMenuSetupRow">🔄 Change controls / redo setup</p>
+      <p class="hint paused-option" id="backMenuQuitRow">🚪 Quit MotionQuest</p>
+    </div>
+    <p class="hint">🎮 ▲▼ + OK to choose · Back to keep playing</p>
   </div>
 
   <div id="gameOverPanel" class="overlay-panel" style="display:none;">

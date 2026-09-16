@@ -195,9 +195,38 @@
   // tv/game.js's handleInput(), which additionally ignores any punch
   // message that arrives while the previous punch's animation is still
   // playing — belt and braces against the same complaint.
-  const PUNCH_EXTENSION_FRAC = 0.52;
-  const PUNCH_VELOCITY_TORSO_FRAC = 2.0;
-  const PUNCH_COOLDOWN_MS = 700;
+  // 2026-09-16 ("Punch is going off too much") — Don's first real Fire TV
+  // session, and the third round in a row this has come up, so this time the
+  // fix is not just bigger numbers. Two NEW structural requirements land in
+  // checkPunch() alongside the raised bars below:
+  //
+  //   - a punch must be EXTENDING. A punch is by definition the arm going
+  //     out; the wrist's distance from the shoulder has to be growing between
+  //     the two confirming frames (PUNCH_MIN_EXTEND_RATE). An arm swinging
+  //     while the player steps sideways or lands a jump moves every bit as
+  //     fast as a punch — that is why speed alone kept firing — but it does
+  //     not extend, so this rejects it outright rather than by degree.
+  //   - a punch is roughly FORWARD/sideways, not vertical. Raising or
+  //     dropping an arm is mostly vertical wrist travel
+  //     (PUNCH_MAX_VERTICAL_RATIO), and was the other big false-positive
+  //     source: reaching up, or arms flying up on a jump.
+  //
+  // The raised bars are the cheap half of the fix. Extension went 0.52 →
+  // 0.62 of a torso (a real punch reaches much further than a relaxed arm's
+  // resting 0.5-ish), velocity 2.0 → 2.8 torsos/sec, and the cooldown 700 →
+  // 900ms so a single flurry cannot read as three punches.
+  const PUNCH_EXTENSION_FRAC = 0.62;
+  const PUNCH_VELOCITY_TORSO_FRAC = 2.8;
+  const PUNCH_COOLDOWN_MS = 900;
+  // Torso-fractions per second the wrist must be moving AWAY from the
+  // shoulder by. Deliberately small: the point is the SIGN (extending, not
+  // retracting or holding), not a second speed bar on top of the velocity
+  // one above.
+  const PUNCH_MIN_EXTEND_RATE = 0.35;
+  // |dy| / |dx| ceiling for the wrist's travel between frames. 2.2 still
+  // allows a downward-angled or slightly rising punch, while rejecting the
+  // near-vertical arm travel of a reach or a jump.
+  const PUNCH_MAX_VERTICAL_RATIO = 2.2;
   // 2026-09-11 ("punch triggers when I've not done a punch", randomly, no
   // clear pattern — real camera-mode testing): that "no clear pattern" is
   // the signature of single-frame POSE NOISE rather than a real gesture
@@ -234,6 +263,14 @@
   // box, it can't smash a crate or lose a life), so calibration can safely
   // use the original, more forgiving values instead. Real gameplay keeps
   // the stricter thresholds above completely untouched.
+  //
+  // 2026-09-16: these forgiving values now apply ONLY while the walkthrough
+  // is actually asking for the punch, not for the whole of setup. That was
+  // the other half of "even during setup the character is punching before
+  // punch is configured": during the left/right/jump/duck steps the loosened
+  // bars were still live, so stepping sideways in front of the camera read as
+  // a punch. Outside the punch step, setup now uses the same strict
+  // thresholds real play does. See punchTuning() below.
   const CAL_PUNCH_EXTENSION_FRAC = 0.38;
   const CAL_PUNCH_VELOCITY_TORSO_FRAC = 1.3;
   const CAL_PUNCH_COOLDOWN_MS = 450;
@@ -314,8 +351,17 @@
   const TILT_EXIT_DEG = 6;
   const MOTION_JUMP_TRIGGER = 14;
   // Raised alongside PUNCH_EXTENSION_FRAC/PUNCH_COOLDOWN_MS above — same
-  // "punch firing continuously" real-device fix, hold-phone side.
-  const MOTION_PUNCH_TRIGGER = 13;
+  // "punch firing continuously" real-device fix, hold-phone side. Raised
+  // again 2026-09-16, but only 13 → 14, matching MOTION_JUMP_TRIGGER so both
+  // gestures share one "this was a deliberate burst, not ordinary movement"
+  // bar. Deliberately a small raise: a real jab on a held phone reads about
+  // 15–16 and has to keep landing (mr_test_motion_classify pins both of those
+  // borderline cases), so pushing this number higher would start costing real
+  // punches. The substantive hold-phone fix this round is the structural one
+  // inside onDeviceMotion() — see the rotationSaysPunch comment there, which
+  // is what was actually letting ordinary vertical movement fire punches on
+  // any device that doesn't report rotationRate (i.e. most Androids).
+  const MOTION_PUNCH_TRIGGER = 14;
   const MOTION_ROTATION_LOW = 250;
   // How much more vertical (device Y-axis) acceleration than lateral
   // (X/Z) acceleration a reading needs before onDeviceMotion() is willing
@@ -780,6 +826,10 @@
       // for, so we only accept that one — see handleCalStepRequest().
       else if (msg.action === 'step_request') handleCalStepRequest(msg);
       else if (msg.action === 'step_arm') handleCalStepArm(msg);
+      // 2026-09-16: Back part-way through setup steps one stage back rather
+      // than tearing the whole thing down — see handleFramingBack().
+      else if (msg.action === 'framing_back') handleFramingBack();
+      else if (msg.action === 'placement_back') handlePlacementBack();
       // The TV ends setup — either because the last move just got ticked
       // off, or because OK was pressed on the remote. Either way the
       // player doesn't have to come back to the phone to start.
@@ -1141,6 +1191,31 @@
     sendCalibration('start', { mode: currentMode });
   }
 
+  // 2026-09-16 ("Back should always lead to the previous screen"): the TV
+  // sends these when Back is pressed part-way through setup, so each press
+  // steps back one stage instead of dumping the player out of setup or —
+  // worse, before this round — closing the app. The inverse of
+  // handleMovesAck/handlePlacementAck above.
+  function handleFramingBack() {
+    if (currentMode !== 'camera') return;
+    inCameraSetupGate = true;
+    framingActive = true;
+    framingGoodStreakStart = null;
+    expectedCalStep = null;
+    calStepArmed = false;
+    calSkipStepBtn.style.display = 'none';
+    if (calStuckTimer) clearTimeout(calStuckTimer);
+    calibrationHint.textContent = '👀 Watch the TV — line yourself up in the outline.';
+  }
+
+  function handlePlacementBack() {
+    if (currentMode !== 'camera') return;
+    inCameraSetupGate = true;
+    framingActive = false;
+    framingGoodStreakStart = null;
+    calibrationHint.textContent = '📺 Watch the TV — prop the phone up where it can see you.';
+  }
+
   // The step-by-step walkthrough itself lives on the TV (see tv/game.js) —
   // this screen just detects each move (same detectors as real play, routed
   // through calHandlers below) and tells the TV which one just happened.
@@ -1392,30 +1467,58 @@
     duck: () => fireDuck(),
   };
   // 2026-09-15 ("better to have the character there copying your movements").
-  // Every gesture detected during setup is now ALSO sent to the TV purely so
-  // the character can perform it, separately from whether it counts toward
-  // the move currently being asked for. That separation is the point: the
-  // player should see the character copy them the whole way through setup —
-  // including moves the walkthrough hasn't asked for yet, and including
-  // repeats of one it has already ticked off — while the strict one-move-at-
-  // a-time ordering that markCalDone() enforces stays exactly as it was.
+  // Gestures detected during setup are ALSO sent to the TV so the character
+  // can perform them — but ONLY the move the walkthrough is currently asking
+  // for, and only once it has actually counted the player in.
+  //
+  // This replaces the opposite rule (2026-09-15), which mirrored every
+  // detected gesture at every moment on purpose, "including moves the
+  // walkthrough hasn't asked for yet". Don, after the first real Fire TV
+  // session: "Punch is going off too much and even during setup the character
+  // is punching before punch is configured. The character is moving on setup
+  // before the movement is configured. The character should show the player
+  // what to do then the player follows the movement after the countdown."
+  //
+  // Which is right: the character is the DEMONSTRATION during the count-in
+  // (see the TV's playMoveDemo()) and the MIRROR after it. If it also twitched
+  // at every stray gesture, the player can't tell which of the two they are
+  // looking at, and a punch — the easiest gesture to trigger by accident
+  // while stepping sideways — made the character punch through the whole of
+  // setup.
+  //
+  // mirrorAllowed() is the gate. `calStepArmed` is set by the TV's step_arm
+  // (i.e. "GO"), so nothing mirrors during the count-in; `expectedCalStep`
+  // is the one move being asked for. Returning to centre is always allowed:
+  // it is the character coming back to rest, not an unasked-for move, and
+  // without it the character would stay stuck out in a side lane.
   //
   // Deliberately a `calibration` event rather than a real `input` message:
   // the TV starts a run on the first genuine jump/punch input, so sending
   // these as ordinary input would launch the game from the setup screen.
+  function mirrorAllowed(move) {
+    if (!calStepArmed) return false;
+    if (!expectedCalStep) return true; // TV hasn't named a step — old-TV fallback
+    return move === expectedCalStep;
+  }
   function sendMirror(action, value) {
     sendCalibration('mirror', value === undefined ? { action } : { action, value });
   }
   const calHandlers = {
-    lane: (dir) => { sendMirror('lane_set', dir < 0 ? -1 : 1); markCalDone(dir < 0 ? 'left' : 'right'); },
+    lane: (dir) => {
+      const move = dir < 0 ? 'left' : 'right';
+      if (mirrorAllowed(move)) sendMirror('lane_set', dir < 0 ? -1 : 1);
+      markCalDone(move);
+    },
     laneZone: (zone) => {
-      sendMirror('lane_set', zone);
+      // zone 0 is "back to the middle" — always mirrored, see above.
+      const move = zone === -1 ? 'left' : zone === 1 ? 'right' : null;
+      if (move === null || mirrorAllowed(move)) sendMirror('lane_set', zone);
       if (zone === -1) markCalDone('left');
       else if (zone === 1) markCalDone('right');
     },
-    jump: () => { sendMirror('jump'); markCalDone('jump'); },
-    punch: () => { sendMirror('punch'); markCalDone('punch'); },
-    duck: () => { sendMirror('duck'); markCalDone('duck'); },
+    jump: () => { if (mirrorAllowed('jump')) sendMirror('jump'); markCalDone('jump'); },
+    punch: () => { if (mirrorAllowed('punch')) sendMirror('punch'); markCalDone('punch'); },
+    duck: () => { if (mirrorAllowed('duck')) sendMirror('duck'); markCalDone('duck'); },
   };
   let actionHandlers = calHandlers;
 
@@ -2149,6 +2252,20 @@
       }
     }
 
+    // The little live figure on the TV (2026-09-16). Setup only: during a real
+    // run the player is watching the game, not a diagram of themselves, and
+    // there is no reason to spend the bandwidth. See sendPoseViewThrottled().
+    if (actionHandlers === calHandlers) {
+      // framingStatus is already computed once per frame further up — reused
+      // here deliberately rather than recomputed, so the figure's "you're
+      // drifting out of shot" warning can never disagree with the one the
+      // setup gate and the in-play drift check are using.
+      sendPoseViewThrottled(
+        keypoints, frameW, cameraVideo.videoHeight, cameraLaneZone,
+        poseCenterX, laneEnter, framingStatus,
+      );
+    }
+
     // Jump (hips rise) and duck (hips drop) share one baseline, because
     // they are the same measurement in opposite directions. Screen y grows
     // downward, so `rise` is positive when the player goes UP and `drop`
@@ -2372,6 +2489,58 @@
     }
   }
 
+  // =========================================================================
+  // POSE VIEW — the little live figure on the TV (2026-09-16)
+  // =========================================================================
+  // Don: "It should be clear to the player moving left and right where they
+  // have to movement and if they go off screen. Perhaps a camera screen in the
+  // bottom corner to show the segment they need to move to."
+  //
+  // This sends the SKELETON rather than camera frames. Same information for
+  // the purpose — where you are, which zone that puts you in, and whether you
+  // are drifting out of shot — for a tiny fraction of the bandwidth, and it
+  // travels over the relay the game already has rather than needing a video
+  // path through it. It also means no picture of anybody's living room ever
+  // leaves the phone, which matters more here than the realism would have.
+  //
+  // Coordinates are normalised 0..1 of the frame and MIRRORED on x, matching
+  // the phone's own preview (CSS scaleX(-1)) and the mirror metaphor: step to
+  // your left and the figure moves left, the same mapping the character on the
+  // TV already teaches.
+  const POSE_VIEW_SEND_INTERVAL_MS = 100; // 10/s — smooth enough to read, cheap
+  const POSE_VIEW_POINTS = [
+    'nose',
+    'left_shoulder', 'right_shoulder',
+    'left_elbow', 'right_elbow',
+    'left_wrist', 'right_wrist',
+    'left_hip', 'right_hip',
+    'left_knee', 'right_knee',
+    'left_ankle', 'right_ankle',
+  ];
+  let lastPoseViewSentT = 0;
+
+  function sendPoseViewThrottled(keypoints, frameW, frameH, zone, centerX, laneEnter, framing) {
+    const now = performance.now();
+    if (now - lastPoseViewSentT < POSE_VIEW_SEND_INTERVAL_MS) return;
+    lastPoseViewSentT = now;
+    if (!frameW || !frameH) return;
+    const round = (v) => Math.round(v * 1000) / 1000;
+    // A missing/unconfident point is sent as null rather than omitted, so the
+    // TV can keep the fixed order and just not draw that bone.
+    const pts = POSE_VIEW_POINTS.map((name) => {
+      const p = kp(keypoints, name);
+      if (!p) return null;
+      return [round(1 - p.x / frameW), round(p.y / frameH)];
+    });
+    // Zone boundaries, mirrored the same way. The player's own left is +x raw,
+    // so after mirroring the LEFT boundary is the smaller number — hence the
+    // swap here rather than at the drawing end.
+    const bounds = (centerX !== null && laneEnter)
+      ? [round(1 - (centerX + laneEnter) / frameW), round(1 - (centerX - laneEnter) / frameW)]
+      : null;
+    sendCalibration('poseview', { pts, zone, bounds, framing });
+  }
+
   // 2026-09-11 ("punch triggers when I've not done a punch", randomly) — see
   // PUNCH_MIN_SCORE/PUNCH_CONFIRM_WINDOW_MS's comment up top for the
   // reasoning. Two changes from the original single-frame check:
@@ -2385,6 +2554,33 @@
   //     peak, so it still confirms almost immediately; an isolated noisy
   //     frame — the "no clear pattern" signature — essentially never
   //     repeats on the very next sample too.
+  // Which punch thresholds apply right now. The loosened calibration values
+  // exist so a deliberate practice punch on the punch STEP lands easily; they
+  // were never meant to be live while the walkthrough is asking for a step to
+  // the left, which is how stepping sideways ended up registering as a punch
+  // (2026-09-16). Anywhere else — real play, and every non-punch setup step —
+  // uses the strict values.
+  function punchTuning() {
+    const inCalibration = actionHandlers === calHandlers;
+    const onPunchStep = inCalibration && expectedCalStep === 'punch';
+    if (onPunchStep) {
+      return {
+        velocity: CAL_PUNCH_VELOCITY_TORSO_FRAC,
+        extension: CAL_PUNCH_EXTENSION_FRAC,
+        cooldown: CAL_PUNCH_COOLDOWN_MS,
+        motionTrigger: CAL_MOTION_PUNCH_TRIGGER,
+        motionCooldown: CAL_MOTION_PUNCH_COOLDOWN_MS,
+      };
+    }
+    return {
+      velocity: PUNCH_VELOCITY_TORSO_FRAC,
+      extension: PUNCH_EXTENSION_FRAC,
+      cooldown: PUNCH_COOLDOWN_MS,
+      motionTrigger: MOTION_PUNCH_TRIGGER,
+      motionCooldown: MOTION_PUNCH_COOLDOWN_MS,
+    };
+  }
+
   function checkPunch(side, wrist, shoulder, torsoScale, now) {
     if (!wrist || !shoulder || wrist.score < PUNCH_MIN_SCORE) {
       lastWrist[side] = null;
@@ -2392,7 +2588,8 @@
       return;
     }
     const prev = lastWrist[side];
-    lastWrist[side] = { x: wrist.x, y: wrist.y, t: now };
+    const extension = dist(wrist, shoulder) / torsoScale;
+    lastWrist[side] = { x: wrist.x, y: wrist.y, t: now, ext: extension };
     if (!prev) return;
 
     const dt = (now - prev.t) / 1000;
@@ -2400,17 +2597,32 @@
     // near-zero value — a very short dt would blow up an otherwise modest
     // pixel jitter into a huge, spurious speed reading via division.
     if (dt <= 1 / (POSE_TARGET_FPS * 2) || dt > 0.5) return;
-    const speed = Math.hypot(wrist.x - prev.x, wrist.y - prev.y) / dt;
-    const extension = dist(wrist, shoulder) / torsoScale;
+    const dx = wrist.x - prev.x;
+    const dy = wrist.y - prev.y;
+    const speed = Math.hypot(dx, dy) / dt;
 
     // Calibration practice punches use the original, more forgiving
-    // thresholds — see the CAL_PUNCH_* comment up top for why.
-    const calibrating = actionHandlers === calHandlers;
-    const velocityThresh = calibrating ? CAL_PUNCH_VELOCITY_TORSO_FRAC : PUNCH_VELOCITY_TORSO_FRAC;
-    const extensionThresh = calibrating ? CAL_PUNCH_EXTENSION_FRAC : PUNCH_EXTENSION_FRAC;
-    const cooldown = calibrating ? CAL_PUNCH_COOLDOWN_MS : PUNCH_COOLDOWN_MS;
+    // thresholds — but ONLY on the punch step itself (2026-09-16). See the
+    // CAL_PUNCH_* comment up top.
+    const tune = punchTuning();
+    const velocityThresh = tune.velocity;
+    const extensionThresh = tune.extension;
+    const cooldown = tune.cooldown;
 
-    const qualifies = speed > velocityThresh * torsoScale && extension > extensionThresh;
+    // 2026-09-16, the two structural gates — see the PUNCH_MIN_EXTEND_RATE /
+    // PUNCH_MAX_VERTICAL_RATIO comments up top. Both are computed from the
+    // same two frames the speed above uses, so neither costs a frame of
+    // latency. prev.ext is absent for one frame after a fresh acquire, in
+    // which case the extension-rate gate can't be evaluated and this frame
+    // simply doesn't qualify — the next one will.
+    const extendRate = typeof prev.ext === 'number' ? (extension - prev.ext) / dt : null;
+    const extending = extendRate !== null && extendRate > PUNCH_MIN_EXTEND_RATE;
+    const mostlyHorizontal = Math.abs(dy) <= Math.abs(dx) * PUNCH_MAX_VERTICAL_RATIO;
+
+    const qualifies = speed > velocityThresh * torsoScale
+      && extension > extensionThresh
+      && extending
+      && mostlyHorizontal;
 
     if (!qualifies) {
       // Only drop an in-progress confirmation once it's aged out — a
@@ -2754,11 +2966,21 @@
     // the same real trigger in both cases — it's only disambiguating "was
     // this reading big enough to also look like a jump", not part of the
     // punch sensitivity itself.
-    const calibrating = actionHandlers === calHandlers;
-    const punchTrigger = calibrating ? CAL_MOTION_PUNCH_TRIGGER : MOTION_PUNCH_TRIGGER;
-    const punchCooldown = calibrating ? CAL_MOTION_PUNCH_COOLDOWN_MS : MOTION_PUNCH_COOLDOWN_MS;
+    // 2026-09-16: scoped to the punch STEP rather than all of setup, same as
+    // the camera path — see punchTuning().
+    const tune = punchTuning();
+    const punchTrigger = tune.motionTrigger;
+    const punchCooldown = tune.motionCooldown;
     if (mag > punchTrigger && now - lastPunchTime > punchCooldown) {
-      const rotationSaysPunch = !hasRotation || rot >= MOTION_ROTATION_LOW || mag <= MOTION_JUMP_TRIGGER;
+      // 2026-09-16 ("Punch is going off too much"): `rotationSaysPunch` used
+      // to accept `mag <= MOTION_JUMP_TRIGGER` as evidence of a punch, which
+      // on a device reporting no rotationRate at all (most real Androids)
+      // meant every vertical-dominant shake below the jump bar fell through
+      // to here and fired a punch. A punch on a held phone is a jab —
+      // lateral-dominant — so vertical-dominant motion is now rejected
+      // outright unless the device's own rotation reading positively says
+      // otherwise.
+      const rotationSaysPunch = hasRotation && rot >= MOTION_ROTATION_LOW;
       if (!looksVertical || rotationSaysPunch) {
         lastPunchTime = now; lastActionTime = now;
         actionHandlers.punch();
@@ -2808,6 +3030,29 @@
       Object.defineProperty(cameraVideo, 'videoWidth', { value: frameW, configurable: true });
       Object.defineProperty(cameraVideo, 'videoHeight', { value: frameH, configurable: true });
     },
+    // 2026-09-16: the calibration equivalent of enterRealPlay() above, plus a
+    // way to say which move the TV is currently asking for and whether it has
+    // counted the player in yet. Between them these are what let a test assert
+    // the mirror gate (mirrorAllowed()) without driving a whole TV walkthrough
+    // — the gate is the fix for "the character is punching before punch is
+    // configured", so it needs to be observable on its own.
+    enterCalibration(opts) {
+      actionHandlers = calHandlers;
+      inCameraSetupGate = false;
+      framingActive = false;
+      detectionEnabled = true;
+      const frameW = (opts && opts.frameW) || 640;
+      const frameH = (opts && opts.frameH) || 480;
+      Object.defineProperty(cameraVideo, 'videoWidth', { value: frameW, configurable: true });
+      Object.defineProperty(cameraVideo, 'videoHeight', { value: frameH, configurable: true });
+    },
+    setCalStep(step, armed) {
+      expectedCalStep = step || null;
+      calStepArmed = !!armed;
+      lastCalStepAt = 0; // don't let the per-step lockout swallow the next case
+    },
+    calStepState: () => ({ expected: expectedCalStep, armed: calStepArmed }),
+    punchTuning: () => punchTuning(),
     // Same reset finishCalibration()/recenter() do, exposed directly so a
     // test can start each case from a clean baseline.
     reset() {

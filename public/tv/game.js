@@ -3893,6 +3893,16 @@ const pausedResumeRow = document.getElementById('pausedResumeRow');
 const pausedRecalRow = document.getElementById('pausedRecalRow');
 const newHighScoreNote = document.getElementById('newHighScoreNote');
 
+// 2026-09-16: the Back menu shown on the era picker (home) — see
+// handleBackAction(). Rows are indexed in the order they appear on screen:
+// 0 = keep playing, 1 = redo setup, 2 = quit.
+const backMenuPanel = document.getElementById('backMenuPanel');
+const backMenuRowEls = [
+  document.getElementById('backMenuCancelRow'),
+  document.getElementById('backMenuSetupRow'),
+  document.getElementById('backMenuQuitRow'),
+];
+
 const levelSelectPanel = document.getElementById('levelSelectPanel');
 const levelGridEl = document.getElementById('levelGrid');
 const eraBadge = document.getElementById('eraBadge');
@@ -3912,6 +3922,7 @@ const PANELS = {
   levelSelect: levelSelectPanel,
   turnIntro: turnIntroPanel,
   leaderboard: leaderboardPanel,
+  backMenu: backMenuPanel,
 };
 
 // ---------------------------------------------------------------------
@@ -3949,6 +3960,7 @@ const CONTROL_BADGE_TEXT = {
   levelSelect: { text: '🎮 ◀ ▶ to choose · OK to travel', cls: 'remote' },
   turnIntro: null, // no input needed — see TURN_INTRO_DELAY
   leaderboard: { text: '🎮 Remote OK to continue', cls: 'remote' },
+  backMenu: { text: '🎮 ▲▼ + OK to choose', cls: 'remote' },
 };
 // The four setup stages, in order, so the badge can say "Setup 2/4" etc.
 // Kept separate from CAL_ORDER (the four MOVES inside the calibrating
@@ -3980,12 +3992,173 @@ function showPanel(which) {
   });
 }
 
+// =========================================================================
+// THE LIVE POSE FIGURE (2026-09-16)
+// =========================================================================
+// Don: "It should be clear to the player moving left and right where they
+// have to movement and if they go off screen. Perhaps a camera screen in the
+// bottom corner to show the segment they need to move to."
+//
+// Drawn from the skeleton the phone already computes (see
+// sendPoseViewThrottled() in controller.js), not from camera video: the same
+// information for a fraction of the bandwidth, over the relay the game
+// already has, and no picture of the room ever leaves the phone.
+//
+// Three things are on it, in the order they matter:
+//   1. WHICH ZONE you are in — the three columns, with yours lit. This is
+//      the "segment they need to move to" Don asked for, and the reason the
+//      whole thing exists: until now the only feedback for a lane step was
+//      the character moving, which told you it worked but never told you
+//      where the boundary was.
+//   2. WHERE YOU ARE — the figure itself, and the two boundary lines.
+//   3. WHETHER YOU ARE STILL IN SHOT — the warning strip, which is the
+//      failure a player otherwise discovers only by moves silently not
+//      registering.
+const poseViewEl = document.getElementById('poseView');
+const poseViewCanvas = document.getElementById('poseViewCanvas');
+const poseViewWarn = document.getElementById('poseViewWarn');
+const poseViewZonesEl = document.getElementById('poseViewZones');
+const poseViewCtx = poseViewCanvas ? poseViewCanvas.getContext('2d') : null;
+
+// Index pairs into POSE_VIEW_POINTS' fixed order (see controller.js). Kept as
+// indices rather than names because that's what comes over the wire.
+const POSE_VIEW_BONES = [
+  [1, 2], [1, 3], [3, 5], [2, 4], [4, 6],   // shoulders + arms
+  [1, 7], [2, 8], [7, 8],                    // torso
+  [7, 9], [9, 11], [8, 10], [10, 12],        // legs
+];
+const POSE_VIEW_WARN_TEXT = {
+  no_person: '👀 Step back into view',
+  too_close: '↩ Take a step back',
+  too_far: '↪ Come a bit closer',
+  off_center: '↔ Move back to the middle',
+};
+let poseView = null;          // latest {pts, zone, bounds, framing}
+let poseViewLastAt = 0;
+
+function handlePoseView(msg) {
+  poseView = {
+    pts: Array.isArray(msg.pts) ? msg.pts : [],
+    zone: typeof msg.zone === 'number' ? msg.zone : 0,
+    bounds: Array.isArray(msg.bounds) ? msg.bounds : null,
+    framing: msg.framing || 'good',
+  };
+  poseViewLastAt = performance.now();
+  renderPoseView();
+}
+
+function poseViewVisible() {
+  // Setup only, and only while a phone is actually feeding it. The 2s grace
+  // stops the panel flickering out between the phone's 10/s updates, or when
+  // the player briefly leaves frame entirely (which is exactly when the
+  // warning on it is most worth reading).
+  if (!poseViewEl) return false;
+  if (!calibrating && setupStage !== 'framing' && setupStage !== 'placement') return false;
+  return poseView !== null && performance.now() - poseViewLastAt < 2000;
+}
+
+function renderPoseView() {
+  if (!poseViewEl || !poseViewCtx) return;
+  const show = poseViewVisible();
+  poseViewEl.style.display = show ? 'block' : 'none';
+  if (!show) return;
+
+  const W = poseViewCanvas.width;
+  const H = poseViewCanvas.height;
+  const ctx = poseViewCtx;
+  ctx.clearRect(0, 0, W, H);
+
+  // Zone columns. Without bounds yet (the phone is still learning where the
+  // player's centre is) fall back to even thirds, so the panel still reads as
+  // three zones rather than appearing broken.
+  const [bL, bR] = poseView.bounds && poseView.bounds.length === 2
+    ? poseView.bounds
+    : [1 / 3, 2 / 3];
+  const xL = Math.max(0, Math.min(1, bL)) * W;
+  const xR = Math.max(0, Math.min(1, bR)) * W;
+  const cols = [[0, xL, -1], [xL, xR, 0], [xR, W, 1]];
+  for (const [x0, x1, zone] of cols) {
+    ctx.fillStyle = zone === poseView.zone ? 'rgba(110, 231, 255, 0.22)' : 'rgba(255, 255, 255, 0.05)';
+    ctx.fillRect(x0, 0, Math.max(0, x1 - x0), H);
+  }
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.45)';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([6, 6]);
+  [xL, xR].forEach((x) => { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); });
+  ctx.setLineDash([]);
+
+  // The figure. Off-frame points are drawn in a warning colour rather than
+  // dropped, so "my arm is outside the picture" is visible as such.
+  const pts = poseView.pts.map((p) => (p ? [p[0] * W, p[1] * H] : null));
+  const inFrame = (p) => p[0] >= 0 && p[0] <= W && p[1] >= 0 && p[1] <= H;
+  const ok = poseView.framing === 'good' || poseView.framing === 'ok';
+  ctx.lineCap = 'round';
+  ctx.lineWidth = 6;
+  ctx.strokeStyle = ok ? '#6ee7ff' : '#ffd166';
+  for (const [a, b] of POSE_VIEW_BONES) {
+    const pa = pts[a];
+    const pb = pts[b];
+    if (!pa || !pb) continue;
+    ctx.beginPath();
+    ctx.moveTo(pa[0], pa[1]);
+    ctx.lineTo(pb[0], pb[1]);
+    ctx.stroke();
+  }
+  // Head
+  const head = pts[0];
+  if (head) {
+    ctx.fillStyle = ok ? '#6ee7ff' : '#ffd166';
+    ctx.beginPath();
+    ctx.arc(head[0], head[1], 11, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // Anything outside the frame gets a ring, so a cut-off limb is obvious.
+  ctx.fillStyle = '#ff8a8a';
+  pts.forEach((p) => {
+    if (!p || inFrame(p)) return;
+    ctx.beginPath();
+    ctx.arc(Math.max(4, Math.min(W - 4, p[0])), Math.max(4, Math.min(H - 4, p[1])), 5, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  const warnText = POSE_VIEW_WARN_TEXT[poseView.framing];
+  poseViewWarn.textContent = warnText || '';
+  poseViewWarn.classList.toggle('show', !!warnText);
+  if (poseViewZonesEl) {
+    [...poseViewZonesEl.children].forEach((el, i) => {
+      el.style.color = (i - 1) === poseView.zone ? '#6ee7ff' : 'rgba(255,255,255,0.72)';
+    });
+  }
+}
+
+// ---------------------------------------------------------------------
+// BACK MENU (2026-09-16) — Don: "when back is pressed in the firestick
+// remote it leaves the app. This should not be the case. Back should always
+// lead to the previous screen and only when its on main menu and back is
+// pressed then it gives you an option to quit the game."
+//
+// Declared above syncPanel() because syncPanel() reads backMenuOpen and is
+// called during boot.
+// ---------------------------------------------------------------------
+let backMenuOpen = false;
+let backMenuSelection = 0; // 0 keep playing · 1 redo setup · 2 quit
+
 // A player working through setup (placement/framing/calibrating) on the
 // phone shouldn't fight the "Player connected!" panel for screen space —
 // any active setup stage overrides whatever `state.phase` would otherwise
 // show, until the phone signals it's done. Priority: placement > framing >
 // per-move calibration > normal phase-based panels.
 function syncPanel() {
+  // 2026-09-16: the Back menu is a modal — it outranks every other panel,
+  // including a run in progress, because it is the one thing standing
+  // between a Back press and the app closing. Nothing else may paint over
+  // it while it is up.
+  if (backMenuOpen) {
+    hudEl.style.display = 'none';
+    showPanel('backMenu');
+    updateControlBadge('backMenu');
+    return;
+  }
   // Score/lives belong to a run in progress. Leaving them up during
   // pairing/setup showed a stale score from the *previous* run next to a
   // "Step 1 of 4" setup prompt, which reads like the game is already going.
@@ -4427,11 +4600,64 @@ function showCalibrationStep() {
   syncPanel();
 }
 
+// ---------------------------------------------------------------------
+// THE CHARACTER DEMONSTRATES THE MOVE (2026-09-16)
+// ---------------------------------------------------------------------
+// Don: "The character should show the player what to do then the player
+// follows the movement after the countdown."
+//
+// So the count-in is now a demonstration, not just a number going down: the
+// character performs the move itself, twice, and is back at rest well before
+// GO so the player isn't copying a moving target. The mirror is gated OFF for
+// the whole of this beat (see applySetupMirror), which is what makes the two
+// halves legible — while the numbers are counting the character is showing
+// you, and after GO it is copying you.
+//
+// Beats are expressed as "seconds still left on the clock" so they read in the
+// same direction as the countdown itself: with CAL_COUNTDOWN_SECS = 3, the
+// demo plays at 2.4s and 1.2s remaining, leaving a clear second of stillness.
+const CAL_DEMO_BEATS = [2.4, 1.2];
+const CAL_DEMO_HOLD_SECS = 0.7; // how long a demo'd lane step stays out
+let calDemoReturnT = 0;
+
+function playMoveDemo(move) {
+  if (!setupMirrorActive) return;
+  if (move === 'left' || move === 'right') {
+    state.lane = move === 'left' ? 0 : 2;
+    setupMirrorLane = state.lane;
+    calDemoReturnT = CAL_DEMO_HOLD_SECS;
+  } else if (move === 'jump') {
+    if (state.grounded) {
+      state.grounded = false;
+      state.jumping = true;
+      state.vy = JUMP_VELOCITY;
+      audio.sfx('jump');
+    }
+  } else if (move === 'duck') {
+    if (state.grounded && state.duckTimer <= 0) {
+      audio.sfx('jump', { rate: 0.62 });
+      state.duckTimer = DUCK_DURATION;
+    }
+  } else if (move === 'punch') {
+    if (state.punchAnimTimer <= 0) {
+      audio.sfx('punch');
+      state.punchTimer = PUNCH_DURATION;
+      state.punchAnimTimer = PUNCH_ANIM_DURATION;
+    }
+  }
+}
+
 // Beat two: the move is now live and the phone is listening for it.
 function armCalibrationStep() {
   if (calIndex >= CAL_ORDER.length) return;
   calPhase = 'live';
   calLiveT = 0;
+  // Whatever the demo was doing, the character is the player's now — and it
+  // starts from centre and at rest, so "copy this" means copy it from where
+  // the demo left the character standing, not from mid-step.
+  calDemoReturnT = 0;
+  state.lane = 1;
+  setupMirrorLane = 1;
   const meta = CAL_META[CAL_ORDER[calIndex]];
   calCountdown.style.display = 'none';
   calMoveBlock.style.display = 'block';
@@ -4453,9 +4679,25 @@ function armCalibrationStep() {
 // Drives both beats. Called from animate().
 function updateCalibrationTimers(dt) {
   if (!calibrating) return;
+  // A lane step the character demo'd returns to centre on its own, so the
+  // character is standing still by the time the player is asked to copy it.
+  if (calDemoReturnT > 0) {
+    calDemoReturnT -= dt;
+    if (calDemoReturnT <= 0) {
+      calDemoReturnT = 0;
+      state.lane = 1;
+      setupMirrorLane = 1;
+    }
+  }
   if (calPhase === 'countdown') {
     const before = Math.ceil(calCountdownT);
+    const prevT = calCountdownT; // raw, not the ceiling — the demo beats are fractional
     calCountdownT -= dt;
+    // The demonstration itself (2026-09-16) — fires as the clock passes each
+    // beat, so it's frame-rate independent and can't double-fire.
+    for (const beat of CAL_DEMO_BEATS) {
+      if (prevT > beat && calCountdownT <= beat) playMoveDemo(CAL_ORDER[calIndex]);
+    }
     if (calCountdownT <= 0) {
       // A short "GO!" so the transition from counting to doing is visible,
       // then the move prompt. The phone is armed at GO, not after it.
@@ -4549,6 +4791,10 @@ function exitSetupMirror() {
   if (!setupMirrorActive) return;
   setupMirrorActive = false;
   document.body.classList.remove('setup-mirror');
+  // The live figure belongs to setup only — drop it the moment setup ends,
+  // rather than leaving a stale skeleton in the corner of a run.
+  poseView = null;
+  if (poseViewEl) poseViewEl.style.display = 'none';
   if (savedCamera) {
     // Put the camera back exactly as it was. updatePlaying() re-derives it
     // every frame once a run starts, but the countdown and the era picker sit
@@ -4569,6 +4815,24 @@ function exitSetupMirror() {
 // jump or punch, which would launch the game from the setup screen.
 function applySetupMirror(msg) {
   if (!calibrating) return;
+  // 2026-09-16: the same gate the phone now applies (see mirrorAllowed() in
+  // controller.js), enforced again on this side. Two reasons it lives in both
+  // places: a phone running an older build still sends every gesture, and the
+  // TV is the side that actually knows whether it is currently DEMONSTRATING
+  // the move — letting a player's gesture move the character mid-demo is
+  // exactly the confusion this round is fixing.
+  //
+  // 'live' is the only phase the player is being asked to act in: 'idle' and
+  // 'countdown' are the demo/count-in, 'success' is the tick, 'review' is the
+  // summary screen.
+  if (calPhase !== 'live') return;
+  const asking = calIndex < CAL_ORDER.length ? CAL_ORDER[calIndex] : null;
+  const move = msg.action === 'lane_set'
+    ? (msg.value === -1 ? 'left' : msg.value === 1 ? 'right' : null)
+    : msg.action;
+  // move === null is a return to centre — always allowed, it's the character
+  // coming back to rest rather than an unasked-for move.
+  if (move !== null && asking !== null && move !== asking) return;
   if (msg.action === 'lane_set') {
     setupMirrorLane = Math.max(0, Math.min(2, 1 + (msg.value || 0)));
     state.lane = setupMirrorLane;
@@ -4727,6 +4991,65 @@ function startCalReview() {
   renderCalReview();
   syncPanel();
 }
+// ---------------------------------------------------------------------
+// Stepping BACKWARDS through setup (2026-09-16). Don: "Back should always
+// lead to the previous screen." Each of these is the inverse of one forward
+// step, so the chain reads: review → last move → … → first move → framing →
+// placement → Ready. See handleBackAction() for where they're called.
+// ---------------------------------------------------------------------
+function redoLastCalibrationMove() {
+  const key = CAL_ORDER[CAL_ORDER.length - 1];
+  calDone[key] = false;
+  calSkipped[key] = false;
+  calRedoing = true;
+  calIndex = CAL_ORDER.length - 1;
+  showCalibrationStep();
+}
+
+function backToFramingFromMoves() {
+  // Mid-walkthrough, "previous screen" is the previous MOVE — they're
+  // separate prompts on the same panel, and stepping through them one at a
+  // time is what a player pressing Back is asking for.
+  if (!calRedoing && calIndex > 0) {
+    calIndex--;
+    const key = CAL_ORDER[calIndex];
+    calDone[key] = false;
+    calSkipped[key] = false;
+    showCalibrationStep();
+    return;
+  }
+  // A redo came from the review screen, so Back from it goes back there.
+  if (calRedoing) { calRedoing = false; startCalReview(); return; }
+  // On the very first move there is no earlier move. In camera mode the
+  // screen before it is framing; hold-phone and pad modes never had one, so
+  // they go out to the start of setup instead.
+  if (calMode === 'camera') {
+    calibrating = false;
+    calPhase = 'idle';
+    calAutoFinishT = 0;
+    calCountdown.style.display = 'none';
+    sendCalibrationControl('framing_back');
+    updateFramingUI(framingStatus || 'no_person', false);
+    movesConfirmSent = false;
+    syncPanel();
+    return;
+  }
+  restartConfiguration();
+}
+
+function backToPlacementFromFraming() {
+  sendCalibrationControl('placement_back');
+  startPlacementUI();
+}
+
+function backToReadyFromPlacement() {
+  // Nothing of setup has been established yet at this point, so the honest
+  // "previous screen" is the pre-setup Ready screen with the phone back on
+  // its own control-choice screen — exactly the state restartConfiguration()
+  // already produces, tested since 2026-09-15.
+  restartConfiguration();
+}
+
 function moveCalReviewSelection(delta) {
   const rows = reviewRows();
   calReviewIndex = (calReviewIndex + delta + rows.length) % rows.length;
@@ -5676,6 +5999,8 @@ function handleTvSocketMessage(ev) {
     else if (msg.event === 'done') finishCalibrationUI(msg.playerId);
     else if (msg.event === 'tracking') updateTrackingWarning(msg.status);
     else if (msg.event === 'mirror') applySetupMirror(msg);
+    // 2026-09-16: the live figure in the corner — see handlePoseView().
+    else if (msg.event === 'poseview') handlePoseView(msg);
     else if (msg.event === 'remembered') applyRememberedCalibration(msg);
   } else if (msg.type === 'controller_status') {
     // Per-player connected/reconnecting/left, from the server's own
@@ -5959,7 +6284,192 @@ function isSelectPress(e) {
 // combinations). The phone's ✕ Exit button (see play/controller.js) is the
 // guaranteed fallback if neither matches your specific Fire TV.
 function isBackPress(e) {
-  return e.key === 'Escape' || e.code === 'Escape' || e.code === 'Backspace';
+  return e.key === 'Escape' || e.code === 'Escape' || e.code === 'Backspace'
+    // 2026-09-16: on the real Fire TV the remote's Back also arrives as
+    // these on some browser/TWA combinations. Cheap to accept, and the
+    // symptom of missing one is the app closing under the player.
+    || e.key === 'BrowserBack' || e.code === 'BrowserBack' || e.keyCode === 27 || e.keyCode === 8;
+}
+
+// =========================================================================
+// BACK, CENTRALLY (2026-09-16)
+// =========================================================================
+// Don, after the first real Fire TV session: "When back is pressed in the
+// firestick remote it leaves the app. This should not be the case. Back
+// should always lead to the previous screen and only when its on main menu
+// and back is pressed then it gives you an option to quit the game."
+//
+// TWO separate things were wrong, and both had to be fixed:
+//
+//   1. The keydown handler never called preventDefault(). Even when the game
+//      DID act on Back, the browser then ALSO did its own thing with the same
+//      press — history.back() — and since /tv/ is the first entry in the
+//      installed app's history, "back" from there closes the app. So the game
+//      would obediently go to the era picker and the app would exit anyway.
+//
+//   2. The app on the TV is a Trusted Web Activity (PWABuilder shell around
+//      https://motionquest.onrender.com/tv/ — see the APK notes in the
+//      project), and a TWA's Back is a NAVIGATION, not necessarily a key
+//      event the page ever sees. A page that only listens for keydown cannot
+//      catch it at all on some builds.
+//
+// The fix for (2) is a history trap: push one sentinel entry at boot so the
+// app is never sitting on its first history entry, and treat the resulting
+// popstate as a Back press, immediately re-pushing the sentinel so there is
+// always exactly one spare entry to consume. The only way out is
+// quitApp(), which drops the trap deliberately.
+const BACK_TRAP_STATE = { mqBackTrap: true };
+let backTrapArmed = false;
+let quitting = false;
+// Set the moment a quit is actually authorised, before any exit is attempted,
+// so a test can assert "the app only tries to close itself after an explicit
+// confirmation" — see __mrDebug.backState(). quitSuppressed exists purely so
+// that assertion doesn't require closing the test's own browser page; it is
+// never set in a real session.
+let quitAttempted = false;
+let quitSuppressed = false;
+
+function armBackTrap() {
+  if (backTrapArmed) return;
+  try {
+    history.pushState(BACK_TRAP_STATE, '');
+    backTrapArmed = true;
+  } catch (err) {
+    // A sandboxed/file:// context can refuse pushState. Not fatal — the
+    // keydown path above still works; we just lose the TWA-navigation catch.
+    backTrapArmed = false;
+  }
+}
+
+window.addEventListener('popstate', () => {
+  if (quitting) return; // a deliberate exit — let it through
+  // Put the spare entry straight back, so the NEXT Back press has something
+  // to pop that isn't the app itself.
+  backTrapArmed = false;
+  armBackTrap();
+  handleBackAction();
+});
+
+armBackTrap();
+
+// The single place that decides what Back means, whatever delivered it.
+// Returns true if it consumed the press.
+function handleBackAction() {
+  // The Back menu is already open: Back closes it (i.e. "no, keep playing"),
+  // matching the panel's own on-screen hint.
+  if (backMenuOpen) { closeBackMenu(); return true; }
+
+  // A run, a pause or a countdown: out to the era picker. Unchanged from
+  // 2026-09-15 — Back mid-run has always gone straight to the picker rather
+  // than stopping at the pause screen, and exitToMenu() ends on
+  // openLevelSelect() so paused and mid-countdown land in the same place.
+  if (state.phase === 'playing' || state.phase === 'paused' || state.phase === 'countdown') {
+    exitToMenu();
+    return true;
+  }
+
+  // Results screens: back to the era picker rather than replaying the same
+  // era. Mid-multiplayer-game, this abandons the session (remaining turns
+  // included) — a half-finished leaderboard would be worse.
+  if (state.phase === 'gameover' || state.phase === 'leaderboard' || state.phase === 'turnIntro') {
+    if (multiplayer.active) endMultiplayer(); else openLevelSelect();
+    return true;
+  }
+
+  // Setup, innermost stage first. Each of these steps back ONE stage rather
+  // than dumping the player out of setup entirely, which is what "Back
+  // should always lead to the previous screen" asks for:
+  //   calibration review → back into the last move
+  //   a move            → the framing screen
+  //   framing           → the placement screen
+  //   placement         → the pre-setup Ready screen
+  if (calibrating && calPhase === 'review') { redoLastCalibrationMove(); return true; }
+  if (calibrating) { backToFramingFromMoves(); return true; }
+  if (setupStage === 'framing') { backToPlacementFromFraming(); return true; }
+  if (setupStage === 'placement') { backToReadyFromPlacement(); return true; }
+
+  // The pre-setup Ready screen sits between pairing and the picker; Back
+  // there goes out to the picker if setup is already done for somebody,
+  // otherwise it is effectively the first screen and offers the quit menu.
+  if (state.phase === 'ready') {
+    if (setupDonePlayers.size > 0) { openLevelSelect(); return true; }
+    openBackMenu();
+    return true;
+  }
+
+  // The era picker is home (Don's choice, 2026-09-16), and the pairing
+  // screen is the only thing before it, so Back on either offers the quit
+  // menu rather than leaving the app.
+  if (state.phase === 'levelSelect' || state.phase === 'pairing') {
+    openBackMenu();
+    return true;
+  }
+
+  // Anything unaccounted for still must not fall through to the browser,
+  // or the app closes. Offering the menu is the safe default.
+  openBackMenu();
+  return true;
+}
+
+function renderBackMenu() {
+  backMenuRowEls.forEach((el, i) => {
+    if (el) el.classList.toggle('selected', i === backMenuSelection);
+  });
+}
+
+function openBackMenu() {
+  if (backMenuOpen) return;
+  backMenuOpen = true;
+  // Always starts on "keep playing": the destructive row should never be
+  // one stray OK press away, least of all on a remote a child is holding.
+  backMenuSelection = 0;
+  renderBackMenu();
+  syncPanel();
+}
+
+function closeBackMenu() {
+  if (!backMenuOpen) return;
+  backMenuOpen = false;
+  syncPanel();
+}
+
+function moveBackMenuSelection(delta) {
+  if (!backMenuOpen) return;
+  const n = backMenuRowEls.length;
+  backMenuSelection = (backMenuSelection + delta + n) % n;
+  renderBackMenu();
+}
+
+function activateBackMenuSelection() {
+  if (!backMenuOpen) return;
+  const choice = backMenuSelection;
+  if (choice === 0) { closeBackMenu(); return; }
+  if (choice === 1) {
+    // Redoing setup keeps the 2026-09-15 behaviour Don asked for — it just
+    // isn't what a bare Back press does any more.
+    backMenuOpen = false;
+    restartConfiguration();
+    return;
+  }
+  quitApp();
+}
+
+// The ONLY way out of the app. Drops the history trap, then tries every exit
+// a TWA/browser might honour: window.close() works in an installed app
+// context, and going back past our sentinel is what closes the TWA shell.
+function quitApp() {
+  quitting = true;
+  quitAttempted = true;
+  backMenuOpen = false;
+  syncPanel();
+  if (quitSuppressed) return;
+  try { window.close(); } catch (err) { /* not permitted here — fall through */ }
+  try {
+    // Two entries back: our sentinel, then the page itself.
+    history.go(-2);
+  } catch (err) {
+    try { history.back(); } catch (err2) { /* nothing else to try */ }
+  }
 }
 
 window.addEventListener('keydown', (e) => {
@@ -5967,6 +6477,25 @@ window.addEventListener('keydown', (e) => {
   // require before audio may start.
   audio.unlock();
   if (isMutePress(e)) { setMuted(audio.toggleMute()); return; }
+
+  // Back is handled before anything else and ALWAYS calls preventDefault —
+  // see the BACK, CENTRALLY block above for why that one line matters more
+  // than the rest of this handler put together.
+  if (isBackPress(e)) {
+    e.preventDefault();
+    handleBackAction();
+    return;
+  }
+
+  // The Back menu owns the d-pad while it is up, so an OK press can't reach
+  // the screen behind it.
+  if (backMenuOpen) {
+    if (e.code === 'ArrowUp' || e.code === 'KeyW') { moveBackMenuSelection(-1); return; }
+    if (e.code === 'ArrowDown' || e.code === 'KeyS') { moveBackMenuSelection(1); return; }
+    if (isSelectPress(e) || e.code === 'KeyF') { activateBackMenuSelection(); return; }
+    return;
+  }
+
   if (setupStage === 'placement' && isSelectPress(e)) {
     sendCalibrationControl('placement_ack');
     return;
@@ -5976,33 +6505,9 @@ window.addEventListener('keydown', (e) => {
     return;
   }
 
-  // Back while playing: 2026-09-15 ("during the level if you press back on
-  // the firestick remote it goes back to level select") — straight to the
-  // era picker, no pause stop-off in between. Pausing is still there for
-  // whoever wants it (the phone's own ⏸ button, or solo mode's on-screen
-  // one — see handleInput's pause_toggle), Back on the remote just isn't
-  // the way there any more. exitToMenu() already ends on openLevelSelect(),
-  // so paused and mid-countdown Back presses land in the same place too.
-  if (isBackPress(e)) {
-    if (state.phase === 'playing' || state.phase === 'paused' || state.phase === 'countdown') {
-      exitToMenu();
-      return;
-    }
-    // From the results screens, Back goes to the era picker rather than
-    // straight back into the same level again. Mid-multiplayer-game, Back
-    // abandons the whole session (remaining turns included) rather than
-    // just the current one — a half-finished leaderboard would be worse.
-    if (state.phase === 'gameover'
-        || state.phase === 'ready' || state.phase === 'leaderboard') {
-      if (multiplayer.active) endMultiplayer(); else openLevelSelect();
-      return;
-    }
-    // 2026-09-15 ("if you press back on the level select it goes back to
-    // configuration") — one more Back press from the era picker sends every
-    // connected phone back to choosing motion/pad and recalibrating, rather
-    // than being stuck with whatever was set up at the start of the session.
-    if (state.phase === 'levelSelect') { restartConfiguration(); return; }
-  }
+  // (Back itself is handled at the top of this listener — see the BACK,
+  // CENTRALLY block above. It used to live here, without preventDefault(),
+  // which is how the app ended up closing itself on every Back press.)
 
   // Difficulty (2026-09-10). Left/right on the Ready screen already sets
   // party size (via the phone's lane gestures and, since they route through
@@ -6746,6 +7251,10 @@ function animate() {
   }
   updateCalibrationTimers(dt);
   updateSetupMirror(dt);
+  // Driven from here as well as on each incoming message, so the panel hides
+  // itself when a phone stops feeding it (see poseViewVisible()'s grace
+  // window) rather than leaving a frozen skeleton on screen.
+  if (poseViewEl && (poseViewEl.style.display !== 'none') !== poseViewVisible()) renderPoseView();
 
   // Auto-advance out of the framing check once "good" framing has held for
   // a moment — the remote OK press (see keydown handler above) can also
@@ -6808,6 +7317,10 @@ window.__mrDebug = {
     countdownT: calCountdownT,
     liveT: calLiveT,
     flashT: calFlashT,
+    // 2026-09-16: the character-demo beat. demoReturnT > 0 means a demo'd
+    // lane step is still out and has not returned to centre yet.
+    demoReturnT: calDemoReturnT,
+    demoBeats: [...CAL_DEMO_BEATS],
     reviewIndex: calReviewIndex,
     mirrorActive: setupMirrorActive,
     cam: { x: +camera.position.x.toFixed(2), y: +camera.position.y.toFixed(2), z: +camera.position.z.toFixed(2) },
@@ -6822,6 +7335,34 @@ window.__mrDebug = {
   // relayed phone message would, without needing a fake controller socket.
   applyRemembered: (mode, completedMoves) => applyRememberedCalibration({ mode, completedMoves }),
   devMode: () => DEV_MODE,
+  // 2026-09-16 Back-button round. `backState` is the only way to observe the
+  // quit menu and the history trap without a real Fire TV in the room;
+  // `pressBack` drives the SAME entry point the remote and the TWA's own
+  // back navigation both go through, so a test exercises the real chain
+  // rather than a parallel copy of it. `quitAttempted` is what proves the
+  // app only ever tries to close itself after an explicit confirmation.
+  backState: () => ({
+    menuOpen: backMenuOpen,
+    selection: backMenuSelection,
+    trapArmed: backTrapArmed,
+    quitting,
+    quitAttempted,
+  }),
+  pressBack: () => handleBackAction(),
+  backSelect: (delta) => moveBackMenuSelection(delta),
+  backActivate: () => activateBackMenuSelection(),
+  suppressQuit: (on) => { quitSuppressed = !!on; },
+  // 2026-09-16: the live pose figure. `visible` is the real predicate the
+  // renderer uses, so a test asserts what a player would actually see.
+  poseViewState: () => ({
+    visible: poseViewVisible(),
+    shown: !!poseViewEl && poseViewEl.style.display !== 'none',
+    zone: poseView ? poseView.zone : null,
+    framing: poseView ? poseView.framing : null,
+    bounds: poseView ? poseView.bounds : null,
+    points: poseView ? poseView.pts.filter(Boolean).length : 0,
+    warnText: poseViewWarn ? poseViewWarn.textContent : '',
+  }),
   calSelect: (delta) => moveCalReviewSelection(delta),
   calActivate: () => activateCalReviewRow(),
   calSkipStep: () => skipCalibrationStep(),
@@ -7144,6 +7685,20 @@ if (SOLO_MODE) {
   // treats them interchangeably (starting a run, retrying after game over)
   // — see the ready/gameover branches above.
   soloTap('soloRetryBtn', { action: 'jump', explicit: true });
+
+  // 2026-09-16 Back menu, solo build: real buttons for the two safe choices.
+  // Quit is deliberately NOT given a button here — there is no app shell to
+  // close in this build, it's a page in a browser, so the row exists only for
+  // parity with /tv and the remote path that drives it.
+  const soloBackTap = (id, fn) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const fire = (e) => { e.preventDefault(); fn(); };
+    el.addEventListener('touchstart', fire, { passive: false });
+    el.addEventListener('click', fire);
+  };
+  soloBackTap('soloBackCancelBtn', () => closeBackMenu());
+  soloBackTap('soloBackSetupBtn', () => { backMenuOpen = false; restartConfiguration(); });
 
   // Tapping a level card selects AND launches it in one tap — there's no
   // remote to press OK with afterwards, so the two steps every other build

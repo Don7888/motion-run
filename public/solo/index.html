@@ -1271,6 +1271,25 @@
     </div>
   </div>
 
+  <!-- 2026-09-16: the same Back menu /tv gained this round. It has to exist
+       here too — game.js is shared, and a panel missing on this page means a
+       Back press lands on a screen with nothing on it. (Same trap as the
+       2026-09-15 round, where panels added only to /tv stopped this build
+       loading at all.) Solo has no Fire TV remote, so the two non-destructive
+       choices are real buttons as well, matching the pause panel above. -->
+  <div id="backMenuPanel" class="overlay-panel" style="display:none;">
+    <h1>Leaving already? 👋</h1>
+    <div class="paused-options">
+      <p class="hint paused-option selected" id="backMenuCancelRow">↩ Keep playing</p>
+      <p class="hint paused-option" id="backMenuSetupRow">🔄 Change controls / redo setup</p>
+      <p class="hint paused-option" id="backMenuQuitRow">🚪 Quit MotionQuest</p>
+    </div>
+    <div class="solo-panel-actions">
+      <button class="btn btn-primary" id="soloBackCancelBtn" type="button">↩ Keep playing</button>
+      <button class="btn btn-secondary" id="soloBackSetupBtn" type="button">🔄 Redo setup</button>
+    </div>
+  </div>
+
   <div id="gameOverPanel" class="overlay-panel" style="display:none;">
     <h1 id="gameOverTitle">Run Over!</h1>
     <div class="score-big"><span id="finalScore">0</span> pts</div>
